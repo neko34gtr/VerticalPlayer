@@ -236,6 +236,17 @@ namespace VerticalPlayer
             {
                 try
                 {
+                    if (Player.NaturalVideoWidth >= 1920)
+                    {
+                        PlayerScale.ScaleX = 2.0;
+                        PlayerScale.ScaleY = 2.0;
+                    }
+                    else
+                    {
+                        // それ以外はリセット（または必要に応じて別の初期値）
+                        PlayerScale.ScaleX = 1.0;
+                        PlayerScale.ScaleY = 1.0;
+                    }
                     Player.Play();
                     _isPlaying = true;
                     UpdatePlayIcon();
