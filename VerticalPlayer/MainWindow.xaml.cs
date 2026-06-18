@@ -286,7 +286,7 @@ namespace VerticalPlayer
                 _pendingSeek = 0;
             }
         }
-
+        // XAML側で <MediaElement x:Name="Player" MediaEnded="Player_MediaEnded" ... /> と設定されている前提です。
         private void Player_MediaEnded(object sender, RoutedEventArgs e)
         {
             if (LoopCheck.IsChecked == true)
@@ -296,10 +296,44 @@ namespace VerticalPlayer
             }
             else
             {
-                _isPlaying = false;
-                UpdatePlayIcon();
-                _timer.Stop();
+                // フォルダ内の次のファイルを再生して止めるかを判定
+                if (!PlayNextVideoInFolder())
+                {
+                    _isPlaying = false;
+                    UpdatePlayIcon();
+                    _timer.Stop();
+                }
             }
+        }
+
+        private bool PlayNextVideoInFolder()
+        {
+            if (string.IsNullOrEmpty(Player.Source?.LocalPath)) return false;
+
+            string currentPath = Player.Source.LocalPath;
+            string? directory = Path.GetDirectoryName(currentPath);
+            if (string.IsNullOrEmpty(directory)) return false;
+
+            string[] extensions = { "*.mp4", "*.mkv", "*.avi", "*.wmv", "*.mov" };
+            List<string> fileList = new List<string>();
+            foreach (var ext in extensions)
+            {
+                fileList.AddRange(Directory.GetFiles(directory, ext).OrderBy(f => f));
+            }
+
+            if (fileList.Count == 0) return false;
+
+            int currentIndex = fileList.FindIndex(f => f.Equals(currentPath, StringComparison.OrdinalIgnoreCase));
+
+            // 次のファイルが存在するか確認（リストの最後ではない場合）
+            if (currentIndex >= 0 && currentIndex < fileList.Count - 1)
+            {
+                string nextPath = fileList[currentIndex + 1];
+                LoadVideo(nextPath);
+                return true;
+            }
+
+            return false;
         }
 
         // ─────────────────────────────────────────────────────────────────
