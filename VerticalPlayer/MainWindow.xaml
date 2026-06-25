@@ -363,7 +363,7 @@
             </Grid.RowDefinitions>
 
             <!-- ========== タイトルバー ========== -->
-            <Border Grid.Row="0" Background="#0A1020" CornerRadius="14,14,0,0"
+            <Border x:Name="TitleBar" Grid.Row="0" Background="#0A1020" CornerRadius="14,14,0,0"
                     MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
                 <Grid Margin="12,0">
                     <Grid.ColumnDefinitions>
@@ -477,7 +477,7 @@
             </Border>
 
             <!-- ========== コントロールパネル ========== -->
-            <Border Grid.Row="2" Background="{StaticResource BgSurface}"
+            <Border x:Name="ControlPanel" Grid.Row="2" Background="{StaticResource BgSurface}"
                     BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0">
                 <StackPanel Margin="16,12,16,14">
 

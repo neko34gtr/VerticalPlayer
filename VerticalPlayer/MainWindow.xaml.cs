@@ -542,8 +542,20 @@ namespace VerticalPlayer
                 ? vh / vw
                 : vw / vh;
 
-            // 現在のウィンドウ幅を基準に高さを調整
+            // タスクバーを除いた最大利用可能領域を取得
+            double waWidth = SystemParameters.WorkArea.Width;
+            double waHeight = SystemParameters.WorkArea.Height;
+
+            // 現在のウィンドウ幅を基準に高さを計算
             double newH = this.Width / dispRatio;
+
+            // 【修正】計算された高さがタスクバーの限界を超える場合、縦に収まるよう幅を再計算
+            if (newH > waHeight)
+            {
+                newH = waHeight;
+                this.Width = newH * dispRatio;
+            }
+
             if (newH < 300) { newH = 300; this.Width = newH * dispRatio; }
             this.Height = newH;
             EnsureOnScreen();
@@ -722,8 +734,25 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         private void MainWindow_KeyDown(object sender, KeyEventArgs e)
         {
+            // Alt + Enter のトグル判定
+            if ((e.Key == Key.System && e.SystemKey == Key.Enter) &&
+                (Keyboard.Modifiers & ModifierKeys.Alt) == ModifierKeys.Alt)
+            {
+                ToggleFullScreen();
+                e.Handled = true;
+                return;
+            }
+
             switch (e.Key)
             {
+                case Key.Escape:
+                    // 全画面表示中の場合のみ解除
+                    if (TitleBar.Visibility == Visibility.Collapsed)
+                    {
+                        ToggleFullScreen();
+                        e.Handled = true;
+                    }
+                    break;
                 case Key.Space:
                     TogglePlayPause(); e.Handled = true; break;
                 case Key.Left:
@@ -742,6 +771,49 @@ namespace VerticalPlayer
                     MaxRestore_Click(sender, e); e.Handled = true; break;
             }
         }
+
+        // ── 全画面表示用の状態退避変数 ──
+        private double _preFullScreenWidth = 460;
+        private double _preFullScreenHeight = 860;
+        private double _preFullScreenLeft = 0;
+        private double _preFullScreenTop = 0;
+
+        private void ToggleFullScreen()
+        {
+            if (TitleBar == null || ControlPanel == null) return;
+
+            if (TitleBar.Visibility == Visibility.Visible)
+            {
+                // ── 全画面化 ──
+                _preFullScreenWidth = this.Width;
+                _preFullScreenHeight = this.Height;
+                _preFullScreenLeft = this.Left;
+                _preFullScreenTop = this.Top;
+
+                this.ResizeMode = ResizeMode.NoResize;
+
+                TitleBar.Visibility = Visibility.Collapsed;
+                ControlPanel.Visibility = Visibility.Collapsed;
+
+                this.WindowState = WindowState.Maximized;
+            }
+            else
+            {
+                // ── 全画面解除 ──
+                this.WindowState = WindowState.Normal;
+
+                TitleBar.Visibility = Visibility.Visible;
+                ControlPanel.Visibility = Visibility.Visible;
+
+                this.ResizeMode = ResizeMode.CanResizeWithGrip;
+
+                this.Width = _preFullScreenWidth;
+                this.Height = _preFullScreenHeight;
+                this.Left = _preFullScreenLeft;
+                this.Top = _preFullScreenTop;
+            }
+        }
+
         // ─────────────────────────────────────────────────────────────────
         // エラーログ出力機能 ---
         // ─────────────────────────────────────────────────────────────────
