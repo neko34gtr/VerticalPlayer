@@ -769,6 +769,14 @@ namespace VerticalPlayer
                     Mute_Click(sender, e); e.Handled = true; break;
                 case Key.F:
                     MaxRestore_Click(sender, e); e.Handled = true; break;
+                case Key.H:
+                    // 動画の左右反転（鏡状態）をトグル切り替え
+                    if (PlayerFlipTransform != null)
+                    {
+                        PlayerFlipTransform.ScaleX = (PlayerFlipTransform.ScaleX == 1) ? -1 : 1;
+                    }
+                    e.Handled = true;
+                    break;
             }
         }
 
