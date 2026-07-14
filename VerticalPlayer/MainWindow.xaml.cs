@@ -66,7 +66,11 @@ namespace VerticalPlayer
     public partial class MainWindow : Window
     {
         // ── 定数 ──
-        private const string ConfigPath = "VerticalPlayer.json";
+        // 引数渡しで実行した場合に、カレントディレクトリが変わることがあるため、常に実行ファイルのあるディレクトリを基準にする
+        private static readonly string ConfigPath = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "VerticalPlayer.json"
+        );
 
         // ── 状態フラグ ──
         private bool _isDragging = false;
@@ -77,7 +81,17 @@ namespace VerticalPlayer
 
         // ── タイマー ──
         private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(100) };
+        private readonly DispatcherTimer _osdTimer = new() { Interval = TimeSpan.FromSeconds(3) };
 
+        // ── 全画面状態退避 ──
+        private bool _isFullScreen = false;
+        private double _preFullScreenWidth = 460;
+        private double _preFullScreenHeight = 860;
+        private double _preFullScreenLeft = 0;
+        private double _preFullScreenTop = 0;
+
+        // ── OSDシークドラッグ ──
+        private bool _isOsdDragging = false;
         // ── プリセットコレクション（バインド用） ──
         private readonly ObservableCollection<PresetSettings> _presets = new();
 
@@ -95,6 +109,10 @@ namespace VerticalPlayer
             PresetList.ItemsSource = _presets;
 
             _timer.Tick += Timer_Tick;
+            _osdTimer.Tick += OsdTimer_Tick;
+
+            // VideoArea マウス移動でOSD表示
+            VideoArea.MouseMove += VideoArea_MouseMove;
 
             // キーボードショートカット
             this.KeyDown += MainWindow_KeyDown;
@@ -213,6 +231,11 @@ namespace VerticalPlayer
         }
 
         // ─────────────────────────────────────────────────────────────────
+        // 外部からの動画読み込み（コマンドライン引数 / 関連付け）
+        // ─────────────────────────────────────────────────────────────────
+        public void LoadVideoFromArg(string path) => LoadVideo(path);
+
+        // ─────────────────────────────────────────────────────────────────
         // 動画読み込み共通処理
         // ─────────────────────────────────────────────────────────────────
         private void LoadVideo(string path, double seekSeconds = 0)
@@ -260,7 +283,8 @@ namespace VerticalPlayer
                 catch (Exception ex)
                 {
                     // ここでエラーが出ればログへ書き出す
-                    File.AppendAllText("play_error.txt", $"{DateTime.Now} | Retry-Play Error: {ex.Message}{Environment.NewLine}");
+                    string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "play_error.txt");
+                    File.AppendAllText(logPath, $"{DateTime.Now} | Retry-Play Error: {ex.Message}{Environment.NewLine}", new System.Text.UTF8Encoding(false));
                 }
             }), DispatcherPriority.Loaded); // ここを Background から Loaded に変更
 
@@ -341,15 +365,25 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         private void Timer_Tick(object? sender, EventArgs e)
         {
-            if (_isDragging) return;
             if (!Player.NaturalDuration.HasTimeSpan) return;
-
             double total = Player.NaturalDuration.TimeSpan.TotalSeconds;
             if (total <= 0) return;
 
-            SeekBar.Maximum = total;
-            SeekBar.Value = Player.Position.TotalSeconds;
-            TimeDisplay.Text = $"{Fmt(Player.Position)} / {Fmt(Player.NaturalDuration.TimeSpan)}";
+            double pos = Player.Position.TotalSeconds;
+            string timeStr = $"{Fmt(Player.Position)} / {Fmt(Player.NaturalDuration.TimeSpan)}";
+
+            if (!_isDragging)
+            {
+                SeekBar.Maximum = total;
+                SeekBar.Value = pos;
+                TimeDisplay.Text = timeStr;
+            }
+            if (!_isOsdDragging)
+            {
+                OsdSeekBar.Maximum = total;
+                OsdSeekBar.Value = pos;
+                OsdTimeDisplay.Text = timeStr;
+            }
         }
 
         private static string Fmt(TimeSpan ts)
@@ -435,6 +469,15 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         // シークバー
         // ─────────────────────────────────────────────────────────────────
+        // クリックした瞬間に即シーク（Thumbを掴む前でも反応）
+        private void SeekBar_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (sender is not Slider sl || !Player.NaturalDuration.HasTimeSpan) return;
+            double pct = Math.Clamp(e.GetPosition(sl).X / sl.ActualWidth, 0, 1);
+            double t = sl.Maximum * pct;
+            sl.Value = t;
+            Player.Position = TimeSpan.FromSeconds(t);
+        }
         private void SeekBar_DragStarted(object sender, DragStartedEventArgs e) => _isDragging = true;
 
         private void SeekBar_DragCompleted(object sender, DragCompletedEventArgs e)
@@ -729,14 +772,18 @@ namespace VerticalPlayer
         private void Close_Click(object sender, RoutedEventArgs e)
             => this.Close();
 
+        private void FullScreen_Click(object sender, RoutedEventArgs e)
+            => ToggleFullScreen();
+
         // ─────────────────────────────────────────────────────────────────
         // キーボードショートカット
         // ─────────────────────────────────────────────────────────────────
         private void MainWindow_KeyDown(object sender, KeyEventArgs e)
         {
-            // Alt + Enter のトグル判定
-            if ((e.Key == Key.System && e.SystemKey == Key.Enter) &&
-                (Keyboard.Modifiers & ModifierKeys.Alt) == ModifierKeys.Alt)
+            // F11 / Alt+Enter で全画面トグル
+            if (e.Key == Key.F11 ||
+                (e.Key == Key.System && e.SystemKey == Key.Enter &&
+                 (Keyboard.Modifiers & ModifierKeys.Alt) == ModifierKeys.Alt))
             {
                 ToggleFullScreen();
                 e.Handled = true;
@@ -747,11 +794,7 @@ namespace VerticalPlayer
             {
                 case Key.Escape:
                     // 全画面表示中の場合のみ解除
-                    if (TitleBar.Visibility == Visibility.Collapsed)
-                    {
-                        ToggleFullScreen();
-                        e.Handled = true;
-                    }
+                    if (_isFullScreen) { ToggleFullScreen(); e.Handled = true; }
                     break;
                 case Key.Space:
                     TogglePlayPause(); e.Handled = true; break;
@@ -780,54 +823,119 @@ namespace VerticalPlayer
             }
         }
 
-        // ── 全画面表示用の状態退避変数 ──
-        private double _preFullScreenWidth = 460;
-        private double _preFullScreenHeight = 860;
-        private double _preFullScreenLeft = 0;
-        private double _preFullScreenTop = 0;
+        /// <summary>
+        ///  WPFの MediaElement は、ウィンドウの状態（WindowState）が最大化や通常サイズへ切り替わる際のレイアウト再評価に伴い、
+        ///  内部の再生コンポーネントがリセットされて再生位置が先頭（0秒）に戻ってしまう既知の挙動があります。
+        /// 切り替え直前に現在の再生位置を退避させ、切り替え後に再適用（および再ロード発火に備えた一時変数への退避）を行うことで、この巻き戻り現象を確実に潰します。
+        /// </summary>
 
         private void ToggleFullScreen()
         {
             if (TitleBar == null || ControlPanel == null) return;
 
-            if (TitleBar.Visibility == Visibility.Visible)
+            // 【修正】切り替え時の巻き戻り対策として現在の再生位置を退避
+            TimeSpan currentPos = Player.Position;
+            if (Player.NaturalDuration.HasTimeSpan)
             {
-                // ── 全画面化 ──
+                _pendingSeek = currentPos.TotalSeconds;
+            }
+
+            if (!_isFullScreen)
+            {
+                // 全画面化
                 _preFullScreenWidth = this.Width;
                 _preFullScreenHeight = this.Height;
                 _preFullScreenLeft = this.Left;
                 _preFullScreenTop = this.Top;
 
                 this.ResizeMode = ResizeMode.NoResize;
-
                 TitleBar.Visibility = Visibility.Collapsed;
                 ControlPanel.Visibility = Visibility.Collapsed;
-
                 this.WindowState = WindowState.Maximized;
+                _isFullScreen = true;
             }
             else
             {
-                // ── 全画面解除 ──
+                // 全画面解除
+                OsdPanel.Visibility = Visibility.Collapsed;
+                _osdTimer.Stop();
                 this.WindowState = WindowState.Normal;
-
                 TitleBar.Visibility = Visibility.Visible;
                 ControlPanel.Visibility = Visibility.Visible;
-
                 this.ResizeMode = ResizeMode.CanResizeWithGrip;
-
                 this.Width = _preFullScreenWidth;
                 this.Height = _preFullScreenHeight;
                 this.Left = _preFullScreenLeft;
                 this.Top = _preFullScreenTop;
+                _isFullScreen = false;
             }
+
+            // 【修正】退避した位置へシークし直す
+            Player.Position = currentPos;
         }
+
+        // ─────────────────────────────────────────────────────────────────
+        // OSD 制御
+        // ─────────────────────────────────────────────────────────────────
+        private void VideoArea_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (!_isFullScreen) return;
+            OsdSeekBar.Maximum = SeekBar.Maximum;
+            OsdVolumeSlider.Value = VolumeSlider.Value;
+            OsdPanel.Visibility = Visibility.Visible;
+            _osdTimer.Stop();
+            _osdTimer.Start();
+        }
+
+        private void OsdTimer_Tick(object? sender, EventArgs e)
+        {
+            _osdTimer.Stop();
+            if (_isOsdDragging) return;
+            OsdPanel.Visibility = Visibility.Collapsed;
+        }
+
+        private void Osd_MouseEnter(object sender, MouseEventArgs e) => _osdTimer.Stop();
+
+        private void Osd_MouseLeave(object sender, MouseEventArgs e)
+        {
+            if (!_isOsdDragging) _osdTimer.Start();
+        }
+
+        private void OsdSeekBar_DragStarted(object sender, DragStartedEventArgs e) => _isOsdDragging = true;
+
+        private void OsdSeekBar_DragCompleted(object sender, DragCompletedEventArgs e)
+        {
+            Player.Position = TimeSpan.FromSeconds(OsdSeekBar.Value);
+            SeekBar.Value = OsdSeekBar.Value;
+            _isOsdDragging = false;
+        }
+
+        private void OsdSeekBar_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (sender is not Slider sl || !Player.NaturalDuration.HasTimeSpan) return;
+            double pct = Math.Clamp(e.GetPosition(sl).X / sl.ActualWidth, 0, 1);
+            double t = sl.Maximum * pct;
+            sl.Value = t;
+            SeekBar.Value = t;
+            Player.Position = TimeSpan.FromSeconds(t);
+        }
+
+        private void OsdVolume_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            // 起動時の InitializeComponent 実行中は、他コントロールが未生成(null)のため処理を逃げる
+            if (VolumeSlider == null || OsdVolumeSlider == null || Player == null) return;
+
+            VolumeSlider.Value = OsdVolumeSlider.Value;
+            if (!_isMuted) Player.Volume = OsdVolumeSlider.Value;
+        }
+
 
         // ─────────────────────────────────────────────────────────────────
         // エラーログ出力機能 ---
         // ─────────────────────────────────────────────────────────────────
         private void Player_MediaFailed(object sender, ExceptionRoutedEventArgs e)
         {
-            string logPath = "play_error.txt";
+            string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "play_error.txt");
             string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | Error: {e.ErrorException.Message}{Environment.NewLine}";
 
             try

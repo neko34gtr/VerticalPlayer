@@ -155,8 +155,11 @@
                                     <Thumb>
                                         <Thumb.Template>
                                             <ControlTemplate TargetType="Thumb">
-                                                <Grid>
-                                                    <Ellipse Width="14" Height="14" Fill="White">
+                                                <!-- 透明な大きいヒット領域 + 見た目の小さい玉 -->
+                                                <Grid Width="28" Height="28">
+                                                    <Ellipse Fill="Transparent" Width="28" Height="28"/>
+                                                    <Ellipse Width="14" Height="14" Fill="White"
+                                                             HorizontalAlignment="Center" VerticalAlignment="Center">
                                                         <Ellipse.Effect>
                                                             <DropShadowEffect Color="#3B82F6" BlurRadius="8" ShadowDepth="0" Opacity="0.8"/>
                                                         </Ellipse.Effect>
@@ -168,6 +171,86 @@
                                 </Track.Thumb>
                             </Track>
                         </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ========== OSD用シークスライダー ========== -->
+        <Style x:Key="OsdSeekSlider" TargetType="Slider">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Slider">
+                        <Grid>
+                            <Track x:Name="PART_Track">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="Slider.DecreaseLarge">
+                                        <RepeatButton.Template>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Border Height="5" CornerRadius="2.5">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#3B82F6" Offset="0"/>
+                                                            <GradientStop Color="#6366F1" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </ControlTemplate>
+                                        </RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.DecreaseRepeatButton>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="Slider.IncreaseLarge">
+                                        <RepeatButton.Template>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Border Height="5" Background="#334155" CornerRadius="2.5"/>
+                                            </ControlTemplate>
+                                        </RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.IncreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb>
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Grid Width="32" Height="32">
+                                                    <Ellipse Fill="Transparent"/>
+                                                    <Ellipse Width="16" Height="16" Fill="White"
+                                                             HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                        <Ellipse.Effect>
+                                                            <DropShadowEffect Color="#3B82F6" BlurRadius="10" ShadowDepth="0" Opacity="0.9"/>
+                                                        </Ellipse.Effect>
+                                                    </Ellipse>
+                                                </Grid>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ========== OSDアイコンボタン（白系） ========== -->
+        <Style x:Key="OsdIconBtn" TargetType="Button">
+            <Setter Property="Background"      Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor"          Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="Transparent" CornerRadius="8" Padding="8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#33FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#55FFFFFF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
@@ -404,6 +487,12 @@
 
                     <!-- 右：ウィンドウ操作 -->
                     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Style="{StaticResource IconBtn}" Click="FullScreen_Click" ToolTip="全画面 (F11)" Padding="8">
+                            <Path x:Name="FullScreenIcon"
+                                  Data="M3,3 H8 M3,3 V8 M21,3 H16 M21,3 V8 M3,21 H8 M3,21 V16 M21,21 H16 M21,21 V16"
+                                  Stroke="{StaticResource TextMuted}" StrokeThickness="1.5" Fill="Transparent"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="14" Height="14"/>
+                        </Button>
                         <Button Style="{StaticResource IconBtn}" Click="Minimize_Click" ToolTip="最小化" Padding="8">
                             <Path Data="M0,5 H10" Stroke="{StaticResource TextMuted}"
                                   StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
@@ -456,6 +545,109 @@
                             BorderBrush="#3B82F6" BorderThickness="2" CornerRadius="0"
                             Background="#0A1828" Opacity="0.6"/>
 
+                    <!-- ========== OSDパネル（全画面時のマウスオーバーで表示） ========== -->
+                    <Border x:Name="OsdPanel"
+                            VerticalAlignment="Bottom" HorizontalAlignment="Stretch"
+                            Visibility="Collapsed" Panel.ZIndex="10"
+                            MouseEnter="Osd_MouseEnter" MouseLeave="Osd_MouseLeave">
+                        <Border Margin="24,0,24,20" CornerRadius="14">
+                            <Border.Background>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                    <GradientStop Color="#CC000000" Offset="0"/>
+                                    <GradientStop Color="#EE000000" Offset="1"/>
+                                </LinearGradientBrush>
+                            </Border.Background>
+                            <Border.Effect>
+                                <BlurEffect KernelType="Gaussian" Radius="0"/>
+                            </Border.Effect>
+                            <StackPanel Margin="16,12,16,14">
+                                <!-- 1段目：シークバー + 時間 -->
+                                <Grid Margin="0,0,0,8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Slider x:Name="OsdSeekBar" Grid.Column="0"
+                                            Style="{StaticResource OsdSeekSlider}"
+                                            Minimum="0" VerticalAlignment="Center"
+                                            Thumb.DragStarted="OsdSeekBar_DragStarted"
+                                            Thumb.DragCompleted="OsdSeekBar_DragCompleted"
+                                            PreviewMouseLeftButtonDown="OsdSeekBar_PreviewMouseLeftButtonDown"/>
+                                    <TextBlock x:Name="OsdTimeDisplay" Grid.Column="1"
+                                               Foreground="White" Text="0:00 / 0:00"
+                                               FontSize="11" FontFamily="Consolas"
+                                               Margin="12,0,0,0" VerticalAlignment="Center"/>
+                                </Grid>
+                                <!-- 2段目：操作ボタン -->
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <!-- 左：音量 -->
+                                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <Button Style="{StaticResource OsdIconBtn}" Click="Mute_Click" ToolTip="ミュート">
+                                            <Path Data="M4,7 H8 L13,3 V17 L8,13 H4 Z M15,7 Q18,10 15,13 M17,5 Q22,10 17,15"
+                                                  Stroke="White" StrokeThickness="1.5" Fill="Transparent"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18"/>
+                                        </Button>
+                                        <Slider x:Name="OsdVolumeSlider" Style="{StaticResource ModernSlider}"
+                                                Width="80" Minimum="0" Maximum="1" Value="0.7"
+                                                VerticalAlignment="Center" Margin="4,0,0,0"
+                                                ValueChanged="OsdVolume_Changed"/>
+                                    </StackPanel>
+                                    <!-- 中央：再生ボタン群 -->
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal"
+                                                HorizontalAlignment="Center" VerticalAlignment="Center">
+                                        <Button Style="{StaticResource OsdIconBtn}" Click="Rewind_Click" ToolTip="-10秒">
+                                            <Path Data="M14,6 L6,12 L14,18 Z M8,6 L8,18"
+                                                  Stroke="White" StrokeThickness="1.5" Fill="Transparent"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18"/>
+                                        </Button>
+                                        <!-- OSD再生/停止ボタン -->
+                                        <Button Click="PlayPause_Click" ToolTip="再生/一時停止" Cursor="Hand">
+                                            <Button.Template>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border x:Name="Bd" Width="44" Height="44" CornerRadius="22">
+                                                        <Border.Background>
+                                                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                                                <GradientStop Color="#3B82F6" Offset="0"/>
+                                                                <GradientStop Color="#6366F1" Offset="1"/>
+                                                            </LinearGradientBrush>
+                                                        </Border.Background>
+                                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter TargetName="Bd" Property="Opacity" Value="0.85"/>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Button.Template>
+                                            <Path x:Name="OsdPlayIcon" Data="M7,5 L19,12 L7,19 Z"
+                                                  Fill="White" Width="18" Height="18" Stretch="Uniform"/>
+                                        </Button>
+                                        <Button Style="{StaticResource OsdIconBtn}" Click="FastForward_Click" ToolTip="+10秒">
+                                            <Path Data="M10,6 L18,12 L10,18 Z M16,6 L16,18"
+                                                  Stroke="White" StrokeThickness="1.5" Fill="Transparent"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18"/>
+                                        </Button>
+                                    </StackPanel>
+                                    <!-- 右：全画面解除 -->
+                                    <StackPanel Grid.Column="2" Orientation="Horizontal"
+                                                HorizontalAlignment="Right" VerticalAlignment="Center">
+                                        <Button Style="{StaticResource OsdIconBtn}" Click="FullScreen_Click" ToolTip="全画面解除 (F11)">
+                                            <Path Data="M8,3 H3 V8 M3,3 L9,9 M16,3 H21 V8 M21,3 L15,9 M8,21 H3 V16 M3,21 L9,15 M16,21 H21 V16 M21,21 L15,15"
+                                                  Stroke="White" StrokeThickness="1.5" Fill="Transparent"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="16" Height="16"/>
+                                        </Button>
+                                    </StackPanel>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                    </Border>
+
                     <!-- MediaElement -->
                     <Viewbox Stretch="Uniform">
                         <MediaElement x:Name="Player"
@@ -495,6 +687,7 @@
                                 Minimum="0" VerticalAlignment="Center"
                                 Thumb.DragStarted="SeekBar_DragStarted"
                                 Thumb.DragCompleted="SeekBar_DragCompleted"
+                                PreviewMouseLeftButtonDown="SeekBar_PreviewMouseLeftButtonDown"
                                 PreviewMouseLeftButtonUp="SeekBar_PreviewMouseLeftButtonUp"/>
                         <TextBlock x:Name="TimeDisplay" Grid.Column="1"
                                    Foreground="{StaticResource TextMuted}" Text="0:00 / 0:00"
