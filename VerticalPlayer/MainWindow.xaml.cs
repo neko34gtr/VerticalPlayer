@@ -209,6 +209,7 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
+            _mediaInfo?.Dispose();
             // 現在の再生位置を保存
             double lastPos = 0;
             if (Player.NaturalDuration.HasTimeSpan)
@@ -330,8 +331,9 @@ namespace VerticalPlayer
             ApplyLayout();
             Player.SpeedRatio = SpeedSlider.Value;
 
-            // 動画情報を情報タブへ反映
-            UpdateVideoInfo();
+            // 動画詳細情報の取得と表示
+            if (Player.Source?.LocalPath != null)
+                AnalyzeAndShowMediaInfo(Player.Source.LocalPath);
 
             // 前回位置へシーク
             if (_pendingSeek > 0 && Player.NaturalDuration.HasTimeSpan)
@@ -339,6 +341,61 @@ namespace VerticalPlayer
                 Player.Position = TimeSpan.FromSeconds(
                     Math.Min(_pendingSeek, Player.NaturalDuration.TimeSpan.TotalSeconds - 1));
                 _pendingSeek = 0;
+            }
+
+            // 動画情報タブ更新
+            UpdateVideoInfo();
+        }
+
+        // MediaInfoNative で詳細解析
+        private void AnalyzeAndShowMediaInfo(string path)
+        {
+            try
+            {
+                var mi = new MediaInfoNative(path);
+                if (!mi.Success)
+                {
+                    Trace($"MediaInfo: failed for {path}");
+                    _mediaInfo?.Dispose();
+                    _mediaInfo = null;
+                    return;
+                }
+
+                // フレームレート自動設定
+                double fps = mi.VideoFrameRate;
+                if (fps > 0)
+                {
+                    _frameIntervalMs = 1000.0 / fps;
+                    Trace($"MediaInfo: fps={fps} -> frameIntervalMs={_frameIntervalMs:F2}");
+                    UpdateFrameRateCombo(fps);
+                }
+
+                // 古いインスタンスを破棄して新しいものを保持
+                _mediaInfo?.Dispose();
+                _mediaInfo = mi;
+                UpdateVideoInfo();
+            }
+            catch (Exception ex)
+            {
+                Trace($"AnalyzeAndShowMediaInfo EXCEPTION: {ex.Message}");
+            }
+        }
+
+        private MediaInfoNative? _mediaInfo = null;
+
+        private void UpdateFrameRateCombo(double fps)
+        {
+            // ComboBoxのfps選択を実際のfpsに近いものに更新
+            if (FrameRateCombo == null) return;
+            double[] candidates = { 1, 2, 5, 10, 15, 24, 30 };
+            double best = candidates.OrderBy(c => Math.Abs(c - fps)).First();
+            foreach (ComboBoxItem item in FrameRateCombo.Items)
+            {
+                if (double.TryParse(item.Tag?.ToString(), out double v) && v == best)
+                {
+                    FrameRateCombo.SelectedItem = item;
+                    break;
+                }
             }
         }
         // XAML側で <MediaElement x:Name="Player" MediaEnded="Player_MediaEnded" ... /> と設定されている前提です。
@@ -747,17 +804,19 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         private void UpdateVideoInfo()
         {
+            if (VideoInfoStack == null) return;
             VideoInfoStack.Children.Clear();
-            void Row(string label, string val)
+
+            void Row(string label, string val, bool accent = false)
             {
                 var g = new Grid { Margin = new Thickness(0, 3, 0, 3) };
-                g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(80) });
+                g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(90) });
                 g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                 var t1 = new TextBlock { Text = label, Foreground = (Brush)FindResource("TextMuted"), FontSize = 10 };
                 var t2 = new TextBlock
                 {
                     Text = val,
-                    Foreground = (Brush)FindResource("TextPrimary"),
+                    Foreground = accent ? (Brush)FindResource("AccentCyan") : (Brush)FindResource("TextPrimary"),
                     FontSize = 10,
                     TextWrapping = TextWrapping.Wrap
                 };
@@ -766,11 +825,69 @@ namespace VerticalPlayer
                 VideoInfoStack.Children.Add(g);
             }
 
+            void Sep() => VideoInfoStack.Children.Add(new Border
+            {
+                Height = 1,
+                Background = (Brush)FindResource("TextFaint"),
+                Margin = new Thickness(0, 5, 0, 5),
+                Opacity = 0.3
+            });
+
             if (Player.Source == null) { Row("状態", "未読み込み"); return; }
+
+            // ── 基本情報 ──
             Row("ファイル名", Path.GetFileName(Player.Source.LocalPath));
-            Row("解像度", $"{Player.NaturalVideoWidth} × {Player.NaturalVideoHeight}");
+            Row("解像度",
+                $"{Player.NaturalVideoWidth} × {Player.NaturalVideoHeight}" +
+                (Player.NaturalVideoWidth > 0 && Player.NaturalVideoHeight > 0
+                    ? $"  ({(Player.NaturalVideoWidth > Player.NaturalVideoHeight ? "横型" : "縦型")})" : ""));
             if (Player.NaturalDuration.HasTimeSpan)
                 Row("長さ", Fmt(Player.NaturalDuration.TimeSpan));
+            var fi = new FileInfo(Player.Source.LocalPath);
+            if (fi.Exists) Row("ファイルサイズ", FormatBytes(fi.Length));
+
+            // ── MediaInfo詳細 ──
+            if (_mediaInfo != null && _mediaInfo.Success)
+            {
+                Sep();
+                double fps = _mediaInfo.VideoFrameRate;
+                Row("フレームレート", fps > 0 ? $"{fps:F3} fps" : "不明", accent: true);
+                Row("映像コーデック", _mediaInfo.VideoCodec ?? "不明", accent: true);
+                long vBr = _mediaInfo.VideoBitRate;
+                Row("映像ビットレート", vBr > 0 ? $"{vBr / 1000:N0} kbps" : "不明");
+                string colorInfo = string.Join(" / ",
+                    new[] { _mediaInfo.VideoColorSpace ?? "", _mediaInfo.VideoChromaSubsampling ?? "",
+                            _mediaInfo.VideoBitDepth > 0 ? $"{_mediaInfo.VideoBitDepth}bit" : "" }
+                    .Where(s => !string.IsNullOrEmpty(s)));
+                Row("カラー情報", string.IsNullOrEmpty(colorInfo) ? "不明" : colorInfo);
+                Sep();
+                Row("音声コーデック", _mediaInfo.AudioCodec ?? "不明");
+                int sr = _mediaInfo.AudioSampleRate;
+                Row("サンプルレート", sr > 0 ? $"{sr:N0} Hz" : "不明");
+                int ch = _mediaInfo.AudioChannelCount;
+                Row("音声チャンネル", ch switch
+                {
+                    1 => "1ch (Mono)",
+                    2 => "2ch (Stereo)",
+                    6 => "5.1ch",
+                    8 => "7.1ch",
+                    _ => ch > 0 ? $"{ch}ch" : "不明"
+                });
+                long aBr = _mediaInfo.AudioBitRate;
+                Row("音声ビットレート", aBr > 0 ? $"{aBr / 1000:N0} kbps" : "不明");
+                Sep();
+                long totalBr = (fi.Exists && Player.NaturalDuration.HasTimeSpan && Player.NaturalDuration.TimeSpan.TotalSeconds > 0)
+                    ? (long)(fi.Length * 8 / Player.NaturalDuration.TimeSpan.TotalSeconds) : 0;
+                Row("総ビットレート", totalBr > 0 ? $"{totalBr / 1000:N0} kbps" : "不明");
+            }
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes >= 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024 * 1024):F2} GB";
+            if (bytes >= 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+            if (bytes >= 1024) return $"{bytes / 1024.0:F1} KB";
+            return $"{bytes} B";
         }
 
         // ─────────────────────────────────────────────────────────────────

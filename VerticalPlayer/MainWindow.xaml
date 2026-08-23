@@ -1049,17 +1049,24 @@
                                     <Border Style="{StaticResource Separator}"/>
 
                                     <TextBlock Text="操作ガイド" Foreground="{StaticResource TextMuted}"
-                                               FontSize="10" FontWeight="SemiBold" Margin="0,0,0,8"
-                                              />
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,0,0,8"/>
                                     <StackPanel>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10"
-                                                   Text="🖱 ホイール — ズーム" Margin="0,3"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10"
-                                                   Text="⌨ スペース — 再生/停止" Margin="0,3"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10"
-                                                   Text="⌨ ← → — 10秒シーク" Margin="0,3"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10"
-                                                   Text="⌨ ↑ ↓ — 音量調節" Margin="0,3"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="── 再生 ──" Margin="0,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="Space — 再生 / 一時停止" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="← → — 10秒シーク" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="Shift+← → — コマ戻し / コマ送り" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="Shift+↑ ↓ — 再生速度 ±0.1×" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="── 音量 ──" Margin="0,6,0,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="↑ ↓ — 音量 ±5%" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="M — ミュート切替" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="── 表示 ──" Margin="0,6,0,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="F11 / Alt+Enter — 全画面" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="Esc — 全画面解除" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="🖱 ホイール — ズーム" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="── ファイル ──" Margin="0,6,0,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="🖱 D&amp;D — ファイルを開く" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="⏮ ⏭ ボタン — 前後ファイル" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="AUTO — スロー再生モード" Margin="8,2"/>
                                     </StackPanel>
                                 </StackPanel>
                             </ScrollViewer>
