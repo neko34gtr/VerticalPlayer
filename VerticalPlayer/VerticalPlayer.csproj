@@ -7,10 +7,18 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<UseWPF>true</UseWPF>
 		<ApplicationIcon>VerticalPlayer.ico</ApplicationIcon>
+		<Platforms>x64</Platforms>
+		<PlatformTarget>x64</PlatformTarget>
 	</PropertyGroup>
 
 	<ItemGroup>
 		<Content Include="VerticalPlayer.ico" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="LibVLCSharp" Version="3.10.1" />
+		<PackageReference Include="LibVLCSharp.WPF" Version="3.10.1" />
+		<PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.23.1" />
 	</ItemGroup>
 
 </Project>

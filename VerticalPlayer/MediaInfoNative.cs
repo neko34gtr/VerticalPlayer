@@ -8,7 +8,7 @@ namespace VerticalPlayer
     /// MediaInfo.dll を直接 P/Invoke で呼ぶ軽量ラッパー。
     /// MediaInfo.dll（64bit）を実行ファイルと同じフォルダに配置してください。
     /// https://mediaarea.net/ja/MediaInfo/Download/Windows から
-    /// "DLL"版をダウンロードして MediaInfo.dll を取り出し、実行プログラムのルートに配置してください。
+    /// "DLL"版をダウンロードして MediaInfo.dll を取り出し、実行プログラムルートへ配置してください。
     /// </summary>
     public sealed class MediaInfoNative : IDisposable
     {
@@ -60,6 +60,15 @@ namespace VerticalPlayer
             get => double.TryParse(Get(StreamKind.Video, 0, "FrameRate"),
                        System.Globalization.NumberStyles.Float,
                        System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
+        }
+
+        public int VideoWidth
+        {
+            get => int.TryParse(Get(StreamKind.Video, 0, "Width"), out var v) ? v : 0;
+        }
+        public int VideoHeight
+        {
+            get => int.TryParse(Get(StreamKind.Video, 0, "Height"), out var v) ? v : 0;
         }
 
         public string VideoCodec => Get(StreamKind.Video, 0, "Format");
