@@ -1,6 +1,7 @@
 ﻿<Window x:Class="VerticalPlayer.FullScreenWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:media="clr-namespace:VerticalPlayer.Media"
         WindowStyle="None"
         AllowsTransparency="False"
         Background="Black"
@@ -35,9 +36,9 @@
     </Window.Resources>
 
     <Grid>
-        <!-- 動画 -->
+        <!-- 映像表示（FFmpegコアエンジン。Airspace非依存のためOSDは常にこの上に正しく重なる） -->
         <Viewbox Stretch="Uniform">
-            <MediaElement x:Name="Player"
+            <media:FfmpegMediaElement x:Name="Player"
                           LoadedBehavior="Manual"
                           RenderOptions.BitmapScalingMode="HighQuality"
                           MediaOpened="Player_MediaOpened"

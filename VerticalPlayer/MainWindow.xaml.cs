@@ -623,9 +623,15 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         private void Rotate_Click(object sender, RoutedEventArgs e)
         {
+            double before = _currentRotation;
             _currentRotation = (_currentRotation + 90) % 360;
             PlayerRotation.Angle = _currentRotation;
-            if (Player.NaturalVideoWidth > 0) ResizeToVideo();
+            Trace($"Rotate: {before}° -> {_currentRotation}° (PlayerRotation.Angle actual={PlayerRotation.Angle}°)");
+            if (Player.NaturalVideoWidth > 0)
+            {
+                ResizeToVideo();
+                Trace($"Rotate: ResizeToVideo applied. WindowSize={this.Width:F0}x{this.Height:F0}");
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────
@@ -970,6 +976,10 @@ namespace VerticalPlayer
                     }
                     e.Handled = true;
                     break;
+                case Key.R:
+                    Rotate_Click(sender, e);
+                    e.Handled = true;
+                    break;
             }
         }
 
@@ -1211,7 +1221,7 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         // エラーログ出力機能
         // ─────────────────────────────────────────────────────────────────
-        private void Player_MediaFailed(object sender, ExceptionRoutedEventArgs e)
+        private void Player_MediaFailed(object sender, VerticalPlayer.Media.FfmpegMediaFailedEventArgs e)
         {
             Trace($"MediaFailed: {e.ErrorException?.GetType().Name}: {e.ErrorException?.Message}");
             Trace($"MediaFailed StackTrace: {e.ErrorException?.StackTrace}");

@@ -6,11 +6,26 @@
 		<Nullable>enable</Nullable>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<UseWPF>true</UseWPF>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<ApplicationIcon>VerticalPlayer.ico</ApplicationIcon>
 	</PropertyGroup>
 
 	<ItemGroup>
 		<Content Include="VerticalPlayer.ico" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="FFmpeg.AutoGen" Version="8.1.0" />
+		<PackageReference Include="NAudio" Version="3.0.1" />
+	</ItemGroup>
+
+	<!-- ffmpeg共有DLL(avcodec-*.dll等)を出力フォルダの ffmpeg\ 配下へ配置する場合の例。
+	     手動配置でも可（AVEngine.EnsureFfmpegBinaries が exe直下\ffmpeg または exe直下を探索）。-->
+	<ItemGroup>
+		<None Include="ffmpeg\*.dll">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<Link>ffmpeg\%(RecursiveDir)%(Filename)%(Extension)</Link>
+		</None>
 	</ItemGroup>
 
 </Project>
