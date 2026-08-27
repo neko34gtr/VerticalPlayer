@@ -2,6 +2,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
 using System.Windows.Media;
@@ -12,22 +13,22 @@ namespace VerticalPlayer.Media
 {
     /// <summary>
     /// FFmpeg.AutoGen (v8.1.0 / shared dll) による「映像デコード専用」エンジン。
+    /// 音声・シーク・速度制御・マスタークロックは上位の FfmpegMediaElement 側の
+    /// 非表示 MediaElement に一本化されている（本クラスは映像デコード＋描画のみ担当）。
     ///
-    /// 【方針転換】
-    /// 音声デコード(NAudio/WASAPI)を自前実装すると、マスタークロックの算出やシーク時の
-    /// バッファ整合など破綻しやすい要素が多いため撤去。音声再生・シーク・速度制御・
-    /// Position（＝再生マスタークロック）は、上位の FfmpegMediaElement が保持する
-    /// 非表示 MediaElement（音声専用として流用）に一本化する。
-    ///
-    /// このクラスはもはや音声を一切扱わない。外部（FfmpegMediaElement）から
-    /// SetExternalClock() で定期的に「本当の再生位置」を受け取り、映像フレームの
-    /// 表示タイミングをそれに追従させる（早ければ待つ／40ms以上遅れたら間引く）だけの、
-    /// 純粋な「映像デコード＋描画」コンポーネント。
+    /// 【今回追加】
+    /// - ハードウェアデコード（D3D11VA）対応。要求時のみ有効化を試み、非対応環境や
+    ///   失敗時は自動的にソフトウェアデコードへフォールバックする（例外にしない）。
+    /// - 実際にどちらのモードで復号しているかを DecodeModeChanged イベントで通知。
+    /// - コントラスト／彩度／ガンマをデコード後のBGRAバッファへCPUで直接適用
+    ///   （WPFのEffectはMediaElement/Image双方で信頼性が低いため、生ピクセルに対して処理）。
     /// </summary>
     public sealed unsafe class AVEngine : IDisposable
     {
         public event Action<int, int, TimeSpan>? Opened;
         public event Action<Exception>? Failed;
+        /// <summary>実際に使われたデコードモードを通知（例: "HW (D3D11VA)" / "SW"）。UIスレッドで発火。</summary>
+        public event Action<string>? DecodeModeChanged;
 
         private readonly Dispatcher _ui;
         private int _generation;
@@ -35,6 +36,13 @@ namespace VerticalPlayer.Media
         private Thread? _decodeThread;
         private volatile bool _paused = true;
         private double _speedRatio = 1.0;
+
+        /// <summary>次にOpen()する際にハードウェアデコードを試みるかどうか。</summary>
+        public bool HardwareAccelRequested { get; set; }
+
+        // ── エフェクト（-1〜1想定。0が無効） ──
+        private volatile bool _effectsActive;
+        private double _contrast, _saturation, _gamma;
 
         // ── 外部マスタークロック（FfmpegMediaElement内の非表示MediaElementのPositionを反映） ──
         private readonly Stopwatch _extClock = new();
@@ -72,13 +80,16 @@ namespace VerticalPlayer.Media
             }
         }
 
-        /// <summary>再生速度（マスタークロックの外挿計算に使うだけ。実際の速度制御はMediaElement側）。</summary>
         public void SetSpeedRatio(double ratio) => _speedRatio = Math.Clamp(ratio, 0.1, 4.0);
 
-        /// <summary>
-        /// 外部（音声用MediaElement）の現在位置を通知する。isPlaying=true の間は
-        /// Stopwatchで外挿し、次の通知が来るまで滑らかに時間を進める。
-        /// </summary>
+        public void SetEffects(double contrast, double saturation, double gamma)
+        {
+            _contrast = Math.Clamp(contrast, -1, 1);
+            _saturation = Math.Clamp(saturation, -1, 1);
+            _gamma = Math.Clamp(gamma, -1, 1);
+            _effectsActive = _contrast != 0 || _saturation != 0 || _gamma != 0;
+        }
+
         public void SetExternalClock(double seconds, bool isPlaying)
         {
             _extBaseSeconds = seconds;
@@ -105,7 +116,8 @@ namespace VerticalPlayer.Media
             _extClock.Restart();
             _extPlaying = false;
 
-            var t = new Thread(() => OpenAndRun(source.LocalPath, myGen))
+            bool wantHw = HardwareAccelRequested;
+            var t = new Thread(() => OpenAndRun(source.LocalPath, myGen, wantHw))
             {
                 IsBackground = true,
                 Name = "AVEngine-VideoDecode"
@@ -139,27 +151,49 @@ namespace VerticalPlayer.Media
         public void Dispose() => Stop();
 
         // ─────────────────────────────────────────────────────────────
+        // ハードウェアデコード用: get_format コールバック
+        // ─────────────────────────────────────────────────────────────
+        [ThreadStatic] private static AVPixelFormat _negotiatedHwPixFmt;
+
+        [UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)]
+        private delegate AVPixelFormat GetFormatDelegate(AVCodecContext* ctx, AVPixelFormat* fmts);
+
+        private static readonly GetFormatDelegate _getHwFormatDelegate = GetHwFormat;
+
+        private static AVPixelFormat GetHwFormat(AVCodecContext* ctx, AVPixelFormat* pixFmts)
+        {
+            for (var p = pixFmts; *p != AVPixelFormat.AV_PIX_FMT_NONE; p++)
+            {
+                if (*p == _negotiatedHwPixFmt) return *p;
+            }
+            return *pixFmts;
+        }
+        // ─────────────────────────────────────────────────────────────
         // デコードスレッド本体（映像のみ）
         // ─────────────────────────────────────────────────────────────
-        private void OpenAndRun(string path, int myGen)
+        private void OpenAndRun(string path, int myGen, bool wantHw)
         {
             AVFormatContext* fmt = null;
             AVCodecContext* vctx = null;
             SwsContext* sws = null;
             int videoIdx = -1;
+            bool hwActive = false;
+            AVBufferRef* hwDeviceCtx = null;
 
             AVPacket* pkt = null;
             AVFrame* frame = null;
+            AVFrame* swFrame = null;
             AVFrame* rgbFrame = null;
             byte* rgbBuffer = null;
 
             try
             {
-                OpenStreams(path, out fmt, out vctx, out sws, out videoIdx);
+                OpenStreamsWithHw(path, wantHw, out fmt, out vctx, out videoIdx, out hwActive, out hwDeviceCtx);
 
                 int w = vctx->width, h = vctx->height;
                 double durSec = fmt->duration > 0 ? fmt->duration / (double)ffmpeg.AV_TIME_BASE : 0;
                 var duration = TimeSpan.FromSeconds(durSec);
+                string modeLabel = hwActive ? "HW (D3D11VA)" : "SW";
 
                 if (myGen != _generation) return;
 
@@ -169,12 +203,14 @@ namespace VerticalPlayer.Media
                     Bitmap = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
                     VideoWidth = w; VideoHeight = h; Duration = duration;
                     Opened?.Invoke(w, h, duration);
+                    DecodeModeChanged?.Invoke(modeLabel);
                 }));
 
-                Trace($"Opened(gen={myGen}): {path} {w}x{h} dur={duration}");
+                Trace($"Opened(gen={myGen}): {path} {w}x{h} dur={duration} mode={modeLabel}");
 
                 pkt = ffmpeg.av_packet_alloc();
                 frame = ffmpeg.av_frame_alloc();
+                swFrame = ffmpeg.av_frame_alloc();
                 rgbFrame = ffmpeg.av_frame_alloc();
 
                 int bufSize = ffmpeg.av_image_get_buffer_size(AVPixelFormat.AV_PIX_FMT_BGRA, w, h, 1);
@@ -226,7 +262,26 @@ namespace VerticalPlayer.Media
                         {
                             while (ffmpeg.avcodec_receive_frame(vctx, frame) == 0)
                             {
-                                ffmpeg.sws_scale(sws, frame->data, frame->linesize, 0, h,
+                                AVFrame* srcFrame = frame;
+                                if (hwActive)
+                                {
+                                    ffmpeg.av_frame_unref(swFrame);
+                                    if (ffmpeg.av_hwframe_transfer_data(swFrame, frame, 0) < 0)
+                                    {
+                                        Trace("av_hwframe_transfer_data failed - frame skipped");
+                                        continue;
+                                    }
+                                    srcFrame = swFrame;
+                                }
+
+                                if (sws == null)
+                                {
+                                    sws = ffmpeg.sws_getContext(w, h, (AVPixelFormat)srcFrame->format,
+                                        w, h, AVPixelFormat.AV_PIX_FMT_BGRA, 2, null, null, null);
+                                    Trace($"sws_getContext created srcFmt={(AVPixelFormat)srcFrame->format}");
+                                }
+
+                                ffmpeg.sws_scale(sws, srcFrame->data, srcFrame->linesize, 0, h,
                                     rgbFrame->data, rgbFrame->linesize);
 
                                 double ptsSeconds = frame->best_effort_timestamp == ffmpeg.AV_NOPTS_VALUE
@@ -243,13 +298,17 @@ namespace VerticalPlayer.Media
                                 }
                                 else if (diff < -0.04)
                                 {
-                                    drop = true; // 映像が40ms以上遅れている→描画せず追いつく
+                                    drop = true;
                                 }
 
                                 if (!drop)
                                 {
                                     int stride = rgbFrame->linesize[0];
                                     System.Runtime.InteropServices.Marshal.Copy((IntPtr)rgbFrame->data[0], managedBuf, 0, bufSize);
+
+                                    if (_effectsActive)
+                                        ApplyEffects(managedBuf, bufSize);
+
                                     var localBuf = managedBuf;
                                     int frameGen = myGen;
                                     int frameW = w, frameH = h;
@@ -291,19 +350,23 @@ namespace VerticalPlayer.Media
             {
                 if (rgbBuffer != null) ffmpeg.av_free(rgbBuffer);
                 if (frame != null) { var f2 = frame; ffmpeg.av_frame_free(&f2); }
+                if (swFrame != null) { var f4 = swFrame; ffmpeg.av_frame_free(&f4); }
                 if (rgbFrame != null) { var f3 = rgbFrame; ffmpeg.av_frame_free(&f3); }
                 if (pkt != null) { var p2 = pkt; ffmpeg.av_packet_free(&p2); }
                 if (sws != null) ffmpeg.sws_freeContext(sws);
                 if (vctx != null) { var v = vctx; ffmpeg.avcodec_free_context(&v); }
+                if (hwDeviceCtx != null) { var hw = hwDeviceCtx; ffmpeg.av_buffer_unref(&hw); }
                 if (fmt != null) { var f = fmt; ffmpeg.avformat_close_input(&f); }
                 Trace($"DecodeThread(gen={myGen}) fully exited");
             }
         }
 
-        private static void OpenStreams(string path,
-            out AVFormatContext* fmt, out AVCodecContext* vctx, out SwsContext* sws, out int videoIdx)
+        private static void OpenStreamsWithHw(string path, bool wantHw,
+            out AVFormatContext* fmt, out AVCodecContext* vctx, out int videoIdx,
+            out bool hwActive, out AVBufferRef* hwDeviceCtx)
         {
-            sws = null;
+            hwActive = false;
+            hwDeviceCtx = null;
 
             AVFormatContext* f = null;
             if (ffmpeg.avformat_open_input(&f, path, null, null) != 0)
@@ -320,14 +383,112 @@ namespace VerticalPlayer.Media
 
             var vc = ffmpeg.avcodec_alloc_context3(vcodec);
             ffmpeg.avcodec_parameters_to_context(vc, fmt->streams[videoIdx]->codecpar);
-            if (ffmpeg.avcodec_open2(vc, vcodec, null) < 0)
-                throw new InvalidOperationException("avcodec_open2(video) failed");
-            vctx = vc;
 
-            sws = ffmpeg.sws_getContext(
-                vctx->width, vctx->height, vctx->pix_fmt,
-                vctx->width, vctx->height, AVPixelFormat.AV_PIX_FMT_BGRA,
-                2 /* SWS_BILINEAR */, null, null, null);
+            if (wantHw)
+            {
+                try
+                {
+                    AVPixelFormat hwPixFmt = AVPixelFormat.AV_PIX_FMT_NONE;
+                    for (int i = 0; ; i++)
+                    {
+                        var cfg = ffmpeg.avcodec_get_hw_config(vcodec, i);
+                        if (cfg == null) break;
+                        if ((cfg->methods & 0x01 /* AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX（AutoGenに列挙が無いため直値） */) != 0
+                            && cfg->device_type == AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA)
+                        {
+                            hwPixFmt = cfg->pix_fmt;
+                            break;
+                        }
+                    }
+
+                    if (hwPixFmt != AVPixelFormat.AV_PIX_FMT_NONE)
+                    {
+                        AVBufferRef* devCtx = null;
+                        if (ffmpeg.av_hwdevice_ctx_create(&devCtx, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, null, null, 0) == 0)
+                        {
+                            // ※ get_format への手動割り当て（型エラーの原因になるコード）は完全に排除します
+                            vc->hw_device_ctx = ffmpeg.av_buffer_ref(devCtx);
+                            ffmpeg.av_buffer_unref(&devCtx);
+                            hwDeviceCtx = vc->hw_device_ctx;
+                            hwActive = true;
+                        }
+                        else
+                        {
+                            Trace("av_hwdevice_ctx_create(D3D11VA) 失敗 - SWにフォールバック");
+                        }
+                    }
+                    else
+                    {
+                        Trace("このコーデックはD3D11VAの対応構成が見つからない - SWにフォールバック");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Trace($"HW初期化中に例外 - SWにフォールバック: {ex.Message}");
+                    hwActive = false;
+                }
+            }
+
+            if (ffmpeg.avcodec_open2(vc, vcodec, null) < 0)
+            {
+                if (hwActive)
+                {
+                    Trace("HWデコーダのopenに失敗 - SWで再試行");
+                    hwActive = false;
+                    vc->get_format = null;
+                    if (vc->hw_device_ctx != null) { var h2 = vc->hw_device_ctx; ffmpeg.av_buffer_unref(&h2); vc->hw_device_ctx = null; }
+                    if (ffmpeg.avcodec_open2(vc, vcodec, null) < 0)
+                        throw new InvalidOperationException("avcodec_open2(video) failed");
+                }
+                else
+                {
+                    throw new InvalidOperationException("avcodec_open2(video) failed");
+                }
+            }
+            vctx = vc;
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        // コントラスト / 彩度 / ガンマ（BGRAバッファへ直接適用）
+        // ─────────────────────────────────────────────────────────────
+        private byte[]? _lut;
+        private double _lutContrast = double.NaN, _lutGamma = double.NaN;
+
+        private byte[] GetLut(double contrast, double gamma)
+        {
+            if (_lut != null && _lutContrast == contrast && _lutGamma == gamma) return _lut;
+            var lut = new byte[256];
+            double gammaExp = Math.Pow(2, gamma);      // -1〜1 → 0.5〜2.0
+            double factor = 1.0 + contrast;             // -1〜1 → 0〜2.0
+            for (int i = 0; i < 256; i++)
+            {
+                double v = Math.Pow(i / 255.0, 1.0 / gammaExp) * 255.0;
+                v = (v - 128) * factor + 128;
+                lut[i] = (byte)Math.Clamp(v, 0, 255);
+            }
+            _lut = lut; _lutContrast = contrast; _lutGamma = gamma;
+            return lut;
+        }
+
+        private void ApplyEffects(byte[] buf, int len)
+        {
+            double contrast = _contrast, saturation = _saturation, gamma = _gamma;
+            byte[]? lut = (contrast != 0 || gamma != 0) ? GetLut(contrast, gamma) : null;
+            double satFactor = 1.0 + saturation;
+
+            for (int i = 0; i + 3 < len; i += 4)
+            {
+                byte b = buf[i], g = buf[i + 1], r = buf[i + 2]; // BGRA
+                if (lut != null) { b = lut[b]; g = lut[g]; r = lut[r]; }
+                if (saturation != 0)
+                {
+                    double gray = 0.299 * r + 0.587 * g + 0.114 * b;
+                    r = (byte)Math.Clamp(gray + (r - gray) * satFactor, 0, 255);
+                    g = (byte)Math.Clamp(gray + (g - gray) * satFactor, 0, 255);
+                    b = (byte)Math.Clamp(gray + (b - gray) * satFactor, 0, 255);
+                }
+                buf[i] = b; buf[i + 1] = g; buf[i + 2] = r;
+            }
         }
 
         private static void Trace(string msg)

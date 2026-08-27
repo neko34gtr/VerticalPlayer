@@ -1,3 +1,9 @@
 <Solution>
-  <Project Path="VerticalPlayer/VerticalPlayer.csproj" />
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="VerticalPlayer/VerticalPlayer.csproj">
+    <Platform Solution="*|x64" Project="x64" />
+  </Project>
 </Solution>

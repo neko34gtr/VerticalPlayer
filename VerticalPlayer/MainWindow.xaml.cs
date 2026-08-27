@@ -138,6 +138,9 @@ namespace VerticalPlayer
 
             // キーボードショートカット
             this.KeyDown += MainWindow_KeyDown;
+
+            // 実際のデコードモード（HW/SW）表示
+            Player.DecodeModeChanged += mode => DecodeModeText.Text = $"デコード: {mode}";
         }
 
         // ─────────────────────────────────────────────────────────────────
@@ -733,10 +736,24 @@ namespace VerticalPlayer
         }
 
         // ─────────────────────────────────────────────────────────────────
-        // エフェクト（WPF MediaElement は BitmapEffect 非対応のため UI 表示のみ）
+        // エフェクト（AVEngine内でBGRAバッファへ直接適用。次フレームから即反映）
         // ─────────────────────────────────────────────────────────────────
         private void Effect_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
-            => UpdateEffectLabels();
+        {
+            UpdateEffectLabels();
+            Player.Contrast = ContrastSlider.Value;
+            Player.Saturation = SaturationSlider.Value;
+            Player.Gamma = GammaSlider.Value;
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // ハードウェアアクセラレーション設定（次に開くファイルから適用）
+        // ─────────────────────────────────────────────────────────────────
+        private void HwAccel_Changed(object sender, RoutedEventArgs e)
+        {
+            Player.HardwareAcceleration = HwAccelCheck.IsChecked ?? false;
+            Trace($"HwAccel_Changed: requested={Player.HardwareAcceleration}（次に開くファイルから適用）");
+        }
 
         private void UpdateEffectLabels()
         {

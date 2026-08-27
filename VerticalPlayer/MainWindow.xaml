@@ -915,7 +915,11 @@
                                                FontSize="10" FontWeight="SemiBold" Margin="0,0,0,8"
                                               />
                                     <CheckBox x:Name="HwAccelCheck" Content="ハードウェアアクセラレーション"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4"/>
+                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                              Checked="HwAccel_Changed" Unchecked="HwAccel_Changed"/>
+                                    <TextBlock x:Name="DecodeModeText" Text="デコード: -"
+                                               Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontFamily="Consolas" Margin="0,0,0,4"/>
                                     <CheckBox x:Name="AlwaysOnTopCheck" Content="常に最前面"
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="AlwaysOnTop_Changed" Unchecked="AlwaysOnTop_Changed"/>

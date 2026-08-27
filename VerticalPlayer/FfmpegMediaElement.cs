@@ -86,6 +86,37 @@ namespace VerticalPlayer.Media
             remove => RemoveHandler(MediaFailedEvent, new EventHandler<FfmpegMediaFailedEventArgs>(value));
         }
 
+        /// <summary>実際に使われたデコードモードが判明/変化した時に発火（例: "HW (D3D11VA)" / "SW"）。</summary>
+        public event Action<string>? DecodeModeChanged
+        {
+            add => _engine.DecodeModeChanged += value;
+            remove => _engine.DecodeModeChanged -= value;
+        }
+
+        /// <summary>次に開くファイルからハードウェアデコード(D3D11VA)を試みるかどうか。非対応/失敗時はSWへ自動フォールバック。</summary>
+        public bool HardwareAcceleration
+        {
+            get => _engine.HardwareAccelRequested;
+            set => _engine.HardwareAccelRequested = value;
+        }
+
+        private double _contrast, _saturation, _gamma;
+        public double Contrast
+        {
+            get => _contrast;
+            set { _contrast = value; _engine.SetEffects(_contrast, _saturation, _gamma); }
+        }
+        public double Saturation
+        {
+            get => _saturation;
+            set { _saturation = value; _engine.SetEffects(_contrast, _saturation, _gamma); }
+        }
+        public double Gamma
+        {
+            get => _gamma;
+            set { _gamma = value; _engine.SetEffects(_contrast, _saturation, _gamma); }
+        }
+
         public Uri? Source
         {
             get => _source;
