@@ -155,10 +155,9 @@ namespace VerticalPlayer.Media
         // ─────────────────────────────────────────────────────────────
         [ThreadStatic] private static AVPixelFormat _negotiatedHwPixFmt;
 
-        [UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)]
-        private delegate AVPixelFormat GetFormatDelegate(AVCodecContext* ctx, AVPixelFormat* fmts);
-
-        private static readonly GetFormatDelegate _getHwFormatDelegate = GetHwFormat;
+        // AVCodecContext_get_format_func はデリゲートではなく、それを包む構造体（Pointerフィールド
+        // 暗黙変換演算子を持つ）。実体のデリゲート型 AVCodecContext_get_format 側でインスタンス化する。
+        private static readonly AVCodecContext_get_format _getHwFormatDelegate = GetHwFormat;
 
         private static AVPixelFormat GetHwFormat(AVCodecContext* ctx, AVPixelFormat* pixFmts)
         {
@@ -406,7 +405,8 @@ namespace VerticalPlayer.Media
                         AVBufferRef* devCtx = null;
                         if (ffmpeg.av_hwdevice_ctx_create(&devCtx, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, null, null, 0) == 0)
                         {
-                            // ※ get_format への手動割り当て（型エラーの原因になるコード）は完全に排除します
+                            _negotiatedHwPixFmt = hwPixFmt;
+                            vc->get_format = _getHwFormatDelegate;
                             vc->hw_device_ctx = ffmpeg.av_buffer_ref(devCtx);
                             ffmpeg.av_buffer_unref(&devCtx);
                             hwDeviceCtx = vc->hw_device_ctx;
