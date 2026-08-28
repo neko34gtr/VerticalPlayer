@@ -649,27 +649,29 @@
                         </Border>
                     </Border>
 
-                    <!-- 映像表示（FFmpegコアエンジン / WriteableBitmap描画、Airspace非依存） -->
-                    <Viewbox Stretch="Uniform">
-                        <media:FfmpegMediaElement x:Name="Player"
-                                      LoadedBehavior="Manual"
-                                      RenderOptions.BitmapScalingMode="HighQuality"
-                                      SnapsToDevicePixels="True"
-                                      MediaOpened="Player_MediaOpened"
-                                      MediaEnded="Player_MediaEnded"
-                                      MediaFailed="Player_MediaFailed"
-                                      RenderTransformOrigin="0.5,0.5">
-                            <media:FfmpegMediaElement.RenderTransform>
-                                <ScaleTransform x:Name="PlayerFlipTransform" ScaleX="1" ScaleY="1"/>
-                            </media:FfmpegMediaElement.RenderTransform>
-                            <media:FfmpegMediaElement.LayoutTransform>
-                                <TransformGroup>
-                                    <RotateTransform x:Name="PlayerRotation"/>
-                                    <ScaleTransform  x:Name="PlayerScale" ScaleX="1" ScaleY="1"/>
-                                </TransformGroup>
-                            </media:FfmpegMediaElement.LayoutTransform>
-                        </media:FfmpegMediaElement>
-                    </Viewbox>
+                    <!-- 映像表示（FFmpegコアエンジン / WriteableBitmap描画、Airspace非依存）
+                         黒帯なしフィット・固定ズーム・強制アスペクト比はFfmpegMediaElement内部で計算するため
+                         Viewboxは使わず、コンテナいっぱいに配置する -->
+                    <media:FfmpegMediaElement x:Name="Player"
+                                  LoadedBehavior="Manual"
+                                  RenderOptions.BitmapScalingMode="HighQuality"
+                                  SnapsToDevicePixels="True"
+                                  HorizontalAlignment="Stretch"
+                                  VerticalAlignment="Stretch"
+                                  MediaOpened="Player_MediaOpened"
+                                  MediaEnded="Player_MediaEnded"
+                                  MediaFailed="Player_MediaFailed"
+                                  RenderTransformOrigin="0.5,0.5">
+                        <media:FfmpegMediaElement.RenderTransform>
+                            <ScaleTransform x:Name="PlayerFlipTransform" ScaleX="1" ScaleY="1"/>
+                        </media:FfmpegMediaElement.RenderTransform>
+                        <media:FfmpegMediaElement.LayoutTransform>
+                            <TransformGroup>
+                                <RotateTransform x:Name="PlayerRotation"/>
+                                <ScaleTransform  x:Name="PlayerScale" ScaleX="1" ScaleY="1"/>
+                            </TransformGroup>
+                        </media:FfmpegMediaElement.LayoutTransform>
+                    </media:FfmpegMediaElement>
                 </Grid>
             </Border>
 
@@ -907,6 +909,33 @@
                                     <RadioButton x:Name="ForceVerticalMode" GroupName="ViewMode"
                                                  Content="強制縦型モード" Style="{StaticResource ModernRadio}"
                                                  Checked="Mode_Checked"/>
+
+                                    <TextBlock Text="表示倍率" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
+                                    <ComboBox x:Name="ScaleModeCombo" Margin="0,0,0,6"
+                                              SelectionChanged="ScaleMode_Changed" SelectedIndex="0">
+                                        <ComboBoxItem Content="オート（黒帯なしで埋める）" Tag="Auto"/>
+                                        <ComboBoxItem Content="サイズ x1（等倍）" Tag="Zoom1x"/>
+                                        <ComboBoxItem Content="サイズ x2" Tag="Zoom2x"/>
+                                        <ComboBoxItem Content="サイズ x2.5" Tag="Zoom2_5x"/>
+                                        <ComboBoxItem Content="サイズ x3" Tag="Zoom3x"/>
+                                        <ComboBoxItem Content="サイズ x4" Tag="Zoom4x"/>
+                                    </ComboBox>
+
+                                    <TextBlock Text="アスペクト比（オート時のみ）" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,4,0,4"/>
+                                    <ComboBox x:Name="AspectModeCombo" Margin="0,0,0,6"
+                                              SelectionChanged="AspectMode_Changed" SelectedIndex="0">
+                                        <ComboBoxItem Content="動画本来の比率を維持" Tag="Native"/>
+                                        <ComboBoxItem Content="自由（比率無視で伸縮）" Tag="Free"/>
+                                        <ComboBoxItem Content="強制 16:9" Tag="Force16x9"/>
+                                        <ComboBoxItem Content="強制 4:3" Tag="Force4x3"/>
+                                        <ComboBoxItem Content="強制 9:16" Tag="Force9x16"/>
+                                    </ComboBox>
+
+                                    <CheckBox x:Name="DeinterlaceCheck" Content="デインターレース（簡易ブレンド方式）"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                              Checked="Deinterlace_Changed" Unchecked="Deinterlace_Changed"/>
 
                                     <Border Style="{StaticResource Separator}"/>
 

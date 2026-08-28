@@ -36,14 +36,15 @@
     </Window.Resources>
 
     <Grid>
-        <!-- 映像表示（FFmpegコアエンジン。Airspace非依存のためOSDは常にこの上に正しく重なる） -->
-        <Viewbox Stretch="Uniform">
-            <media:FfmpegMediaElement x:Name="Player"
-                          LoadedBehavior="Manual"
-                          RenderOptions.BitmapScalingMode="HighQuality"
-                          MediaOpened="Player_MediaOpened"
-                          MediaEnded="Player_MediaEnded"/>
-        </Viewbox>
+        <!-- 映像表示（FFmpegコアエンジン。Airspace非依存のためOSDは常にこの上に正しく重なる。
+             黒帯なしフィット計算はFfmpegMediaElement内部で行うためViewboxは使わない） -->
+        <media:FfmpegMediaElement x:Name="Player"
+                      LoadedBehavior="Manual"
+                      RenderOptions.BitmapScalingMode="HighQuality"
+                      HorizontalAlignment="Stretch"
+                      VerticalAlignment="Stretch"
+                      MediaOpened="Player_MediaOpened"
+                      MediaEnded="Player_MediaEnded"/>
 
         <!-- OSD：マウス移動で表示、3秒で自動非表示 -->
         <Border x:Name="Osd" VerticalAlignment="Bottom" Visibility="Collapsed">

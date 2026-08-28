@@ -42,6 +42,7 @@ namespace VerticalPlayer
 
             if (rotationAngle != 0)
                 Player.LayoutTransform = new RotateTransform(rotationAngle);
+            Player.DisplayRotation = rotationAngle;
 
             _timer.Tick += Timer_Tick;
             _osdTimer.Tick += (s, e) => { _osdTimer.Stop(); Osd.Visibility = Visibility.Collapsed; };

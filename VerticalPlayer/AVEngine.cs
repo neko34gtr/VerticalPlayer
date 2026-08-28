@@ -2,8 +2,8 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -43,6 +43,14 @@ namespace VerticalPlayer.Media
         // ── エフェクト（-1〜1想定。0が無効） ──
         private volatile bool _effectsActive;
         private double _contrast, _saturation, _gamma;
+        private volatile bool _deinterlaceEnabled;
+
+        /// <summary>簡易デインターレース（隣接ラインのブレンド方式）の有効/無効。</summary>
+        public bool DeinterlaceEnabled
+        {
+            get => _deinterlaceEnabled;
+            set => _deinterlaceEnabled = value;
+        }
 
         // ── 外部マスタークロック（FfmpegMediaElement内の非表示MediaElementのPositionを反映） ──
         private readonly Stopwatch _extClock = new();
@@ -131,10 +139,21 @@ namespace VerticalPlayer.Media
             Interlocked.Increment(ref _generation);
             _paused = true;
 
+            // 旧スレッドの終了をUIスレッドで同期待ちしない。ネイティブリソースは
+            // 各デコードスレッド自身のローカル変数として保持・解放されるため、
+            // 旧スレッドが多少長く生き残っても他スレッドと衝突しない設計になっている。
+            // ここでJoin()してUIスレッドを止めると、旧スレッドが何らかの理由で
+            // 応答が遅い場合に無関係な操作までブロックしてしまう。
             var t = _decodeThread;
             _decodeThread = null;
-            if (t != null && !t.Join(2000))
-                Trace($"Stop(): decode thread did not exit within 2000ms ({t.ManagedThreadId})");
+            if (t != null)
+            {
+                Task.Run(() =>
+                {
+                    if (!t.Join(10000))
+                        Trace($"Stop(): decode thread did not exit within 10000ms ({t.ManagedThreadId}) - リーク疑いあり");
+                });
+            }
         }
 
         public void Play() => _paused = false;
@@ -154,19 +173,22 @@ namespace VerticalPlayer.Media
         // ハードウェアデコード用: get_format コールバック
         // ─────────────────────────────────────────────────────────────
         [ThreadStatic] private static AVPixelFormat _negotiatedHwPixFmt;
-
-        // AVCodecContext_get_format_func はデリゲートではなく、それを包む構造体（Pointerフィールド
-        // 暗黙変換演算子を持つ）。実体のデリゲート型 AVCodecContext_get_format 側でインスタンス化する。
         private static readonly AVCodecContext_get_format _getHwFormatDelegate = GetHwFormat;
 
         private static AVPixelFormat GetHwFormat(AVCodecContext* ctx, AVPixelFormat* pixFmts)
         {
             for (var p = pixFmts; *p != AVPixelFormat.AV_PIX_FMT_NONE; p++)
             {
-                if (*p == _negotiatedHwPixFmt) return *p;
+                if (*p == _negotiatedHwPixFmt)
+                {
+                    Trace($"get_format: HW形式({*p})を採用");
+                    return *p;
+                }
             }
+            Trace($"get_format: HW形式({_negotiatedHwPixFmt})が候補に無く、先頭の{*pixFmts}にフォールバック（＝実質SW動作）");
             return *pixFmts;
         }
+
         // ─────────────────────────────────────────────────────────────
         // デコードスレッド本体（映像のみ）
         // ─────────────────────────────────────────────────────────────
@@ -259,7 +281,7 @@ namespace VerticalPlayer.Media
                     {
                         if (ffmpeg.avcodec_send_packet(vctx, pkt) == 0)
                         {
-                            while (ffmpeg.avcodec_receive_frame(vctx, frame) == 0)
+                            while (myGen == _generation && ffmpeg.avcodec_receive_frame(vctx, frame) == 0)
                             {
                                 AVFrame* srcFrame = frame;
                                 if (hwActive)
@@ -305,6 +327,9 @@ namespace VerticalPlayer.Media
                                     int stride = rgbFrame->linesize[0];
                                     System.Runtime.InteropServices.Marshal.Copy((IntPtr)rgbFrame->data[0], managedBuf, 0, bufSize);
 
+                                    if (_deinterlaceEnabled)
+                                        ApplyDeinterlaceBlend(managedBuf, w, h, stride);
+
                                     if (_effectsActive)
                                         ApplyEffects(managedBuf, bufSize);
 
@@ -327,6 +352,7 @@ namespace VerticalPlayer.Media
                                 else
                                 {
                                     Trace($"Frame dropped (behind {(-diff) * 1000:F0}ms) pts={ptsSeconds:F3}");
+                                    Thread.Sleep(1); // 大量ドロップ時にデコーダ/GPUを連続で叩き過ぎないようにする
                                 }
                             }
                         }
@@ -354,7 +380,8 @@ namespace VerticalPlayer.Media
                 if (pkt != null) { var p2 = pkt; ffmpeg.av_packet_free(&p2); }
                 if (sws != null) ffmpeg.sws_freeContext(sws);
                 if (vctx != null) { var v = vctx; ffmpeg.avcodec_free_context(&v); }
-                if (hwDeviceCtx != null) { var hw = hwDeviceCtx; ffmpeg.av_buffer_unref(&hw); }
+                // 自分で av_buffer_unref すると二重解放になりExecutionEngineExceptionの原因になる
+                //if (hwDeviceCtx != null) { var hw = hwDeviceCtx; ffmpeg.av_buffer_unref(&hw); }
                 if (fmt != null) { var f = fmt; ffmpeg.avformat_close_input(&f); }
                 Trace($"DecodeThread(gen={myGen}) fully exited");
             }
@@ -383,15 +410,20 @@ namespace VerticalPlayer.Media
             var vc = ffmpeg.avcodec_alloc_context3(vcodec);
             ffmpeg.avcodec_parameters_to_context(vc, fmt->streams[videoIdx]->codecpar);
 
+            Trace($"OpenStreamsWithHw: codec={ByteToString(vcodec->name)} wantHw={wantHw}");
+
             if (wantHw)
             {
                 try
                 {
                     AVPixelFormat hwPixFmt = AVPixelFormat.AV_PIX_FMT_NONE;
+                    int cfgCount = 0;
                     for (int i = 0; ; i++)
                     {
                         var cfg = ffmpeg.avcodec_get_hw_config(vcodec, i);
                         if (cfg == null) break;
+                        cfgCount++;
+                        Trace($"  hw_config[{i}]: device_type={cfg->device_type} pix_fmt={cfg->pix_fmt} methods=0x{cfg->methods:X}");
                         if ((cfg->methods & 0x01 /* AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX（AutoGenに列挙が無いため直値） */) != 0
                             && cfg->device_type == AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA)
                         {
@@ -399,11 +431,13 @@ namespace VerticalPlayer.Media
                             break;
                         }
                     }
+                    Trace($"OpenStreamsWithHw: hw_config候補数={cfgCount} 選択pix_fmt={hwPixFmt}");
 
                     if (hwPixFmt != AVPixelFormat.AV_PIX_FMT_NONE)
                     {
                         AVBufferRef* devCtx = null;
-                        if (ffmpeg.av_hwdevice_ctx_create(&devCtx, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, null, null, 0) == 0)
+                        int devRet = ffmpeg.av_hwdevice_ctx_create(&devCtx, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, null, null, 0);
+                        if (devRet == 0)
                         {
                             _negotiatedHwPixFmt = hwPixFmt;
                             vc->get_format = _getHwFormatDelegate;
@@ -411,29 +445,31 @@ namespace VerticalPlayer.Media
                             ffmpeg.av_buffer_unref(&devCtx);
                             hwDeviceCtx = vc->hw_device_ctx;
                             hwActive = true;
+                            Trace("OpenStreamsWithHw: av_hwdevice_ctx_create(D3D11VA) 成功、hw_device_ctx設定完了");
                         }
                         else
                         {
-                            Trace("av_hwdevice_ctx_create(D3D11VA) 失敗 - SWにフォールバック");
+                            Trace($"OpenStreamsWithHw: av_hwdevice_ctx_create(D3D11VA) 失敗 code={devRet} - SWにフォールバック");
                         }
                     }
                     else
                     {
-                        Trace("このコーデックはD3D11VAの対応構成が見つからない - SWにフォールバック");
+                        Trace("OpenStreamsWithHw: このコーデックはD3D11VAの対応構成が見つからない - SWにフォールバック");
                     }
                 }
                 catch (Exception ex)
                 {
-                    Trace($"HW初期化中に例外 - SWにフォールバック: {ex.Message}");
+                    Trace($"OpenStreamsWithHw: HW初期化中に例外 - SWにフォールバック: {ex.Message}");
                     hwActive = false;
                 }
             }
 
-            if (ffmpeg.avcodec_open2(vc, vcodec, null) < 0)
+            int openRet = ffmpeg.avcodec_open2(vc, vcodec, null);
+            if (openRet < 0)
             {
                 if (hwActive)
                 {
-                    Trace("HWデコーダのopenに失敗 - SWで再試行");
+                    Trace($"OpenStreamsWithHw: HWデコーダのopenに失敗 code={openRet} - SWで再試行");
                     hwActive = false;
                     vc->get_format = null;
                     if (vc->hw_device_ctx != null) { var h2 = vc->hw_device_ctx; ffmpeg.av_buffer_unref(&h2); vc->hw_device_ctx = null; }
@@ -445,7 +481,32 @@ namespace VerticalPlayer.Media
                     throw new InvalidOperationException("avcodec_open2(video) failed");
                 }
             }
+            Trace($"OpenStreamsWithHw: avcodec_open2完了 hwActive={hwActive} vc->pix_fmt(SW側の想定値)={vc->pix_fmt}");
             vctx = vc;
+        }
+
+        private static unsafe string ByteToString(byte* ptr)
+        {
+            try { return System.Runtime.InteropServices.Marshal.PtrToStringAnsi((IntPtr)ptr) ?? "?"; }
+            catch { return "?"; }
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        // 簡易デインターレース（ブレンド方式）
+        // 各ラインを直下のラインと平均化し、横縞(コーミング)を軽減する。
+        // yadif等のフィルタグラフを使わないため画質は簡易的だが、失敗リスクが低い。
+        // ─────────────────────────────────────────────────────────────
+        private void ApplyDeinterlaceBlend(byte[] buf, int width, int height, int stride)
+        {
+            for (int y = 0; y < height - 1; y++)
+            {
+                int row = y * stride;
+                int nextRow = row + stride;
+                for (int x = 0; x < stride; x++)
+                {
+                    buf[row + x] = (byte)((buf[row + x] + buf[nextRow + x]) >> 1);
+                }
+            }
         }
 
         // ─────────────────────────────────────────────────────────────

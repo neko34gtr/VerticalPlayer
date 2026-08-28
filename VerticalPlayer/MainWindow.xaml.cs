@@ -629,6 +629,7 @@ namespace VerticalPlayer
             double before = _currentRotation;
             _currentRotation = (_currentRotation + 90) % 360;
             PlayerRotation.Angle = _currentRotation;
+            Player.DisplayRotation = _currentRotation;
             Trace($"Rotate: {before}° -> {_currentRotation}° (PlayerRotation.Angle actual={PlayerRotation.Angle}°)");
             if (Player.NaturalVideoWidth > 0)
             {
@@ -747,12 +748,53 @@ namespace VerticalPlayer
         }
 
         // ─────────────────────────────────────────────────────────────────
+        // 画面フィット（黒帯なし）・アスペクト比・デインターレース
+        // ─────────────────────────────────────────────────────────────────
+        private void ScaleMode_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (ScaleModeCombo.SelectedItem is ComboBoxItem item
+                && Enum.TryParse<VerticalPlayer.Media.VideoScaleMode>((string)item.Tag, out var mode))
+            {
+                Player.ScaleMode = mode;
+            }
+        }
+
+        private void AspectMode_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (AspectModeCombo.SelectedItem is ComboBoxItem item
+                && Enum.TryParse<VerticalPlayer.Media.VideoAspectMode>((string)item.Tag, out var mode))
+            {
+                Player.AspectMode = mode;
+            }
+        }
+
+        private void Deinterlace_Changed(object sender, RoutedEventArgs e)
+        {
+            Player.Deinterlace = DeinterlaceCheck.IsChecked ?? false;
+        }
+
+        // ─────────────────────────────────────────────────────────────────
         // ハードウェアアクセラレーション設定（次に開くファイルから適用）
         // ─────────────────────────────────────────────────────────────────
         private void HwAccel_Changed(object sender, RoutedEventArgs e)
         {
             Player.HardwareAcceleration = HwAccelCheck.IsChecked ?? false;
-            Trace($"HwAccel_Changed: requested={Player.HardwareAcceleration}（次に開くファイルから適用）");
+
+            if (Player.Source != null)
+            {
+                // 再生中のファイルにも即時反映するため、現在位置・再生状態を保持したまま開き直す
+                var pos = Player.Position;
+                bool wasPlaying = _isPlaying;
+                var src = Player.Source;
+                Trace($"HwAccel_Changed: requested={Player.HardwareAcceleration} - 現在のファイルを再オープンして即時反映 pos={pos}");
+                Player.Source = src;
+                Player.Position = pos;
+                if (wasPlaying) { Player.Play(); _isPlaying = true; } else { _isPlaying = false; }
+            }
+            else
+            {
+                Trace($"HwAccel_Changed: requested={Player.HardwareAcceleration}（次に開くファイルから適用）");
+            }
         }
 
         private void UpdateEffectLabels()
