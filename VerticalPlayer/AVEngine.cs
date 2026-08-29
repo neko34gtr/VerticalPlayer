@@ -379,9 +379,10 @@ namespace VerticalPlayer.Media
                 if (rgbFrame != null) { var f3 = rgbFrame; ffmpeg.av_frame_free(&f3); }
                 if (pkt != null) { var p2 = pkt; ffmpeg.av_packet_free(&p2); }
                 if (sws != null) ffmpeg.sws_freeContext(sws);
+                // hw_device_ctx は avcodec_free_context() が内部で解放するため、
+                // ここで自分で av_buffer_unref すると二重解放になり
+                // ExecutionEngineException（ネイティブ側のメモリ破壊）の原因になる
                 if (vctx != null) { var v = vctx; ffmpeg.avcodec_free_context(&v); }
-                // 自分で av_buffer_unref すると二重解放になりExecutionEngineExceptionの原因になる
-                //if (hwDeviceCtx != null) { var hw = hwDeviceCtx; ffmpeg.av_buffer_unref(&hw); }
                 if (fmt != null) { var f = fmt; ffmpeg.avformat_close_input(&f); }
                 Trace($"DecodeThread(gen={myGen}) fully exited");
             }

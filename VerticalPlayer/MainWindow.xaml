@@ -10,6 +10,7 @@
         AllowsTransparency="True"
         ResizeMode="CanResizeWithGrip"
         Closing="Window_Closing"
+        SizeChanged="Window_SizeChanged"
         Loaded="Window_Loaded">
 
     <Window.Resources>
@@ -914,7 +915,7 @@
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
                                     <ComboBox x:Name="ScaleModeCombo" Margin="0,0,0,6"
                                               SelectionChanged="ScaleMode_Changed" SelectedIndex="0">
-                                        <ComboBoxItem Content="オート（黒帯なしで埋める）" Tag="Auto"/>
+                                        <ComboBoxItem Content="オート（アスペクト比維持・黒帯最小）" Tag="Auto"/>
                                         <ComboBoxItem Content="サイズ x1（等倍）" Tag="Zoom1x"/>
                                         <ComboBoxItem Content="サイズ x2" Tag="Zoom2x"/>
                                         <ComboBoxItem Content="サイズ x2.5" Tag="Zoom2_5x"/>
@@ -947,8 +948,8 @@
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="HwAccel_Changed" Unchecked="HwAccel_Changed"/>
                                     <TextBlock x:Name="DecodeModeText" Text="デコード: -"
-                                               Foreground="{StaticResource TextMuted}"
-                                               FontSize="10" FontFamily="Consolas" Margin="0,0,0,4"/>
+                                               Foreground="{StaticResource TextPrimary}"
+                                               FontSize="16" FontWeight="Bold" FontFamily="Consolas" Margin="0,0,0,4"/>
                                     <CheckBox x:Name="AlwaysOnTopCheck" Content="常に最前面"
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="AlwaysOnTop_Changed" Unchecked="AlwaysOnTop_Changed"/>

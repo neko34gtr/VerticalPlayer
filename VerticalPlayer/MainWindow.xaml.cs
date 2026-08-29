@@ -140,7 +140,13 @@ namespace VerticalPlayer
             this.KeyDown += MainWindow_KeyDown;
 
             // 実際のデコードモード（HW/SW）表示
-            Player.DecodeModeChanged += mode => DecodeModeText.Text = $"デコード: {mode}";
+            Player.DecodeModeChanged += mode =>
+            {
+                DecodeModeText.Text = $"デコード: {mode}";
+                DecodeModeText.Foreground = mode.StartsWith("HW")
+                    ? (Brush)FindResource("AccentCyan")
+                    : (Brush)FindResource("TextPrimary");
+            };
         }
 
         // ─────────────────────────────────────────────────────────────────
@@ -185,6 +191,7 @@ namespace VerticalPlayer
             this.Topmost = s.AlwaysOnTop;
             _currentRotation = s.Rotation;
             PlayerRotation.Angle = _currentRotation;
+            Player.DisplayRotation = _currentRotation;
             HwAccelCheck.IsChecked = s.HwAccel;
 
             // ── エフェクト ──
@@ -429,7 +436,7 @@ namespace VerticalPlayer
             string? directory = Path.GetDirectoryName(currentPath);
             if (string.IsNullOrEmpty(directory)) return false;
 
-            string[] extensions = { "*.mp4", "*.mkv", "*.avi", "*.wmv", "*.mov" };
+            string[] extensions = { "*.mp4", "*.mkv", "*.avi", "*.wmv", "*.mov", "*.webm", "*.m4v", "*.mpg", "*.ts", "*.flv", "*.ogv", "*.divx", "*.asf", "*.bc!" };
             List<string> fileList = new List<string>();
             foreach (var ext in extensions)
             {
@@ -667,8 +674,42 @@ namespace VerticalPlayer
             {
                 _currentRotation = 0;
                 PlayerRotation.Angle = 0;
+                Player.DisplayRotation = 0;
             }
             ResizeToVideo();
+        }
+
+        private bool _resizingProgrammatically = false;
+
+        // 手動でウィンドウをドラッグリサイズした際、片辺だけを動かした場合は
+        // もう片方をアスペクト比維持で自動追従させる（横方向の黒帯を自動解消）
+        private void Window_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            if (_resizingProgrammatically) return;
+            if (Player == null || Player.NaturalVideoWidth <= 0) return;
+            if (this.WindowState != WindowState.Normal) return;
+
+            double dispRatio = (_currentRotation == 90 || _currentRotation == 270)
+                ? (double)Player.NaturalVideoHeight / Player.NaturalVideoWidth
+                : (double)Player.NaturalVideoWidth / Player.NaturalVideoHeight;
+
+            _resizingProgrammatically = true;
+            try
+            {
+                if (e.WidthChanged && !e.HeightChanged)
+                {
+                    this.Height = Math.Max(this.MinHeight, e.NewSize.Width / dispRatio);
+                }
+                else if (e.HeightChanged && !e.WidthChanged)
+                {
+                    this.Width = Math.Max(this.MinWidth, e.NewSize.Height * dispRatio);
+                }
+                // 角ドラッグ等で両辺同時に変わった場合は、ユーザー操作をそのまま尊重する
+            }
+            finally
+            {
+                _resizingProgrammatically = false;
+            }
         }
 
         private void ResizeToVideo()
@@ -1093,7 +1134,7 @@ namespace VerticalPlayer
             if (string.IsNullOrEmpty(_lastFilePath)) return null;
             string? dir = Path.GetDirectoryName(_lastFilePath);
             if (string.IsNullOrEmpty(dir)) return null;
-            string[] exts = { "*.mp4", "*.mkv", "*.avi", "*.wmv", "*.mov", "*.webm", "*.m4v" };
+            string[] exts = { "*.mp4", "*.mkv", "*.avi", "*.wmv", "*.mov", "*.webm", "*.m4v", "*.mpg", "*.ts", "*.flv", "*.ogv", "*.divx", "*.asf", "*.bc!" };
             var files = new List<string>();
             foreach (var ext in exts) files.AddRange(Directory.GetFiles(dir, ext));
             files.Sort();
@@ -1264,7 +1305,7 @@ namespace VerticalPlayer
             if (string.IsNullOrEmpty(_lastFilePath)) return false;
             string? dir = Path.GetDirectoryName(_lastFilePath);
             if (string.IsNullOrEmpty(dir)) return false;
-            string[] exts = { "*.mp4", "*.mkv", "*.avi", "*.wmv", "*.mov", "*.webm", "*.m4v" };
+            string[] exts = { "*.mp4", "*.mkv", "*.avi", "*.wmv", "*.mov", "*.webm", "*.m4v", "*.mpg", "*.ts", "*.flv", "*.ogv", "*.divx", "*.asf", "*.bc!" };
             var files = new List<string>();
             foreach (var ext in exts) files.AddRange(Directory.GetFiles(dir, ext));
             files.Sort();
