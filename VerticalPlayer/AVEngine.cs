@@ -29,6 +29,8 @@ namespace VerticalPlayer.Media
         public event Action<Exception>? Failed;
         /// <summary>実際に使われたデコードモードを通知（例: "HW (D3D11VA)" / "SW"）。UIスレッドで発火。</summary>
         public event Action<string>? DecodeModeChanged;
+        /// <summary>1フレームが実際にWritePixelsされた直後、そのフレームの再生時刻(秒)を伴って発火。UIスレッドで発火。</summary>
+        public event Action<double>? FrameDisplayed;
 
         private readonly Dispatcher _ui;
         private int _generation;
@@ -59,6 +61,13 @@ namespace VerticalPlayer.Media
 
         private readonly object _seekLock = new();
         private double _pendingSeekSeconds = -1;
+
+        // ── シーク直後の「クロックが逃げる」対策 ──
+        // シーク実行〜最初のフレーム表示までの間は外部クロックを凍結し、
+        // 実時間で進み続ける再生位置にキャッチアップが追いつけず映像だけ
+        // 止まり続ける（音声だけ流れる）症状を防ぐ。
+        private volatile bool _catchingUpAfterSeek;
+        private volatile bool _desiredPlaying;
 
         public WriteableBitmap? Bitmap { get; private set; }
         public int VideoWidth { get; private set; }
@@ -100,6 +109,18 @@ namespace VerticalPlayer.Media
 
         public void SetExternalClock(double seconds, bool isPlaying)
         {
+            _desiredPlaying = isPlaying;
+
+            if (_catchingUpAfterSeek)
+            {
+                // キャッチアップ中は基準秒だけ更新し、クロックは進めない（凍結）。
+                // ここで isPlaying をそのまま反映すると、50msごとの _clockTimer が
+                // 実時間で進む値を再投入し続け、デコードが追いつく前に目標が
+                // どんどん先へ逃げてしまう（＝映像が永久に追いつけない）。
+                _extBaseSeconds = seconds;
+                return;
+            }
+
             _extBaseSeconds = seconds;
             _extClock.Restart();
             _extPlaying = isPlaying;
@@ -123,6 +144,8 @@ namespace VerticalPlayer.Media
             _extBaseSeconds = 0;
             _extClock.Restart();
             _extPlaying = false;
+            _catchingUpAfterSeek = false;
+            _desiredPlaying = false;
 
             bool wantHw = HardwareAccelRequested;
             var t = new Thread(() => OpenAndRun(source.LocalPath, myGen, wantHw))
@@ -259,6 +282,8 @@ namespace VerticalPlayer.Media
                             long ts = (long)(target / ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base));
                             ffmpeg.av_seek_frame(fmt, videoIdx, ts, ffmpeg.AVSEEK_FLAG_BACKWARD);
                             ffmpeg.avcodec_flush_buffers(vctx);
+                            _catchingUpAfterSeek = true;
+                            _extPlaying = false; // 最初のフレームが出るまでクロックを凍結
                             Trace($"Seek -> {target:F2}s");
                         }
                     }
@@ -295,16 +320,10 @@ namespace VerticalPlayer.Media
                                     srcFrame = swFrame;
                                 }
 
-                                if (sws == null)
-                                {
-                                    sws = ffmpeg.sws_getContext(w, h, (AVPixelFormat)srcFrame->format,
-                                        w, h, AVPixelFormat.AV_PIX_FMT_BGRA, 2, null, null, null);
-                                    Trace($"sws_getContext created srcFmt={(AVPixelFormat)srcFrame->format}");
-                                }
-
-                                ffmpeg.sws_scale(sws, srcFrame->data, srcFrame->linesize, 0, h,
-                                    rgbFrame->data, rgbFrame->linesize);
-
+                                // pts/diff の判定は sws_scale より先に行う。シーク直後の
+                                // キャッチアップ中は大量のフレームを drop することになるため、
+                                // 捨てるフレームに対して毎回スケーリング処理を行うのは無駄が
+                                // 大きく、それ自体がキャッチアップを遅らせる一因になっていた。
                                 double ptsSeconds = frame->best_effort_timestamp == ffmpeg.AV_NOPTS_VALUE
                                     ? GetMasterClockSec()
                                     : frame->best_effort_timestamp * ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base);
@@ -322,38 +341,60 @@ namespace VerticalPlayer.Media
                                     drop = true;
                                 }
 
-                                if (!drop)
-                                {
-                                    int stride = rgbFrame->linesize[0];
-                                    System.Runtime.InteropServices.Marshal.Copy((IntPtr)rgbFrame->data[0], managedBuf, 0, bufSize);
-
-                                    if (_deinterlaceEnabled)
-                                        ApplyDeinterlaceBlend(managedBuf, w, h, stride);
-
-                                    if (_effectsActive)
-                                        ApplyEffects(managedBuf, bufSize);
-
-                                    var localBuf = managedBuf;
-                                    int frameGen = myGen;
-                                    int frameW = w, frameH = h;
-                                    _ui.BeginInvoke(DispatcherPriority.Render, new Action(() =>
-                                    {
-                                        if (frameGen != _generation) return;
-                                        try
-                                        {
-                                            Bitmap?.WritePixels(new Int32Rect(0, 0, frameW, frameH), localBuf, stride, 0);
-                                        }
-                                        catch (Exception ex)
-                                        {
-                                            Trace($"WritePixels skipped: {ex.Message}");
-                                        }
-                                    }));
-                                }
-                                else
+                                if (drop)
                                 {
                                     Trace($"Frame dropped (behind {(-diff) * 1000:F0}ms) pts={ptsSeconds:F3}");
                                     Thread.Sleep(1); // 大量ドロップ時にデコーダ/GPUを連続で叩き過ぎないようにする
+                                    continue;
                                 }
+
+                                if (sws == null)
+                                {
+                                    sws = ffmpeg.sws_getContext(w, h, (AVPixelFormat)srcFrame->format,
+                                        w, h, AVPixelFormat.AV_PIX_FMT_BGRA, 2, null, null, null);
+                                    Trace($"sws_getContext created srcFmt={(AVPixelFormat)srcFrame->format}");
+                                }
+
+                                ffmpeg.sws_scale(sws, srcFrame->data, srcFrame->linesize, 0, h,
+                                    rgbFrame->data, rgbFrame->linesize);
+
+                                int stride = rgbFrame->linesize[0];
+                                System.Runtime.InteropServices.Marshal.Copy((IntPtr)rgbFrame->data[0], managedBuf, 0, bufSize);
+
+                                if (_deinterlaceEnabled)
+                                    ApplyDeinterlaceBlend(managedBuf, w, h, stride);
+
+                                if (_effectsActive)
+                                    ApplyEffects(managedBuf, bufSize);
+
+                                if (_catchingUpAfterSeek)
+                                {
+                                    // キャッチアップ完了：このフレームの時刻を基準にクロックを解凍する。
+                                    // 凍結中に実時間が進んでいないため、ここで desired 再生状態へ
+                                    // 復帰しても「逃げ続ける目標」問題は起きない。
+                                    _catchingUpAfterSeek = false;
+                                    _extBaseSeconds = ptsSeconds;
+                                    _extClock.Restart();
+                                    _extPlaying = _desiredPlaying;
+                                }
+
+                                var localBuf = managedBuf;
+                                int frameGen = myGen;
+                                int frameW = w, frameH = h;
+                                double shownPts = ptsSeconds;
+                                _ui.BeginInvoke(DispatcherPriority.Render, new Action(() =>
+                                {
+                                    if (frameGen != _generation) return;
+                                    try
+                                    {
+                                        Bitmap?.WritePixels(new Int32Rect(0, 0, frameW, frameH), localBuf, stride, 0);
+                                        FrameDisplayed?.Invoke(shownPts);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Trace($"WritePixels skipped: {ex.Message}");
+                                    }
+                                }));
                             }
                         }
                     }

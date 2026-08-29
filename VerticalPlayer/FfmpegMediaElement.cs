@@ -105,6 +105,15 @@ namespace VerticalPlayer.Media
             remove => _engine.DecodeModeChanged -= value;
         }
 
+        /// <summary>実際に1フレームが描画された（WritePixels済み）タイミングで、そのフレームの
+        /// 再生時刻(秒)を伴って発火する。コマ送り/戻しのように「指定位置のフレームが実際に
+        /// 画面に出るまで待ちたい」用途向け。固定ディレイでのポーリングより確実。</summary>
+        public event Action<double>? FrameDisplayed
+        {
+            add => _engine.FrameDisplayed += value;
+            remove => _engine.FrameDisplayed -= value;
+        }
+
         /// <summary>次に開くファイルからハードウェアデコード(D3D11VA)を試みるかどうか。非対応/失敗時はSWへ自動フォールバック。</summary>
         public bool HardwareAcceleration
         {

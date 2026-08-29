@@ -127,9 +127,27 @@ namespace VerticalPlayer
             if (t < TimeSpan.Zero) t = TimeSpan.Zero;
             if (Player.NaturalDuration.HasTimeSpan && t > Player.NaturalDuration.TimeSpan)
                 t = Player.NaturalDuration.TimeSpan;
-            Player.Play();
-            Player.Position = t;
-            await Task.Delay(80);
+
+            // 固定80ms待ちだとシーク直後のキャッチアップが間に合わずPauseで打ち切られ、
+            // 映像が更新されないまま止まって見えることがあるため、実際に目標フレームが
+            // 描画されるまで待つ（MainWindow.StepFrameと同じ方式、タイムアウト500ms）。
+            var tcs = new TaskCompletionSource();
+            double targetSec = t.TotalSeconds;
+            void OnFrameDisplayed(double pts)
+            {
+                if (pts >= targetSec - 0.06) tcs.TrySetResult();
+            }
+            Player.FrameDisplayed += OnFrameDisplayed;
+            try
+            {
+                Player.Play();
+                Player.Position = t;
+                await Task.WhenAny(tcs.Task, Task.Delay(500));
+            }
+            finally
+            {
+                Player.FrameDisplayed -= OnFrameDisplayed;
+            }
             Player.Pause();
         }
 
@@ -142,6 +160,8 @@ namespace VerticalPlayer
             string? path = _owner.GetAdjacentFile(delta);
             if (path == null) return;
             Player.Source = new Uri(path);
+            Player.SpeedRatio = 1.0; // 特殊再生（スロー等）状態はファイル単位で持ち回さない
+            SpeedLabel.Text = "1.0×";
             Player.Play();
             _isPlaying = true;
             UpdateIcon();

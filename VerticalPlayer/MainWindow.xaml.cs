@@ -74,6 +74,20 @@ namespace VerticalPlayer
             "VerticalPlayer.json"
         );
 
+        // ── 対応動画拡張子（一箇所にまとめて定義。増減はここだけ変更すればOK）──
+        private static readonly string[] SupportedVideoExtensions =
+        {
+            "mp4", "mkv", "avi", "wmv", "mov", "webm", "m4v", "mpg", "ts", "flv", "ogv", "divx", "asf", "bc!"
+        };
+
+        /// <summary>Directory.GetFiles用の "*.ext" 形式パターン一覧</summary>
+        private static IEnumerable<string> VideoGlobPatterns =>
+            SupportedVideoExtensions.Select(ext => "*." + ext);
+
+        /// <summary>OpenFileDialog用のFilter文字列</summary>
+        private static string VideoOpenFileDialogFilter =>
+            "動画ファイル|" + string.Join(";", VideoGlobPatterns) + "|すべてのファイル|*.*";
+
         // ── 状態フラグ ──
         private bool _isDragging = false;
         private bool _isMuted = false;
@@ -276,6 +290,12 @@ namespace VerticalPlayer
             Trace($"LoadVideo: {path} seek={seekSeconds}");
             try
             {
+                // 特殊再生（自動コマ送り/スロー）状態はファイル単位で持ち回さない。
+                // 次ファイルへ切り替える際は常にノーマル速度へ戻す。
+                if (_isAutoFraming) StopAutoFrame();
+                Player.SpeedRatio = 1.0;
+                SpeedSlider.Value = 1.0;
+
                 Player.LoadedBehavior = MediaState.Stop; // 停止状態に明示固定
                 Player.Source = null;
 
@@ -436,9 +456,8 @@ namespace VerticalPlayer
             string? directory = Path.GetDirectoryName(currentPath);
             if (string.IsNullOrEmpty(directory)) return false;
 
-            string[] extensions = { "*.mp4", "*.mkv", "*.avi", "*.wmv", "*.mov", "*.webm", "*.m4v", "*.mpg", "*.ts", "*.flv", "*.ogv", "*.divx", "*.asf", "*.bc!" };
             List<string> fileList = new List<string>();
-            foreach (var ext in extensions)
+            foreach (var ext in VideoGlobPatterns)
             {
                 fileList.AddRange(Directory.GetFiles(directory, ext).OrderBy(f => f));
             }
@@ -621,7 +640,7 @@ namespace VerticalPlayer
         {
             var dlg = new Microsoft.Win32.OpenFileDialog
             {
-                Filter = "動画ファイル|*.mp4;*.mov;*.avi;*.mkv;*.wmv;*.flv;*.webm;*.m4v|すべてのファイル|*.*",
+                Filter = VideoOpenFileDialogFilter,
                 Title = "動画ファイルを開く"
             };
             if (dlg.ShowDialog() == true)
@@ -1134,9 +1153,8 @@ namespace VerticalPlayer
             if (string.IsNullOrEmpty(_lastFilePath)) return null;
             string? dir = Path.GetDirectoryName(_lastFilePath);
             if (string.IsNullOrEmpty(dir)) return null;
-            string[] exts = { "*.mp4", "*.mkv", "*.avi", "*.wmv", "*.mov", "*.webm", "*.m4v", "*.mpg", "*.ts", "*.flv", "*.ogv", "*.divx", "*.asf", "*.bc!" };
             var files = new List<string>();
-            foreach (var ext in exts) files.AddRange(Directory.GetFiles(dir, ext));
+            foreach (var ext in VideoGlobPatterns) files.AddRange(Directory.GetFiles(dir, ext));
             files.Sort();
             int idx = files.FindIndex(f => f.Equals(_lastFilePath, StringComparison.OrdinalIgnoreCase));
             int next = idx + delta;
@@ -1155,10 +1173,10 @@ namespace VerticalPlayer
                 FileNameText.Text = Path.GetFileName(source.LocalPath);
                 _pendingSeek = position.TotalSeconds;
             }
-            Player.SpeedRatio = speed;
+            Player.SpeedRatio = 1.0; // 特殊再生（スロー等）状態は持ち越さず、resumeは常にノーマル速度
             Player.Volume = volume;
             VolumeSlider.Value = volume;
-            SpeedSlider.Value = Math.Clamp(speed, 0.1, 4.0);
+            SpeedSlider.Value = 1.0;
 
             if (isPlaying) { Player.Play(); _isPlaying = true; _timer.Start(); }
             else { _isPlaying = false; }
@@ -1233,11 +1251,28 @@ namespace VerticalPlayer
             if (Player.NaturalDuration.HasTimeSpan && target > Player.NaturalDuration.TimeSpan)
                 target = Player.NaturalDuration.TimeSpan;
 
-            // Play → シーク → 描画完了を待ってから Pause
-            // 同一フレームで連続実行すると映像が更新されないためawaitで1フレーム待機
-            Player.Play();
-            Player.Position = target;
-            await Task.Delay(80); // 描画サイクル待ち（約2フレーム分）
+            // Play → シーク → 目標フレームが実際に描画されるまで待ってから Pause。
+            // 固定80ms待ちだと、シーク直後のキャッチアップ（GOP長やHW転送の負荷次第で
+            // 所要時間が変動）が間に合わずPauseで打ち切られ、映像が更新されないまま
+            // 止まって見える不具合があったため、実際の描画完了イベントを待つ方式に変更。
+            // 何らかの理由でイベントが来ない場合に備えて最大500msでタイムアウトする。
+            var tcs = new TaskCompletionSource();
+            double targetSec = target.TotalSeconds;
+            void OnFrameDisplayed(double pts)
+            {
+                if (pts >= targetSec - 0.06) tcs.TrySetResult();
+            }
+            Player.FrameDisplayed += OnFrameDisplayed;
+            try
+            {
+                Player.Play();
+                Player.Position = target;
+                await Task.WhenAny(tcs.Task, Task.Delay(500));
+            }
+            finally
+            {
+                Player.FrameDisplayed -= OnFrameDisplayed;
+            }
             Player.Pause();
 
             Trace($"StepFrame done: target={target}");
@@ -1305,9 +1340,8 @@ namespace VerticalPlayer
             if (string.IsNullOrEmpty(_lastFilePath)) return false;
             string? dir = Path.GetDirectoryName(_lastFilePath);
             if (string.IsNullOrEmpty(dir)) return false;
-            string[] exts = { "*.mp4", "*.mkv", "*.avi", "*.wmv", "*.mov", "*.webm", "*.m4v", "*.mpg", "*.ts", "*.flv", "*.ogv", "*.divx", "*.asf", "*.bc!" };
             var files = new List<string>();
-            foreach (var ext in exts) files.AddRange(Directory.GetFiles(dir, ext));
+            foreach (var ext in VideoGlobPatterns) files.AddRange(Directory.GetFiles(dir, ext));
             files.Sort();
             int idx = files.FindIndex(f => f.Equals(_lastFilePath, StringComparison.OrdinalIgnoreCase));
             int next = idx + delta;
