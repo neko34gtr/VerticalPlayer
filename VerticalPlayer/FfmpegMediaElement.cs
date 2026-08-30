@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -370,6 +371,37 @@ namespace VerticalPlayer.Media
             NaturalDuration = Duration.Automatic;
             NaturalVideoWidth = 0;
             NaturalVideoHeight = 0;
+        }
+
+        /// <summary>コマ送り/戻し専用。音声の再生（Play/Pause）には一切触れず、
+        /// 映像デコードだけを指定位置へシークして1フレーム表示する。
+        /// 音声再生を伴わないため、これまでの「シーク直後に音声が実時間で進み続け
+        /// クロックの目標が逃げる」系の不具合を構造的に回避できる。
+        /// Position（_audio.Position）はシークバー/時刻表示の整合のためだけに更新し、
+        /// 実際の音の再生は行わない（Pause状態のまま位置だけ動かす）。</summary>
+        public async Task<bool> StepToVideoOnlyAsync(TimeSpan target, int timeoutMs = 500)
+        {
+            var tcs = new TaskCompletionSource<bool>();
+            double targetSec = target.TotalSeconds;
+            void OnFrame(double pts)
+            {
+                if (pts >= targetSec - 0.06) tcs.TrySetResult(true);
+            }
+            _engine.FrameDisplayed += OnFrame;
+            try
+            {
+                _audio.Position = target; // 音は出さず位置だけ合わせる
+                _engine.SetExternalClock(targetSec, false);
+                _engine.Seek(target);
+                _engine.Play(); // 映像デコードのみ再開（_audio.Play()は呼ばない）
+                var completed = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
+                return completed == tcs.Task;
+            }
+            finally
+            {
+                _engine.FrameDisplayed -= OnFrame;
+                _engine.Pause();
+            }
         }
     }
 }

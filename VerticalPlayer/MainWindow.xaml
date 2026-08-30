@@ -845,6 +845,26 @@
                                            Foreground="{StaticResource TextFaint}"
                                            FontSize="9" FontWeight="Bold"/>
                             </Button>
+                            <Button x:Name="HwStatusBtn" Style="{StaticResource IconBtn}"
+                                    Click="HwStatus_Click" ToolTip="クリックでハードウェア/ソフトウェアデコードを切替"
+                                    Padding="5" Margin="4,0,0,0">
+                                <TextBlock x:Name="HwStatusLabel" Text="H/W"
+                                           Foreground="{StaticResource TextFaint}"
+                                           FontSize="9" FontWeight="Bold"/>
+                            </Button>
+                            <!-- PotPlayer風コーデック表示（映像コーデック / 音声コーデック / チャンネル数） -->
+                            <TextBlock x:Name="VideoCodecLabel" Text=""
+                                       Foreground="{StaticResource TextMuted}"
+                                       FontSize="9" FontWeight="Bold"
+                                       VerticalAlignment="Center" Margin="6,0,0,0"/>
+                            <TextBlock x:Name="AudioCodecLabel" Text=""
+                                       Foreground="{StaticResource TextMuted}"
+                                       FontSize="9" FontWeight="Bold"
+                                       VerticalAlignment="Center" Margin="5,0,0,0"/>
+                            <TextBlock x:Name="AudioChannelLabel" Text=""
+                                       Foreground="{StaticResource TextMuted}"
+                                       FontSize="9" FontWeight="Bold"
+                                       VerticalAlignment="Center" Margin="5,0,0,0"/>
                         </StackPanel>
                         <!-- fps選択 -->
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">

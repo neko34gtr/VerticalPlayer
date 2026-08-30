@@ -153,13 +153,20 @@ namespace VerticalPlayer
             // キーボードショートカット
             this.KeyDown += MainWindow_KeyDown;
 
-            // 実際のデコードモード（HW/SW）表示
+            // 実際のデコードモード（HW/SW）表示。設定パネル内のDecodeModeTextと
+            // コントロールバーのHwStatusLabelを同じイベントで同時に更新することで連動させる。
             Player.DecodeModeChanged += mode =>
             {
                 DecodeModeText.Text = $"デコード: {mode}";
-                DecodeModeText.Foreground = mode.StartsWith("HW")
-                    ? (Brush)FindResource("AccentCyan")
-                    : (Brush)FindResource("TextPrimary");
+                bool isHw = mode.StartsWith("HW");
+                var brush = isHw ? (Brush)FindResource("AccentCyan") : (Brush)FindResource("TextPrimary");
+                DecodeModeText.Foreground = brush;
+
+                HwStatusLabel.Text = isHw ? "H/W" : "S/W";
+                HwStatusLabel.Foreground = brush;
+                HwStatusBtn.ToolTip = isHw
+                    ? "現在: ハードウェアデコード（クリックでソフトウェアへ切替）"
+                    : "現在: ソフトウェアデコード（クリックでハードウェアへ切替）";
             };
         }
 
@@ -295,6 +302,9 @@ namespace VerticalPlayer
                 if (_isAutoFraming) StopAutoFrame();
                 Player.SpeedRatio = 1.0;
                 SpeedSlider.Value = 1.0;
+                VideoCodecLabel.Text = "";
+                AudioCodecLabel.Text = "";
+                AudioChannelLabel.Text = "";
 
                 Player.LoadedBehavior = MediaState.Stop; // 停止状態に明示固定
                 Player.Source = null;
@@ -388,6 +398,7 @@ namespace VerticalPlayer
                     Trace($"MediaInfo: failed for {path}");
                     _mediaInfo?.Dispose();
                     _mediaInfo = null;
+                    UpdateCodecStatusBar();
                     return;
                 }
 
@@ -404,11 +415,37 @@ namespace VerticalPlayer
                 _mediaInfo?.Dispose();
                 _mediaInfo = mi;
                 UpdateVideoInfo();
+                UpdateCodecStatusBar();
             }
             catch (Exception ex)
             {
                 Trace($"AnalyzeAndShowMediaInfo EXCEPTION: {ex.Message}");
             }
+        }
+
+        // コントロールバーのH/W表示の隣に、PotPlayerのような映像/音声コーデック略称を表示する。
+        // MediaInfoNativeの解析が終わるたびに（AnalyzeAndShowMediaInfoから）呼ばれる。
+        private void UpdateCodecStatusBar()
+        {
+            if (_mediaInfo == null || !_mediaInfo.Success)
+            {
+                VideoCodecLabel.Text = "";
+                AudioCodecLabel.Text = "";
+                AudioChannelLabel.Text = "";
+                return;
+            }
+
+            VideoCodecLabel.Text = _mediaInfo.VideoCodec ?? "";
+            AudioCodecLabel.Text = _mediaInfo.AudioCodec ?? "";
+            int ch = _mediaInfo.AudioChannelCount;
+            AudioChannelLabel.Text = ch switch
+            {
+                1 => "1.0",
+                2 => "2.0",
+                6 => "5.1",
+                8 => "7.1",
+                _ => ch > 0 ? $"{ch}ch" : ""
+            };
         }
 
         private MediaInfoNative? _mediaInfo = null;
@@ -857,6 +894,13 @@ namespace VerticalPlayer
             }
         }
 
+        // コントロールバーの[H/W]/[S/W]ボタン：設定パネルのチェックボックスをトグルするだけで、
+        // 実際の再オープン処理はHwAccel_Changedに一本化する（表示はDecodeModeChangedで連動）。
+        private void HwStatus_Click(object sender, RoutedEventArgs e)
+        {
+            HwAccelCheck.IsChecked = !(HwAccelCheck.IsChecked ?? false);
+        }
+
         private void UpdateEffectLabels()
         {
             if (ContrastLabel != null) ContrastLabel.Text = $"{ContrastSlider.Value:+0.0;-0.0; 0.0}";
@@ -1250,33 +1294,15 @@ namespace VerticalPlayer
             if (target < TimeSpan.Zero) target = TimeSpan.Zero;
             if (Player.NaturalDuration.HasTimeSpan && target > Player.NaturalDuration.TimeSpan)
                 target = Player.NaturalDuration.TimeSpan;
+            Trace($"StepFrame target={target.TotalSeconds:F3}s");
 
-            // Play → シーク → 目標フレームが実際に描画されるまで待ってから Pause。
-            // 固定80ms待ちだと、シーク直後のキャッチアップ（GOP長やHW転送の負荷次第で
-            // 所要時間が変動）が間に合わずPauseで打ち切られ、映像が更新されないまま
-            // 止まって見える不具合があったため、実際の描画完了イベントを待つ方式に変更。
-            // 何らかの理由でイベントが来ない場合に備えて最大500msでタイムアウトする。
-            var tcs = new TaskCompletionSource();
-            double targetSec = target.TotalSeconds;
-            void OnFrameDisplayed(double pts)
-            {
-                if (pts >= targetSec - 0.06) tcs.TrySetResult();
-            }
-            Player.FrameDisplayed += OnFrameDisplayed;
-            try
-            {
-                Player.Play();
-                Player.Position = target;
-                await Task.WhenAny(tcs.Task, Task.Delay(500));
-            }
-            finally
-            {
-                Player.FrameDisplayed -= OnFrameDisplayed;
-            }
-            Player.Pause();
-
-            Trace($"StepFrame done: target={target}");
+            // コマ送りは音声再生を伴う必要がないため、音声(Play/Pause)には一切触れず
+            // 映像デコードだけをシークして1フレーム表示する専用APIを使用する。
+            bool ok = await Player.StepToVideoOnlyAsync(target);
+            Trace(ok ? "StepFrame: FrameDisplayed待ち成功" : "StepFrame: 500msタイムアウトで打ち切り");
+            Trace($"StepFrame done: target={target} actualPos={Player.Position}");
         }
+
 
         private void AutoFrame_Click(object sender, RoutedEventArgs e)
         {

@@ -113,11 +113,12 @@ namespace VerticalPlayer.Media
 
             if (_catchingUpAfterSeek)
             {
-                // キャッチアップ中は基準秒だけ更新し、クロックは進めない（凍結）。
-                // ここで isPlaying をそのまま反映すると、50msごとの _clockTimer が
-                // 実時間で進む値を再投入し続け、デコードが追いつく前に目標が
-                // どんどん先へ逃げてしまう（＝映像が永久に追いつけない）。
-                _extBaseSeconds = seconds;
+                // キャッチアップ中はアンカーに一切触れない（完全凍結）。
+                // 以前は「秒数だけ更新」していたが、_clockTimer が50ms毎に実際の
+                // 音声再生位置（シーク後も音声はリアルタイムで進み続ける）で
+                // 上書きしてしまい、結局アンカーが実時間でズルズル前進 → デコードが
+                // 追いつけない、という同じ「目標が逃げる」問題を再発させていた。
+                Trace($"SetExternalClock ignored (catching up) seconds={seconds:F3}");
                 return;
             }
 
@@ -179,14 +180,24 @@ namespace VerticalPlayer.Media
             }
         }
 
-        public void Play() => _paused = false;
-        public void Pause() => _paused = true;
+        public void Play()
+        {
+            Trace("AVEngine.Play() paused=false");
+            _paused = false;
+        }
+
+        public void Pause()
+        {
+            Trace($"AVEngine.Pause() paused=true catchingUp={_catchingUpAfterSeek}");
+            _paused = true;
+        }
 
         public void Seek(TimeSpan pos)
         {
             lock (_seekLock)
             {
                 _pendingSeekSeconds = Math.Max(0, pos.TotalSeconds);
+                Trace($"AVEngine.Seek() requested pendingSeekSeconds={_pendingSeekSeconds:F3}");
             }
         }
 
@@ -283,6 +294,14 @@ namespace VerticalPlayer.Media
                             ffmpeg.av_seek_frame(fmt, videoIdx, ts, ffmpeg.AVSEEK_FLAG_BACKWARD);
                             ffmpeg.avcodec_flush_buffers(vctx);
                             _catchingUpAfterSeek = true;
+                            // シーク要求から実際にここへ到達するまでの間（HW/SW切替時の
+                            // コーデック再初期化のように時間がかかるケースがある）に、
+                            // 外部から先にSetExternalClockが呼ばれてクロックが実時間で
+                            // 進んでしまっている可能性があるため、ここで確実にtarget秒へ
+                            // 巻き戻して凍結する（凍結アンカーが目標からズレたまま止まる
+                            // ＝映像が出てこなくなる不具合の対策）。
+                            _extBaseSeconds = target;
+                            _extClock.Restart();
                             _extPlaying = false; // 最初のフレームが出るまでクロックを凍結
                             Trace($"Seek -> {target:F2}s");
                         }
@@ -372,6 +391,7 @@ namespace VerticalPlayer.Media
                                     // キャッチアップ完了：このフレームの時刻を基準にクロックを解凍する。
                                     // 凍結中に実時間が進んでいないため、ここで desired 再生状態へ
                                     // 復帰しても「逃げ続ける目標」問題は起きない。
+                                    Trace($"CatchUp done pts={ptsSeconds:F3} desiredPlaying={_desiredPlaying}");
                                     _catchingUpAfterSeek = false;
                                     _extBaseSeconds = ptsSeconds;
                                     _extClock.Restart();
@@ -388,6 +408,7 @@ namespace VerticalPlayer.Media
                                     try
                                     {
                                         Bitmap?.WritePixels(new Int32Rect(0, 0, frameW, frameH), localBuf, stride, 0);
+                                        Trace($"WritePixels done pts={shownPts:F3}");
                                         FrameDisplayed?.Invoke(shownPts);
                                     }
                                     catch (Exception ex)

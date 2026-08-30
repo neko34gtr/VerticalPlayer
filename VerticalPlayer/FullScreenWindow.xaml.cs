@@ -122,33 +122,18 @@ namespace VerticalPlayer
 
         private async Task StepFrame(int dir)
         {
+            Trace($"FS StepFrame dir={dir} isPlaying={_isPlaying} pos={Player.Position}");
             if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdateIcon(); _timer.Stop(); }
             var t = Player.Position + TimeSpan.FromMilliseconds(_frameMs * dir);
             if (t < TimeSpan.Zero) t = TimeSpan.Zero;
             if (Player.NaturalDuration.HasTimeSpan && t > Player.NaturalDuration.TimeSpan)
                 t = Player.NaturalDuration.TimeSpan;
+            Trace($"FS StepFrame target={t.TotalSeconds:F3}s");
 
-            // 固定80ms待ちだとシーク直後のキャッチアップが間に合わずPauseで打ち切られ、
-            // 映像が更新されないまま止まって見えることがあるため、実際に目標フレームが
-            // 描画されるまで待つ（MainWindow.StepFrameと同じ方式、タイムアウト500ms）。
-            var tcs = new TaskCompletionSource();
-            double targetSec = t.TotalSeconds;
-            void OnFrameDisplayed(double pts)
-            {
-                if (pts >= targetSec - 0.06) tcs.TrySetResult();
-            }
-            Player.FrameDisplayed += OnFrameDisplayed;
-            try
-            {
-                Player.Play();
-                Player.Position = t;
-                await Task.WhenAny(tcs.Task, Task.Delay(500));
-            }
-            finally
-            {
-                Player.FrameDisplayed -= OnFrameDisplayed;
-            }
-            Player.Pause();
+            // コマ送りは音声再生を伴う必要がないため、音声には一切触れない専用APIを使用。
+            bool ok = await Player.StepToVideoOnlyAsync(t);
+            Trace(ok ? "FS StepFrame: FrameDisplayed待ち成功" : "FS StepFrame: 500msタイムアウトで打ち切り");
+            Trace($"FS StepFrame done: target={t} actualPos={Player.Position}");
         }
 
         // ── 前/次ファイル ──
