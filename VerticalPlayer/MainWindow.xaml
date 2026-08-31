@@ -958,6 +958,10 @@
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="Deinterlace_Changed" Unchecked="Deinterlace_Changed"/>
 
+                                    <CheckBox x:Name="DenoiseCheck" Content="ノイズリダクション（hqdn3d）"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                              Checked="Denoise_Changed" Unchecked="Denoise_Changed"/>
+
                                     <Border Style="{StaticResource Separator}"/>
 
                                     <!-- ハードウェア設定 -->

@@ -47,6 +47,14 @@ namespace VerticalPlayer.Media
         private double _contrast, _saturation, _gamma;
         private volatile bool _deinterlaceEnabled;
 
+        /// <summary>ノイズリダクション（FFmpeg hqdn3dフィルタ、avfilter経由）の要求状態。
+        /// 「高画質化エンジン設計提案」段階3。HardwareAccelRequestedと同じ設計方針：
+        /// 値は次にOpenする際（＝ファイル再オープン時）にのみ反映され、再生中のスレッドの
+        /// 途中で動的には切り替えない。動的トグルは、グラフ構築の一時失敗時に毎フレーム
+        /// 再構築を試み続けて重くなる、OFFにした瞬間に描画が止まる、といった不安定さの
+        /// 原因になっていたため、HW/SW切替と同じ「再オープンして反映」方式へ統一した。</summary>
+        public bool DenoiseRequested { get; set; }
+
         /// <summary>簡易デインターレース（隣接ラインのブレンド方式）の有効/無効。</summary>
         public bool DeinterlaceEnabled
         {
@@ -70,6 +78,7 @@ namespace VerticalPlayer.Media
         private volatile bool _desiredPlaying;
 
         public WriteableBitmap? Bitmap { get; private set; }
+
         /// <summary>非nullの場合、WritePixels(WriteableBitmap)の代わりにこちらへ毎フレーム渡す。
         /// 「高画質化エンジン設計提案」段階1（D3DImage土台）用。既定はnull＝従来通りWriteableBitmap表示。</summary>
         public IFramePresenter? GpuPresenter { get; set; }
@@ -154,7 +163,8 @@ namespace VerticalPlayer.Media
             _desiredPlaying = false;
 
             bool wantHw = HardwareAccelRequested;
-            var t = new Thread(() => OpenAndRun(source.LocalPath, myGen, wantHw))
+            bool wantDenoise = DenoiseRequested;
+            var t = new Thread(() => OpenAndRun(source.LocalPath, myGen, wantHw, wantDenoise))
             {
                 IsBackground = true,
                 Name = "AVEngine-VideoDecode"
@@ -231,7 +241,7 @@ namespace VerticalPlayer.Media
         // ─────────────────────────────────────────────────────────────
         // デコードスレッド本体（映像のみ）
         // ─────────────────────────────────────────────────────────────
-        private void OpenAndRun(string path, int myGen, bool wantHw)
+        private void OpenAndRun(string path, int myGen, bool wantHw, bool wantDenoise)
         {
             AVFormatContext* fmt = null;
             AVCodecContext* vctx = null;
@@ -245,6 +255,89 @@ namespace VerticalPlayer.Media
             AVFrame* swFrame = null;
             AVFrame* rgbFrame = null;
             byte* rgbBuffer = null;
+
+            // ── ノイズリダクション用フィルタグラフ（段階3）──
+            // 他のネイティブハンドルと同じく、このデコードスレッドのローカル変数として
+            // 保持・解放する（use-after-free回避の既存方針を踏襲）。
+            AVFilterGraph* filterGraph = null;
+            AVFilterContext* bufferSrcCtx = null;
+            AVFilterContext* bufferSinkCtx = null;
+            int filterW = -1, filterH = -1;
+            AVPixelFormat filterFmt = AVPixelFormat.AV_PIX_FMT_NONE;
+
+            void FreeDenoiseFilter()
+            {
+                if (filterGraph != null)
+                {
+                    var g = filterGraph;
+                    ffmpeg.avfilter_graph_free(&g);
+                }
+                filterGraph = null;
+                bufferSrcCtx = null;
+                bufferSinkCtx = null;
+                filterW = -1; filterH = -1; filterFmt = AVPixelFormat.AV_PIX_FMT_NONE;
+            }
+
+            void EnsureDenoiseFilter(AVFrame* f, AVFormatContext* fmtCtx, int vIdx)
+            {
+                if (filterGraph != null && filterW == f->width && filterH == f->height && filterFmt == (AVPixelFormat)f->format)
+                    return;
+
+                FreeDenoiseFilter();
+
+                filterGraph = ffmpeg.avfilter_graph_alloc();
+                if (filterGraph == null) return;
+
+                var bufferSrc = ffmpeg.avfilter_get_by_name("buffer");
+                var bufferSink = ffmpeg.avfilter_get_by_name("buffersink");
+                var timeBase = fmtCtx->streams[vIdx]->time_base;
+                var sar = f->sample_aspect_ratio.num != 0 ? f->sample_aspect_ratio : new AVRational { num = 1, den = 1 };
+                string args = $"video_size={f->width}x{f->height}:pix_fmt={(int)f->format}:time_base={timeBase.num}/{timeBase.den}:pixel_aspect={sar.num}/{sar.den}";
+
+                AVFilterContext* srcCtx = null, sinkCtx = null;
+                if (ffmpeg.avfilter_graph_create_filter(&srcCtx, bufferSrc, "in", args, null, filterGraph) < 0 ||
+                    ffmpeg.avfilter_graph_create_filter(&sinkCtx, bufferSink, "out", null, null, filterGraph) < 0)
+                {
+                    Trace("DenoiseFilter: create buffer/buffersink failed");
+                    FreeDenoiseFilter();
+                    return;
+                }
+
+                var outputs = ffmpeg.avfilter_inout_alloc();
+                var inputs = ffmpeg.avfilter_inout_alloc();
+                outputs->name = ffmpeg.av_strdup("in");
+                outputs->filter_ctx = srcCtx;
+                outputs->pad_idx = 0;
+                outputs->next = null;
+                inputs->name = ffmpeg.av_strdup("out");
+                inputs->filter_ctx = sinkCtx;
+                inputs->pad_idx = 0;
+                inputs->next = null;
+
+                // hqdn3d=luma_spatial:chroma_spatial:luma_tmp:chroma_tmp（既定よりやや強め）
+                const string filterDesc = "hqdn3d=4:3:6:4.5";
+                int parseRet = ffmpeg.avfilter_graph_parse_ptr(filterGraph, filterDesc, &inputs, &outputs, null);
+                if (inputs != null) ffmpeg.avfilter_inout_free(&inputs);
+                if (outputs != null) ffmpeg.avfilter_inout_free(&outputs);
+                if (parseRet < 0)
+                {
+                    Trace($"DenoiseFilter: parse failed ({parseRet})");
+                    FreeDenoiseFilter();
+                    return;
+                }
+
+                if (ffmpeg.avfilter_graph_config(filterGraph, null) < 0)
+                {
+                    Trace("DenoiseFilter: graph_config failed");
+                    FreeDenoiseFilter();
+                    return;
+                }
+
+                bufferSrcCtx = srcCtx;
+                bufferSinkCtx = sinkCtx;
+                filterW = f->width; filterH = f->height; filterFmt = (AVPixelFormat)f->format;
+                Trace($"DenoiseFilter graph built ({filterW}x{filterH} fmt={filterFmt})");
+            }
 
             try
             {
@@ -261,7 +354,7 @@ namespace VerticalPlayer.Media
                 {
                     if (myGen != _generation) return;
                     Bitmap = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
-                    GpuPresenter?.EnsureSize(w, h); // GpuPresenter用のサイズ確保
+                    GpuPresenter?.EnsureSize(w, h);
                     VideoWidth = w; VideoHeight = h; Duration = duration;
                     Opened?.Invoke(w, h, duration);
                     DecodeModeChanged?.Invoke(modeLabel);
@@ -309,6 +402,7 @@ namespace VerticalPlayer.Media
                             _extBaseSeconds = target;
                             _extClock.Restart();
                             _extPlaying = false; // 最初のフレームが出るまでクロックを凍結
+                            FreeDenoiseFilter(); // シーク跨ぎで時間方向の履歴が無効になるため作り直す
                             Trace($"Seek -> {target:F2}s");
                         }
                     }
@@ -373,6 +467,31 @@ namespace VerticalPlayer.Media
                                     continue;
                                 }
 
+                                // ── ノイズリダクション（段階3）──
+                                // drop確定フレームには適用しない（無駄な処理を避ける、既存のsws_scale
+                                // 遅延実行と同じ方針）。hqdn3dは1:1で出力するcausalフィルタのため、
+                                // 通常は毎回すぐに結果フレームが得られる。
+                                AVFrame* filteredFrame = null;
+                                if (wantDenoise)
+                                {
+                                    EnsureDenoiseFilter(srcFrame, fmt, videoIdx);
+                                    if (bufferSrcCtx != null && bufferSinkCtx != null &&
+                                        ffmpeg.av_buffersrc_add_frame_flags(bufferSrcCtx, srcFrame, 8 /* AV_BUFFERSRC_FLAG_KEEP_REF (buffersrc.h) */) >= 0)
+                                    {
+                                        filteredFrame = ffmpeg.av_frame_alloc();
+                                        if (ffmpeg.av_buffersink_get_frame(bufferSinkCtx, filteredFrame) >= 0)
+                                        {
+                                            srcFrame = filteredFrame;
+                                        }
+                                        else
+                                        {
+                                            var ff = filteredFrame;
+                                            ffmpeg.av_frame_free(&ff);
+                                            filteredFrame = null;
+                                        }
+                                    }
+                                }
+
                                 if (sws == null)
                                 {
                                     sws = ffmpeg.sws_getContext(w, h, (AVPixelFormat)srcFrame->format,
@@ -383,6 +502,12 @@ namespace VerticalPlayer.Media
                                 ffmpeg.sws_scale(sws, srcFrame->data, srcFrame->linesize, 0, h,
                                     rgbFrame->data, rgbFrame->linesize);
 
+                                if (filteredFrame != null)
+                                {
+                                    var ff2 = filteredFrame;
+                                    ffmpeg.av_frame_free(&ff2);
+                                }
+
                                 int stride = rgbFrame->linesize[0];
                                 System.Runtime.InteropServices.Marshal.Copy((IntPtr)rgbFrame->data[0], managedBuf, 0, bufSize);
 
@@ -390,7 +515,7 @@ namespace VerticalPlayer.Media
                                     ApplyDeinterlaceBlend(managedBuf, w, h, stride);
 
                                 if (_effectsActive && GpuPresenter == null)
-                                    ApplyEffects(managedBuf, bufSize); // GPU側が有効な場合はCompute Shaderで同じ処理を行うため、CPU側ではスキップする。
+                                    ApplyEffects(managedBuf, bufSize);
 
                                 if (_catchingUpAfterSeek)
                                 {
@@ -415,7 +540,7 @@ namespace VerticalPlayer.Media
                                     {
                                         Bitmap?.WritePixels(new Int32Rect(0, 0, frameW, frameH), localBuf, stride, 0);
                                         Trace($"WritePixels done pts={shownPts:F3}");
-                                        GpuPresenter?.Present(localBuf, frameW, frameH, stride); // GpuPresenterがnullでなければWritePixelsの代わりにこちらへ渡す
+                                        GpuPresenter?.Present(localBuf, frameW, frameH, stride);
                                         FrameDisplayed?.Invoke(shownPts);
                                     }
                                     catch (Exception ex)
@@ -442,6 +567,7 @@ namespace VerticalPlayer.Media
             }
             finally
             {
+                FreeDenoiseFilter();
                 if (rgbBuffer != null) ffmpeg.av_free(rgbBuffer);
                 if (frame != null) { var f2 = frame; ffmpeg.av_frame_free(&f2); }
                 if (swFrame != null) { var f4 = swFrame; ffmpeg.av_frame_free(&f4); }

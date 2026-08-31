@@ -278,8 +278,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                     _d3d11Context.CSSetConstantBuffers(0, new[] { _cbEffects });
                     _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
                     // 他のパスとの干渉を避けるため明示的にアンバインド
-                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView?[] { null });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView?[] { null });
+                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
                 }
                 else
                 {

@@ -872,6 +872,26 @@ namespace VerticalPlayer
             Player.Deinterlace = DeinterlaceCheck.IsChecked ?? false;
         }
 
+        private void Denoise_Changed(object sender, RoutedEventArgs e)
+        {
+            Player.Denoise = DenoiseCheck.IsChecked ?? false;
+
+            if (Player.Source != null)
+            {
+                var pos = Player.Position;
+                bool wasPlaying = _isPlaying;
+                var src = Player.Source;
+                Trace($"Denoise_Changed: requested={Player.Denoise} - 現在のファイルを再オープンして即時反映 pos={pos}");
+                Player.Source = src;
+                Player.Position = pos;
+                if (wasPlaying) { Player.Play(); _isPlaying = true; } else { _isPlaying = false; }
+            }
+            else
+            {
+                Trace($"Denoise_Changed: requested={Player.Denoise}（次に開くファイルから適用）");
+            }
+        }
+
         // ─────────────────────────────────────────────────────────────────
         // ハードウェアアクセラレーション設定（次に開くファイルから適用）
         // ─────────────────────────────────────────────────────────────────

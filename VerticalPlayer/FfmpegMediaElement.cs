@@ -149,6 +149,12 @@ namespace VerticalPlayer.Media
             set => _engine.DeinterlaceEnabled = value;
         }
 
+        public bool Denoise
+        {
+            get => _engine.DenoiseRequested;
+            set => _engine.DenoiseRequested = value;
+        }
+
         // ── 表示倍率／アスペクト比（黒帯なしフィット・固定ズーム・強制比率） ──
         private VideoScaleMode _scaleMode = VideoScaleMode.Auto;
         public VideoScaleMode ScaleMode
