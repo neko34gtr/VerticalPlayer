@@ -72,6 +72,10 @@ namespace VerticalPlayer.Media
         };
 
         private readonly AVEngine _engine;
+        private readonly GpuFramePresenter _gpuPresenter = new();
+        /// <summary>true にすると表示をD3DImage経由（GPU土台）へ切り替える。既定false。
+        /// D3D9Ex/D3D11初期化失敗時は自動的にWriteableBitmapへフォールバックする。</summary>
+        public bool UseGpuPresenter { get; set; }
         private Uri? _source;
         private bool _isPlaying;
 
@@ -247,7 +251,9 @@ namespace VerticalPlayer.Media
             NaturalVideoWidth = w;
             NaturalVideoHeight = h;
             NaturalDuration = new Duration(duration);
-            _image.Source = _engine.Bitmap;
+            bool useGpu = UseGpuPresenter && _gpuPresenter.IsAvailable;
+            _engine.GpuPresenter = useGpu ? _gpuPresenter : null;
+            _image.Source = useGpu ? (ImageSource)_gpuPresenter.D3DImage : _engine.Bitmap;
             // デコード準備が実際に整ったこの時点でクロックを再アンカーする。
             // Source設定直後にPosition/Playが呼ばれた場合、デコード開始が間に合わず
             // マスタークロックだけ先に進んでしまい、シーク直後に大量フレームドロップが

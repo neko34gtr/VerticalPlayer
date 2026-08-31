@@ -153,6 +153,8 @@ namespace VerticalPlayer
             // キーボードショートカット
             this.KeyDown += MainWindow_KeyDown;
 
+            Player.UseGpuPresenter = true; // GPU経由表示を有効化（失敗時は自動でWriteableBitmap経路へフォールバック）
+
             // 実際のデコードモード（HW/SW）表示。設定パネル内のDecodeModeTextと
             // コントロールバーのHwStatusLabelを同じイベントで同時に更新することで連動させる。
             Player.DecodeModeChanged += mode =>

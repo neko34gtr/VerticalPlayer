@@ -70,6 +70,9 @@ namespace VerticalPlayer.Media
         private volatile bool _desiredPlaying;
 
         public WriteableBitmap? Bitmap { get; private set; }
+        /// <summary>非nullの場合、WritePixels(WriteableBitmap)の代わりにこちらへ毎フレーム渡す。
+        /// 「高画質化エンジン設計提案」段階1（D3DImage土台）用。既定はnull＝従来通りWriteableBitmap表示。</summary>
+        public IFramePresenter? GpuPresenter { get; set; }
         public int VideoWidth { get; private set; }
         public int VideoHeight { get; private set; }
         public TimeSpan Duration { get; private set; }
@@ -105,6 +108,8 @@ namespace VerticalPlayer.Media
             _saturation = Math.Clamp(saturation, -1, 1);
             _gamma = Math.Clamp(gamma, -1, 1);
             _effectsActive = _contrast != 0 || _saturation != 0 || _gamma != 0;
+            // GPU側が有効な場合はCompute Shaderで同じ処理を行うため、値だけ転送する。
+            GpuPresenter?.SetEffects(_contrast, _saturation, _gamma);
         }
 
         public void SetExternalClock(double seconds, bool isPlaying)
@@ -256,6 +261,7 @@ namespace VerticalPlayer.Media
                 {
                     if (myGen != _generation) return;
                     Bitmap = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
+                    GpuPresenter?.EnsureSize(w, h); // GpuPresenter用のサイズ確保
                     VideoWidth = w; VideoHeight = h; Duration = duration;
                     Opened?.Invoke(w, h, duration);
                     DecodeModeChanged?.Invoke(modeLabel);
@@ -383,8 +389,8 @@ namespace VerticalPlayer.Media
                                 if (_deinterlaceEnabled)
                                     ApplyDeinterlaceBlend(managedBuf, w, h, stride);
 
-                                if (_effectsActive)
-                                    ApplyEffects(managedBuf, bufSize);
+                                if (_effectsActive && GpuPresenter == null)
+                                    ApplyEffects(managedBuf, bufSize); // GPU側が有効な場合はCompute Shaderで同じ処理を行うため、CPU側ではスキップする。
 
                                 if (_catchingUpAfterSeek)
                                 {
@@ -409,6 +415,7 @@ namespace VerticalPlayer.Media
                                     {
                                         Bitmap?.WritePixels(new Int32Rect(0, 0, frameW, frameH), localBuf, stride, 0);
                                         Trace($"WritePixels done pts={shownPts:F3}");
+                                        GpuPresenter?.Present(localBuf, frameW, frameH, stride); // GpuPresenterがnullでなければWritePixelsの代わりにこちらへ渡す
                                         FrameDisplayed?.Invoke(shownPts);
                                     }
                                     catch (Exception ex)

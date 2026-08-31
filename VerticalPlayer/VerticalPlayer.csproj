@@ -18,6 +18,10 @@
 	<ItemGroup>
 		<PackageReference Include="FFmpeg.AutoGen" Version="8.1.0" />
 		<PackageReference Include="NAudio" Version="3.0.1" />
+		<PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
+		<PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+		<PackageReference Include="Vortice.Direct3D9" Version="3.8.3" />
+		<PackageReference Include="Vortice.DXGI" Version="3.8.3" />
 	</ItemGroup>
 
 	<!-- ffmpeg共有DLL(avcodec-*.dll等)を出力フォルダの ffmpeg\ 配下へ配置する場合の例。
