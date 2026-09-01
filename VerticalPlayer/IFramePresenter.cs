@@ -21,5 +21,10 @@
         /// <summary>コントラスト/彩度/ガンマ（段階2：Compute Shader版）を設定する。
         /// 値の意味・範囲は AVEngine.SetEffects と同一（-1〜1、0=無効）。</summary>
         void SetEffects(double contrast, double saturation, double gamma);
+
+        /// <summary>ダイナミックコントラスト（段階4：シーン平均輝度ベースの簡易オートレベル）の強さ。
+        /// 0〜1、0で完全無効。GPU完結のCompute Shaderでのみ実装されており、
+        /// WriteableBitmap（非GPU）経路では何もしない。</summary>
+        void SetDynamicContrast(float strength);
     }
 }

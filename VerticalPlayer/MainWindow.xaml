@@ -962,6 +962,10 @@
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="Denoise_Changed" Unchecked="Denoise_Changed"/>
 
+                                    <CheckBox x:Name="DynamicContrastCheck" Content="ダイナミックコントラスト（簡易オートレベル・GPU）"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                              Checked="DynamicContrast_Changed" Unchecked="DynamicContrast_Changed"/>
+
                                     <Border Style="{StaticResource Separator}"/>
 
                                     <!-- ハードウェア設定 -->

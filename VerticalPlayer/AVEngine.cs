@@ -55,6 +55,11 @@ namespace VerticalPlayer.Media
         /// 原因になっていたため、HW/SW切替と同じ「再オープンして反映」方式へ統一した。</summary>
         public bool DenoiseRequested { get; set; }
 
+        /// <summary>ダイナミックコントラスト（段階4）の強さ。0〜1、0で無効。
+        /// GPU側(Compute Shader)でのみ有効な機能で、値はGpuPresenterへそのまま転送するだけ。
+        /// AVEngine自身はCPU側の対応する処理を持たない（設計提案書どおりGPU完結の機能）。</summary>
+        public void SetDynamicContrast(float strength) => GpuPresenter?.SetDynamicContrast(strength);
+
         /// <summary>簡易デインターレース（隣接ラインのブレンド方式）の有効/無効。</summary>
         public bool DeinterlaceEnabled
         {

@@ -73,8 +73,9 @@ namespace VerticalPlayer.Media
 
         private readonly AVEngine _engine;
         private readonly GpuFramePresenter _gpuPresenter = new();
-        /// <summary>true にすると表示をD3DImage経由（GPU土台）へ切り替える。既定false。
-        /// D3D9Ex/D3D11初期化失敗時は自動的にWriteableBitmapへフォールバックする。</summary>
+        /// <summary>true にすると、表示をWriteableBitmapからD3DImage経由（GPU土台）へ切り替える。
+        /// 「高画質化エンジン設計提案」段階1の検証用フラグ。既定はfalse（従来どおり）。
+        /// D3D9Ex/D3D11初期化に失敗した環境では自動的にfalse相当（WriteableBitmap）にフォールバックする。</summary>
         public bool UseGpuPresenter { get; set; }
         private Uri? _source;
         private bool _isPlaying;
@@ -153,6 +154,19 @@ namespace VerticalPlayer.Media
         {
             get => _engine.DenoiseRequested;
             set => _engine.DenoiseRequested = value;
+        }
+
+        private bool _dynamicContrast;
+        /// <summary>ダイナミックコントラスト（段階4、シーン平均輝度ベースの簡易オートレベル）。
+        /// GPU描画パス(UseGpuPresenter)が有効な時のみ実際に効果がある。</summary>
+        public bool DynamicContrast
+        {
+            get => _dynamicContrast;
+            set
+            {
+                _dynamicContrast = value;
+                _engine.SetDynamicContrast(value ? 0.6f : 0f);
+            }
         }
 
         // ── 表示倍率／アスペクト比（黒帯なしフィット・固定ズーム・強制比率） ──
@@ -257,9 +271,11 @@ namespace VerticalPlayer.Media
             NaturalVideoWidth = w;
             NaturalVideoHeight = h;
             NaturalDuration = new Duration(duration);
+
             bool useGpu = UseGpuPresenter && _gpuPresenter.IsAvailable;
             _engine.GpuPresenter = useGpu ? _gpuPresenter : null;
             _image.Source = useGpu ? (ImageSource)_gpuPresenter.D3DImage : _engine.Bitmap;
+
             // デコード準備が実際に整ったこの時点でクロックを再アンカーする。
             // Source設定直後にPosition/Playが呼ばれた場合、デコード開始が間に合わず
             // マスタークロックだけ先に進んでしまい、シーク直後に大量フレームドロップが

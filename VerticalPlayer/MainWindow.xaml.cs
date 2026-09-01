@@ -153,8 +153,6 @@ namespace VerticalPlayer
             // キーボードショートカット
             this.KeyDown += MainWindow_KeyDown;
 
-            Player.UseGpuPresenter = true; // GPU経由表示を有効化（失敗時は自動でWriteableBitmap経路へフォールバック）
-
             // 実際のデコードモード（HW/SW）表示。設定パネル内のDecodeModeTextと
             // コントロールバーのHwStatusLabelを同じイベントで同時に更新することで連動させる。
             Player.DecodeModeChanged += mode =>
@@ -878,6 +876,8 @@ namespace VerticalPlayer
 
             if (Player.Source != null)
             {
+                // HW/SW切替と同じ「現在位置・再生状態を保持したまま再オープン」方式。
+                // デノイズは再生中スレッドの途中で動的に切り替えず、常に再オープンで反映する。
                 var pos = Player.Position;
                 bool wasPlaying = _isPlaying;
                 var src = Player.Source;
@@ -890,6 +890,13 @@ namespace VerticalPlayer
             {
                 Trace($"Denoise_Changed: requested={Player.Denoise}（次に開くファイルから適用）");
             }
+        }
+
+        private void DynamicContrast_Changed(object sender, RoutedEventArgs e)
+        {
+            // GPU Compute Shaderのみで完結する後段処理のため、デコードスレッドには一切触れない。
+            // H/W・デノイズと違い再オープンは不要で、ライブに即時反映される。
+            Player.DynamicContrast = DynamicContrastCheck.IsChecked ?? false;
         }
 
         // ─────────────────────────────────────────────────────────────────

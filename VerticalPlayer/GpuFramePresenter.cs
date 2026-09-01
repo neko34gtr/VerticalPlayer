@@ -11,27 +11,28 @@ using Vortice.DXGI;
 namespace VerticalPlayer
 {
     /// <summary>
-    /// 「高画質化エンジン設計提案」2.3節・段階1〜2の実装。
+    /// 「高画質化エンジン設計提案」2.3節・段階1〜4の実装。
     ///
-    /// 【段階1】AVEngineが作るBGRAバッファ(managed byte[])を、WriteableBitmapの代わりに
-    /// D3D11テクスチャへアップロード → D3D9Ex共有テクスチャへコピー → WPFのD3DImageへ
-    /// バックバッファとして渡す土台。
-    ///
-    /// 【段階2】コントラスト/彩度/ガンマを、CPU(AVEngine.ApplyEffects)ではなく
-    /// Compute Shaderで適用するように変更。アップロード用テクスチャ(SRV)から
-    /// 共有テクスチャ(UAV)への「コピー」自体をCompute ShaderのDispatchに置き換える形で、
-    /// 追加のテクスチャ・追加コピーを増やさずに済ませている。
-    /// シェーダーのコンパイルに失敗した場合は段階1の単純コピー（無加工）へ自動的に
-    /// フォールバックする（既存のHW→SWフォールバックと同じ思想）。
+    /// 【段階1】BGRAバッファをD3D11→D3D9Ex共有テクスチャ→D3DImageへ渡す土台。
+    /// 【段階2】コントラスト/彩度/ガンマをCompute Shaderで適用。
+    /// 【段階4】ダイナミックコントラスト（簡易オートレベル）。
+    ///   本来の設計提案（5章）はヒストグラム＋CDFベースのトーンカーブ生成だが、
+    ///   毎フレームのCPU読み戻し（Map+Read）はGPUパイプラインをブロックし
+    ///   フレームレートを損なうリスクが高いため、今回はCPU読み戻しなしで完結する
+    ///   簡易版として実装：
+    ///     Pass A: 入力を32x32へ簡易ダウンサンプルしながら輝度化 (CSDownsampleLuma)
+    ///     Pass B: 32x32を1スレッドで平均し、前フレームの値とEMAで時間平滑化
+    ///             (CSReduceLuma、GPU上の1要素バッファに保持・全てGPU完結)
+    ///     Pass C: 平滑化済み平均輝度をもとに、暗いシーンはガンマを持ち上げ、
+    ///             明るいシーンはやや締める自動補正を、既存のコントラスト/彩度/ガンマ
+    ///             シェーダー(CSMain)に統合して適用
+    ///   厳密なヒストグラム平坦化（CLAHE等）ではなく「シーン平均輝度に応じた
+    ///   自動レベル補正」という簡易版である点に留意（設計提案書に明記のうえ実装）。
     ///
     /// 【要検証事項（Windows実機でのビルド・動作確認が必須）】
     /// - Vortice.Windows のバージョンによってAPIの引数形が変わる場合がある。
-    ///   コンパイルエラーが出た場合はIntelliSenseでシグネチャを確認して合わせてほしい。
-    /// - D3D11とD3D9Exが同一GPUアダプタ上のデバイスであることが共有テクスチャ成立の前提
-    ///   （マルチGPU環境では明示的にアダプタを揃える必要がある。本実装は既定アダプタのみ対応）。
-    /// - Dispatch後のFlush()のみでD3D9側の読み取りとの同期を取っており、
-    ///   理論上は将来的にティアリング/ちらつきが出る可能性がある（症状が出た場合は
-    ///   KeyedMutex方式への変更を検討）。
+    /// - D3D11とD3D9Exが同一GPUアダプタ上のデバイスであることが共有テクスチャ成立の前提。
+    /// - Dispatch後のFlush()のみで同期しており、症状が出た場合はKeyedMutex方式を検討。
     /// </summary>
     public sealed class GpuFramePresenter : IFramePresenter, IDisposable
     {
@@ -55,6 +56,20 @@ namespace VerticalPlayer
         private ID3D11Buffer? _cbEffects;
         private bool _effectsShaderReady;
 
+        // ── 段階4：ダイナミックコントラスト用リソース ──
+        private const int LumaDownSize = 32;
+        private ID3D11Texture2D? _lumaDownTex;
+        private ID3D11ShaderResourceView? _lumaDownSrv;
+        private ID3D11UnorderedAccessView? _lumaDownUav;
+        private ID3D11Buffer? _avgLumaBuffer;       // RWStructuredBuffer<float>、要素数1
+        private ID3D11ShaderResourceView? _avgLumaSrv;
+        private ID3D11UnorderedAccessView? _avgLumaUav;
+        private ID3D11ComputeShader? _lumaDownCs;
+        private ID3D11ComputeShader? _lumaReduceCs;
+        private ID3D11Buffer? _cbReduce;
+        private bool _dynamicContrastShaderReady;
+        private float _dynamicContrastStrength; // 0=無効、設計提案書どおり個別ON/OFF可能にする
+
         private float _contrast, _saturation, _gamma;
 
         private int _w, _h;
@@ -66,10 +81,11 @@ cbuffer EffectsCB : register(b0)
     float Contrast;
     float Saturation;
     float Gamma;
-    float _Pad;
+    float DynamicContrastStrength;
 };
 
 Texture2D<float4> InputTex : register(t0);
+StructuredBuffer<float> AvgLuma : register(t1);
 RWTexture2D<float4> OutputTex : register(u0);
 
 [numthreads(8, 8, 1)]
@@ -81,7 +97,13 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     float4 c = InputTex.Load(int3(id.xy, 0));
 
-    float gammaExp = exp2(Gamma);
+    // ダイナミックコントラスト（簡易版）：シーン平均輝度に応じてガンマを自動補正。
+    // 暗いシーン(avgLumaが小さい)ほど持ち上げ、明るいシーンほどわずかに締める。
+    float avgLuma = AvgLuma[0];
+    float autoGammaBoost = lerp(0.35, -0.15, saturate(avgLuma * 1.4));
+    float effectiveGamma = Gamma + autoGammaBoost * DynamicContrastStrength;
+
+    float gammaExp = exp2(effectiveGamma);
     float factor = 1.0 + Contrast;
 
     float3 v = saturate(c.rgb);
@@ -95,6 +117,57 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 }
 ";
 
+        private const string LumaDownShaderSource = @"
+Texture2D<float4> SrcTex : register(t0);
+RWTexture2D<float> LumaDown : register(u0);
+
+[numthreads(8, 8, 1)]
+void CSDownsampleLuma(uint3 id : SV_DispatchThreadID)
+{
+    uint outW, outH;
+    LumaDown.GetDimensions(outW, outH);
+    if (id.x >= outW || id.y >= outH) return;
+
+    uint srcW, srcH;
+    SrcTex.GetDimensions(srcW, srcH);
+
+    uint2 srcXY = uint2(
+        (uint)((id.x + 0.5) * srcW / outW),
+        (uint)((id.y + 0.5) * srcH / outH));
+    srcXY = min(srcXY, uint2(srcW - 1, srcH - 1));
+
+    float3 c = SrcTex.Load(int3(srcXY, 0)).rgb;
+    LumaDown[id.xy] = dot(c, float3(0.299, 0.587, 0.114));
+}
+";
+
+        private const string LumaReduceShaderSource = @"
+cbuffer ReduceCB : register(b0)
+{
+    float SmoothAlpha;
+    float3 _PadR;
+};
+
+Texture2D<float> LumaDownRO : register(t0);
+RWStructuredBuffer<float> AvgLumaRW : register(u0);
+
+[numthreads(1, 1, 1)]
+void CSReduceLuma(uint3 id : SV_DispatchThreadID)
+{
+    uint w, h;
+    LumaDownRO.GetDimensions(w, h);
+
+    float sum = 0;
+    for (uint y = 0; y < h; y++)
+        for (uint x = 0; x < w; x++)
+            sum += LumaDownRO.Load(int3(x, y, 0));
+    float avg = sum / max(1.0, (float)(w * h));
+
+    float prev = AvgLumaRW[0];
+    AvgLumaRW[0] = lerp(prev, avg, SmoothAlpha);
+}
+";
+
         public GpuFramePresenter()
         {
             try
@@ -104,8 +177,6 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             }
             catch (Exception ex)
             {
-                // D3D9Ex/D3D11が使えない環境（古いGPU/ドライバ等）では、
-                // 呼び出し側がWriteableBitmap経路へフォールバックできるよう例外を握りつぶす。
                 System.Diagnostics.Trace.WriteLine($"GpuFramePresenter init failed: {ex}");
                 _d3dReady = false;
             }
@@ -119,9 +190,20 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 }
                 catch (Exception ex)
                 {
-                    // シェーダーだけ失敗しても、段階1（単純コピー・無加工表示）は継続できるようにする。
                     System.Diagnostics.Trace.WriteLine($"GpuFramePresenter effects shader init failed: {ex}");
                     _effectsShaderReady = false;
+                }
+
+                try
+                {
+                    InitDynamicContrastShaders();
+                    _dynamicContrastShaderReady = true;
+                }
+                catch (Exception ex)
+                {
+                    // ダイナミックコントラストだけ失敗しても、段階1/2は継続できるようにする。
+                    System.Diagnostics.Trace.WriteLine($"GpuFramePresenter dynamic contrast shader init failed: {ex}");
+                    _dynamicContrastShaderReady = false;
                 }
             }
         }
@@ -153,18 +235,23 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 pp);
         }
 
-        private void InitEffectsShader()
+        private static ID3D11ComputeShader CompileCs(ID3D11Device device, string source, string entryPoint, string debugName)
         {
-            if (_d3d11Device == null) return;
-
-            Compiler.Compile(EffectsShaderSource, "CSMain", "GpuEffects", "cs_5_0",
+            Compiler.Compile(source, entryPoint, debugName, "cs_5_0",
                 out Vortice.Direct3D.Blob? shaderBlob, out Vortice.Direct3D.Blob? errorBlob);
             if (shaderBlob == null)
             {
                 string msg = errorBlob != null ? System.Text.Encoding.ASCII.GetString(errorBlob.AsSpan()) : "unknown";
-                throw new InvalidOperationException($"HLSL compile failed: {msg}");
+                throw new InvalidOperationException($"HLSL compile failed ({debugName}): {msg}");
             }
-            _effectsCs = _d3d11Device.CreateComputeShader(shaderBlob.AsSpan());
+            return device.CreateComputeShader(shaderBlob.AsSpan());
+        }
+
+        private void InitEffectsShader()
+        {
+            if (_d3d11Device == null) return;
+
+            _effectsCs = CompileCs(_d3d11Device, EffectsShaderSource, "CSMain", "GpuEffects");
 
             // cbufferは16バイトアライメント。float4個分ちょうど16バイト。
             _cbEffects = _d3d11Device.CreateBuffer(new BufferDescription
@@ -176,13 +263,66 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             });
         }
 
-        /// <summary>コントラスト/彩度/ガンマ（-1〜1、AVEngine.SetEffectsと同じ意味）を設定する。
-        /// 実際のGPUへの反映は次回Present時にまとめて行う。</summary>
+        private void InitDynamicContrastShaders()
+        {
+            if (_d3d11Device == null) return;
+
+            _lumaDownCs = CompileCs(_d3d11Device, LumaDownShaderSource, "CSDownsampleLuma", "GpuLumaDown");
+            _lumaReduceCs = CompileCs(_d3d11Device, LumaReduceShaderSource, "CSReduceLuma", "GpuLumaReduce");
+
+            _lumaDownTex = _d3d11Device.CreateTexture2D(new Texture2DDescription
+            {
+                Width = LumaDownSize,
+                Height = LumaDownSize,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Vortice.DXGI.Format.R16_Float,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.ShaderResource | BindFlags.UnorderedAccess,
+                CPUAccessFlags = CpuAccessFlags.None,
+                MiscFlags = ResourceOptionFlags.None
+            });
+            _lumaDownSrv = _d3d11Device.CreateShaderResourceView(_lumaDownTex);
+            _lumaDownUav = _d3d11Device.CreateUnorderedAccessView(_lumaDownTex);
+
+            // RWStructuredBuffer<float>、要素数1。初期値は中間的な明るさ(0.4)にしておき、
+            // 再生開始直後の1〜2フレームだけ極端な補正がかかるのを防ぐ。
+            _avgLumaBuffer = _d3d11Device.CreateBuffer(new BufferDescription
+            {
+                ByteWidth = 4,
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.ShaderResource | BindFlags.UnorderedAccess,
+                MiscFlags = ResourceOptionFlags.BufferStructured,
+                StructureByteStride = 4
+            });
+            float initialLuma = 0.4f;
+            _d3d11Context?.UpdateSubresource(ref initialLuma, _avgLumaBuffer);
+            _avgLumaSrv = _d3d11Device.CreateShaderResourceView(_avgLumaBuffer);
+            _avgLumaUav = _d3d11Device.CreateUnorderedAccessView(_avgLumaBuffer);
+
+            _cbReduce = _d3d11Device.CreateBuffer(new BufferDescription
+            {
+                ByteWidth = 16,
+                Usage = ResourceUsage.Dynamic,
+                BindFlags = BindFlags.ConstantBuffer,
+                CPUAccessFlags = CpuAccessFlags.Write
+            });
+        }
+
+        /// <summary>コントラスト/彩度/ガンマ（-1〜1、AVEngine.SetEffectsと同じ意味）を設定する。</summary>
         public void SetEffects(double contrast, double saturation, double gamma)
         {
             _contrast = (float)contrast;
             _saturation = (float)saturation;
             _gamma = (float)gamma;
+        }
+
+        /// <summary>ダイナミックコントラスト（簡易オートレベル）の強さ。0で完全無効。
+        /// 経験則として0.5〜0.7程度を推奨（強すぎると不自然な明滅感が出る）。</summary>
+        public void SetDynamicContrast(float strength)
+        {
+            _dynamicContrastStrength = Math.Clamp(strength, 0f, 1f);
         }
 
         public void EnsureSize(int width, int height)
@@ -194,7 +334,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
         private void RecreateTextures()
         {
-            DisposeTextures();
+            DisposeSizedTextures();
             if (_d3d11Device == null || _d3d9Device == null || _w <= 0 || _h <= 0) return;
 
             _uploadTex = _d3d11Device.CreateTexture2D(new Texture2DDescription
@@ -211,7 +351,6 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 MiscFlags = ResourceOptionFlags.None
             });
 
-            // UnorderedAccessを追加：Compute Shaderの出力先(UAV)として直接書き込むため。
             _sharedTex11 = _d3d11Device.CreateTexture2D(new Texture2DDescription
             {
                 Width = (uint)_w,
@@ -233,7 +372,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 (uint)_w, (uint)_h, 1, Vortice.Direct3D9.Usage.RenderTarget, Vortice.Direct3D9.Format.A8R8G8B8, Pool.Default, ref sharedHandle);
             _surface9 = _sharedTex9.GetSurfaceLevel(0);
 
-            if (_effectsShaderReady && _d3d11Device != null)
+            if (_effectsShaderReady)
             {
                 _srvUpload = _d3d11Device.CreateShaderResourceView(_uploadTex);
                 _uavShared = _d3d11Device.CreateUnorderedAccessView(_sharedTex11);
@@ -271,14 +410,42 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
                 if (_effectsShaderReady && _effectsCs != null && _srvUpload != null && _uavShared != null && _cbEffects != null)
                 {
+                    // ── 段階4：ダイナミックコントラスト用の平均輝度をGPU上だけで更新 ──
+                    if (_dynamicContrastShaderReady && _dynamicContrastStrength > 0f &&
+                        _lumaDownCs != null && _lumaReduceCs != null &&
+                        _lumaDownUav != null && _lumaDownSrv != null &&
+                        _avgLumaUav != null && _cbReduce != null)
+                    {
+                        // Pass A: 入力を32x32へ簡易ダウンサンプル＋輝度化
+                        _d3d11Context.CSSetShader(_lumaDownCs);
+                        _d3d11Context.CSSetShaderResources(0, new[] { _srvUpload });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _lumaDownUav });
+                        _d3d11Context.Dispatch((uint)((LumaDownSize + 7) / 8), (uint)((LumaDownSize + 7) / 8), 1);
+                        _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+
+                        // Pass B: 32x32を1スレッドで平均し、前フレームとEMAで時間平滑化
+                        UpdateReduceConstantBuffer();
+                        _d3d11Context.CSSetShader(_lumaReduceCs);
+                        _d3d11Context.CSSetShaderResources(0, new[] { _lumaDownSrv });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _avgLumaUav });
+                        _d3d11Context.CSSetConstantBuffers(0, new[] { _cbReduce });
+                        _d3d11Context.Dispatch(1, 1, 1);
+                        _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                    }
+
+                    // Pass C: コントラスト/彩度/ガンマ＋ダイナミックコントラストを一括適用
                     UpdateEffectsConstantBuffer();
                     _d3d11Context.CSSetShader(_effectsCs);
-                    _d3d11Context.CSSetShaderResources(0, new[] { _srvUpload });
+                    var srvs = (_dynamicContrastShaderReady && _avgLumaSrv != null)
+                        ? new[] { _srvUpload, _avgLumaSrv }
+                        : new[] { _srvUpload }; // AvgLuma未使用時もシェーダー自体はt1参照するため、下のフォールバックに注意
+                    _d3d11Context.CSSetShaderResources(0, srvs);
                     _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavShared });
                     _d3d11Context.CSSetConstantBuffers(0, new[] { _cbEffects });
                     _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
-                    // 他のパスとの干渉を避けるため明示的にアンバインド
-                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null!, null! });
                     _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
                 }
                 else
@@ -288,8 +455,6 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 }
                 _d3d11Context.Flush();
 
-                // D3DImageの操作は必ずUIスレッドで行うこと（このメソッド自体、
-                // AVEngine側でDispatcher経由のUIスレッドコールバックから呼ばれる前提）。
                 if (D3DImage.IsFrontBufferAvailable)
                 {
                     D3DImage.Lock();
@@ -313,12 +478,25 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 p[0] = _contrast;
                 p[1] = _saturation;
                 p[2] = _gamma;
-                p[3] = 0f;
+                p[3] = (_dynamicContrastShaderReady && _avgLumaSrv != null) ? _dynamicContrastStrength : 0f;
             }
             _d3d11Context.Unmap(_cbEffects, 0);
         }
 
-        private void DisposeTextures()
+        private void UpdateReduceConstantBuffer()
+        {
+            if (_d3d11Context == null || _cbReduce == null) return;
+            var mapped = _d3d11Context.Map(_cbReduce, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+            unsafe
+            {
+                float* p = (float*)mapped.DataPointer;
+                p[0] = 0.08f; // EMAの平滑化係数（小さいほどゆっくり追従＝ちらつきにくい）
+                p[1] = p[2] = p[3] = 0f;
+            }
+            _d3d11Context.Unmap(_cbReduce, 0);
+        }
+
+        private void DisposeSizedTextures()
         {
             _uavShared?.Dispose(); _uavShared = null;
             _srvUpload?.Dispose(); _srvUpload = null;
@@ -330,7 +508,16 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
         public void Dispose()
         {
-            DisposeTextures();
+            DisposeSizedTextures();
+            _lumaDownUav?.Dispose(); _lumaDownUav = null;
+            _lumaDownSrv?.Dispose(); _lumaDownSrv = null;
+            _lumaDownTex?.Dispose(); _lumaDownTex = null;
+            _avgLumaUav?.Dispose(); _avgLumaUav = null;
+            _avgLumaSrv?.Dispose(); _avgLumaSrv = null;
+            _avgLumaBuffer?.Dispose(); _avgLumaBuffer = null;
+            _cbReduce?.Dispose(); _cbReduce = null;
+            _lumaReduceCs?.Dispose(); _lumaReduceCs = null;
+            _lumaDownCs?.Dispose(); _lumaDownCs = null;
             _cbEffects?.Dispose(); _cbEffects = null;
             _effectsCs?.Dispose(); _effectsCs = null;
             _d3d9Device?.Dispose(); _d3d9Device = null;
