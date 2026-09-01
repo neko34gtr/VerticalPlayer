@@ -26,5 +26,10 @@
         /// 0〜1、0で完全無効。GPU完結のCompute Shaderでのみ実装されており、
         /// WriteableBitmap（非GPU）経路では何もしない。</summary>
         void SetDynamicContrast(float strength);
+
+        /// <summary>超解像（段階5：Lanczos-3＋アンシャープの古典アルゴリズム版）の拡大倍率。
+        /// 1.0以下で無効。GPU完結のCompute Shaderでのみ実装されており、
+        /// WriteableBitmap（非GPU）経路では何もしない。</summary>
+        void SetSuperResolution(float scale);
     }
 }

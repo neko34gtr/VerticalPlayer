@@ -60,6 +60,9 @@ namespace VerticalPlayer.Media
         /// AVEngine自身はCPU側の対応する処理を持たない（設計提案書どおりGPU完結の機能）。</summary>
         public void SetDynamicContrast(float strength) => GpuPresenter?.SetDynamicContrast(strength);
 
+        /// <summary>超解像（段階5）の拡大倍率。1.0以下で無効。GPU側のみで完結する機能。</summary>
+        public void SetSuperResolution(float scale) => GpuPresenter?.SetSuperResolution(scale);
+
         /// <summary>簡易デインターレース（隣接ラインのブレンド方式）の有効/無効。</summary>
         public bool DeinterlaceEnabled
         {
@@ -544,7 +547,6 @@ namespace VerticalPlayer.Media
                                     try
                                     {
                                         Bitmap?.WritePixels(new Int32Rect(0, 0, frameW, frameH), localBuf, stride, 0);
-                                        Trace($"WritePixels done pts={shownPts:F3}");
                                         GpuPresenter?.Present(localBuf, frameW, frameH, stride);
                                         FrameDisplayed?.Invoke(shownPts);
                                     }

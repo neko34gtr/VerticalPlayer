@@ -899,6 +899,16 @@ namespace VerticalPlayer
             Player.DynamicContrast = DynamicContrastCheck.IsChecked ?? false;
         }
 
+        private void SuperResolution_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            // こちらもGPU完結の後段処理のため再オープン不要（ライブ切替）。
+            if (SuperResolutionCombo.SelectedItem is ComboBoxItem item &&
+                float.TryParse((string)item.Tag, System.Globalization.CultureInfo.InvariantCulture, out float scale))
+            {
+                Player.SuperResolutionScale = scale;
+            }
+        }
+
         // ─────────────────────────────────────────────────────────────────
         // ハードウェアアクセラレーション設定（次に開くファイルから適用）
         // ─────────────────────────────────────────────────────────────────

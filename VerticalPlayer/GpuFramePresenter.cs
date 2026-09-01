@@ -11,28 +11,27 @@ using Vortice.DXGI;
 namespace VerticalPlayer
 {
     /// <summary>
-    /// 「高画質化エンジン設計提案」2.3節・段階1〜4の実装。
+    /// 「高画質化エンジン設計提案」2.3節・段階1〜5の実装。
     ///
     /// 【段階1】BGRAバッファをD3D11→D3D9Ex共有テクスチャ→D3DImageへ渡す土台。
     /// 【段階2】コントラスト/彩度/ガンマをCompute Shaderで適用。
-    /// 【段階4】ダイナミックコントラスト（簡易オートレベル）。
-    ///   本来の設計提案（5章）はヒストグラム＋CDFベースのトーンカーブ生成だが、
-    ///   毎フレームのCPU読み戻し（Map+Read）はGPUパイプラインをブロックし
-    ///   フレームレートを損なうリスクが高いため、今回はCPU読み戻しなしで完結する
-    ///   簡易版として実装：
-    ///     Pass A: 入力を32x32へ簡易ダウンサンプルしながら輝度化 (CSDownsampleLuma)
-    ///     Pass B: 32x32を1スレッドで平均し、前フレームの値とEMAで時間平滑化
-    ///             (CSReduceLuma、GPU上の1要素バッファに保持・全てGPU完結)
-    ///     Pass C: 平滑化済み平均輝度をもとに、暗いシーンはガンマを持ち上げ、
-    ///             明るいシーンはやや締める自動補正を、既存のコントラスト/彩度/ガンマ
-    ///             シェーダー(CSMain)に統合して適用
-    ///   厳密なヒストグラム平坦化（CLAHE等）ではなく「シーン平均輝度に応じた
-    ///   自動レベル補正」という簡易版である点に留意（設計提案書に明記のうえ実装）。
+    /// 【段階4】ダイナミックコントラスト（シーン平均輝度ベースの簡易オートレベル、GPU完結）。
+    /// 【段階5】超解像（設計提案書2章・案B：古典アルゴリズム版）。
+    ///   DNN超解像（案A）はモデル選定・TensorRT統合が別途大きな検証項目になるため、
+    ///   まずは確実に60fpsが出せる古典アルゴリズムを実装：
+    ///     Pass D: 水平方向Lanczos-3（separable、2パスの1つ目）
+    ///     Pass E: 垂直方向Lanczos-3（separable、2つ目）
+    ///     Pass F: 軽いアンシャープマスクで解像感を補強
+    ///   SR無効時（既定）は従来どおりCSMain(効果適用)が直接共有テクスチャへ書き込む
+    ///   高速パスのままで、SR有効時のみ中間テクスチャ(_nativeProcessedTex等)を
+    ///   経由する多段パスへ切り替わる設計（無効時の回帰リスクを避けるため）。
+    ///   ウィンドウサイズに動的追従する適応的SRではなく、固定倍率(1.5x/2x)である点に注意。
     ///
     /// 【要検証事項（Windows実機でのビルド・動作確認が必須）】
     /// - Vortice.Windows のバージョンによってAPIの引数形が変わる場合がある。
     /// - D3D11とD3D9Exが同一GPUアダプタ上のデバイスであることが共有テクスチャ成立の前提。
     /// - Dispatch後のFlush()のみで同期しており、症状が出た場合はKeyedMutex方式を検討。
+    /// - 段階5は新規テクスチャ・シェーダーが最も多く、これまでで最もリスクが高い変更。
     /// </summary>
     public sealed class GpuFramePresenter : IFramePresenter, IDisposable
     {
@@ -45,9 +44,9 @@ namespace VerticalPlayer
         private IDirect3D9Ex? _d3d9;
         private IDirect3DDevice9Ex? _d3d9Device;
 
-        private ID3D11Texture2D? _uploadTex;   // CPU→GPU転送用（Dynamic）
-        private ID3D11Texture2D? _sharedTex11; // D3D11側の共有テクスチャ（Default, Shared）
-        private IDirect3DTexture9? _sharedTex9; // D3D9側で同じ共有ハンドルを開いたもの
+        private ID3D11Texture2D? _uploadTex;   // CPU→GPU転送用（Dynamic、常に原寸）
+        private ID3D11Texture2D? _sharedTex11; // D3D11側の共有テクスチャ（Default, Shared、SR有効時は拡大後サイズ）
+        private IDirect3DTexture9? _sharedTex9;
         private IDirect3DSurface9? _surface9;
 
         private ID3D11ShaderResourceView? _srvUpload;
@@ -61,18 +60,38 @@ namespace VerticalPlayer
         private ID3D11Texture2D? _lumaDownTex;
         private ID3D11ShaderResourceView? _lumaDownSrv;
         private ID3D11UnorderedAccessView? _lumaDownUav;
-        private ID3D11Buffer? _avgLumaBuffer;       // RWStructuredBuffer<float>、要素数1
+        private ID3D11Buffer? _avgLumaBuffer;
         private ID3D11ShaderResourceView? _avgLumaSrv;
         private ID3D11UnorderedAccessView? _avgLumaUav;
         private ID3D11ComputeShader? _lumaDownCs;
         private ID3D11ComputeShader? _lumaReduceCs;
         private ID3D11Buffer? _cbReduce;
         private bool _dynamicContrastShaderReady;
-        private float _dynamicContrastStrength; // 0=無効、設計提案書どおり個別ON/OFF可能にする
+        private float _dynamicContrastStrength;
+
+        // ── 段階5：超解像（原寸処理用の中間テクスチャ＋Lanczosアップスケール＋アンシャープ）──
+        private bool _srShaderReady;
+        private float _srScale = 1f;      // 1=無効
+        private float _lastSrScale = 1f;
+        private ID3D11ComputeShader? _srHorizCs, _srVertCs, _srUnsharpCs;
+        private ID3D11Buffer? _cbScale, _cbSharp;
+
+        private ID3D11Texture2D? _nativeProcessedTex; // 原寸、CSMain(効果適用)の出力先（SR有効時のみ使用）
+        private ID3D11ShaderResourceView? _srvNativeProcessed;
+        private ID3D11UnorderedAccessView? _uavNativeProcessed;
+
+        private ID3D11Texture2D? _srHorizTex; // 横方向だけ拡大（縦は原寸のまま）
+        private ID3D11ShaderResourceView? _srHorizSrv;
+        private ID3D11UnorderedAccessView? _srHorizUav;
+
+        private ID3D11Texture2D? _srVertTex; // 縦横とも拡大後（アンシャープ適用前）
+        private ID3D11ShaderResourceView? _srVertSrv;
+        private ID3D11UnorderedAccessView? _srVertUav;
 
         private float _contrast, _saturation, _gamma;
 
-        private int _w, _h;
+        private int _w, _h;       // 原寸（デコード解像度）
+        private int _outW, _outH; // 表示用最終サイズ（SR無効時は_w/_hと同じ）
         private bool _d3dReady;
 
         private const string EffectsShaderSource = @"
@@ -97,8 +116,6 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     float4 c = InputTex.Load(int3(id.xy, 0));
 
-    // ダイナミックコントラスト（簡易版）：シーン平均輝度に応じてガンマを自動補正。
-    // 暗いシーン(avgLumaが小さい)ほど持ち上げ、明るいシーンほどわずかに締める。
     float avgLuma = AvgLuma[0];
     float autoGammaBoost = lerp(0.35, -0.15, saturate(avgLuma * 1.4));
     float effectiveGamma = Gamma + autoGammaBoost * DynamicContrastStrength;
@@ -168,6 +185,122 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
 }
 ";
 
+        // ── 段階5：Lanczos-3 separable アップスケール ──
+        private const string LanczosCommon = @"
+static const float PI = 3.14159265358979323846;
+float Lanczos3(float x)
+{
+    const float a = 3.0;
+    if (abs(x) < 1e-5) return 1.0;
+    if (abs(x) >= a) return 0.0;
+    float px = PI * x;
+    return a * sin(px) * sin(px / a) / (px * px);
+}
+";
+
+        private const string SrHorizShaderSource = LanczosCommon + @"
+cbuffer ScaleCB : register(b0)
+{
+    float ScaleX;
+    float ScaleY;
+    float2 _PadS;
+};
+
+Texture2D<float4> SrcTex : register(t0);
+RWTexture2D<float4> DstTex : register(u0); // 横だけ拡大（縦は原寸のまま）
+
+[numthreads(8, 8, 1)]
+void CSUpscaleH(uint3 id : SV_DispatchThreadID)
+{
+    uint dstW, dstH;
+    DstTex.GetDimensions(dstW, dstH);
+    if (id.x >= dstW || id.y >= dstH) return;
+
+    uint srcW, srcH;
+    SrcTex.GetDimensions(srcW, srcH);
+
+    float srcX = (id.x + 0.5) / ScaleX - 0.5;
+    int ix = (int)floor(srcX);
+
+    float4 sum = 0;
+    float wsum = 0;
+    for (int t = -2; t <= 3; t++)
+    {
+        int sx = clamp(ix + t, 0, (int)srcW - 1);
+        float w = Lanczos3(srcX - (float)(ix + t));
+        sum += SrcTex.Load(int3(sx, id.y, 0)) * w;
+        wsum += w;
+    }
+    DstTex[id.xy] = sum / max(wsum, 0.0001);
+}
+";
+
+        private const string SrVertShaderSource = LanczosCommon + @"
+cbuffer ScaleCB : register(b0)
+{
+    float ScaleX;
+    float ScaleY;
+    float2 _PadS;
+};
+
+Texture2D<float4> SrcTex : register(t0);
+RWTexture2D<float4> DstTex : register(u0); // 横縦とも拡大後
+
+[numthreads(8, 8, 1)]
+void CSUpscaleV(uint3 id : SV_DispatchThreadID)
+{
+    uint dstW, dstH;
+    DstTex.GetDimensions(dstW, dstH);
+    if (id.x >= dstW || id.y >= dstH) return;
+
+    uint srcW, srcH;
+    SrcTex.GetDimensions(srcW, srcH);
+
+    float srcY = (id.y + 0.5) / ScaleY - 0.5;
+    int iy = (int)floor(srcY);
+
+    float4 sum = 0;
+    float wsum = 0;
+    for (int t = -2; t <= 3; t++)
+    {
+        int sy = clamp(iy + t, 0, (int)srcH - 1);
+        float w = Lanczos3(srcY - (float)(iy + t));
+        sum += SrcTex.Load(int3(id.x, sy, 0)) * w;
+        wsum += w;
+    }
+    DstTex[id.xy] = sum / max(wsum, 0.0001);
+}
+";
+
+        private const string SrUnsharpShaderSource = @"
+cbuffer SharpCB : register(b0)
+{
+    float Amount;
+    float3 _PadU;
+};
+
+Texture2D<float4> SrcTex : register(t0);
+RWTexture2D<float4> DstTex : register(u0);
+
+[numthreads(8, 8, 1)]
+void CSUnsharp(uint3 id : SV_DispatchThreadID)
+{
+    uint w, h;
+    DstTex.GetDimensions(w, h);
+    if (id.x >= w || id.y >= h) return;
+
+    int x = (int)id.x, y = (int)id.y;
+    float4 c = SrcTex.Load(int3(x, y, 0));
+    float4 blur =
+        (SrcTex.Load(int3(clamp(x - 1, 0, (int)w - 1), y, 0)) +
+         SrcTex.Load(int3(clamp(x + 1, 0, (int)w - 1), y, 0)) +
+         SrcTex.Load(int3(x, clamp(y - 1, 0, (int)h - 1), 0)) +
+         SrcTex.Load(int3(x, clamp(y + 1, 0, (int)h - 1), 0))) * 0.25;
+    float3 result = c.rgb + (c.rgb - blur.rgb) * Amount;
+    DstTex[id.xy] = float4(saturate(result), c.a);
+}
+";
+
         public GpuFramePresenter()
         {
             try
@@ -183,32 +316,30 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
 
             if (_d3dReady)
             {
-                try
-                {
-                    InitEffectsShader();
-                    _effectsShaderReady = true;
-                }
+                try { InitEffectsShader(); _effectsShaderReady = true; }
                 catch (Exception ex)
                 {
                     System.Diagnostics.Trace.WriteLine($"GpuFramePresenter effects shader init failed: {ex}");
                     _effectsShaderReady = false;
                 }
 
-                try
-                {
-                    InitDynamicContrastShaders();
-                    _dynamicContrastShaderReady = true;
-                }
+                try { InitDynamicContrastShaders(); _dynamicContrastShaderReady = true; }
                 catch (Exception ex)
                 {
-                    // ダイナミックコントラストだけ失敗しても、段階1/2は継続できるようにする。
                     System.Diagnostics.Trace.WriteLine($"GpuFramePresenter dynamic contrast shader init failed: {ex}");
                     _dynamicContrastShaderReady = false;
+                }
+
+                try { InitSuperResolutionShaders(); _srShaderReady = true; }
+                catch (Exception ex)
+                {
+                    // 超解像だけ失敗しても、段階1/2/4は継続できるようにする。
+                    System.Diagnostics.Trace.WriteLine($"GpuFramePresenter SR shader init failed: {ex}");
+                    _srShaderReady = false;
                 }
             }
         }
 
-        /// <summary>D3D9Ex/D3D11の初期化に成功したかどうか。falseならWriteableBitmap経路を使うこと。</summary>
         public bool IsAvailable => _d3dReady;
 
         private void InitDevices()
@@ -247,20 +378,19 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
             return device.CreateComputeShader(shaderBlob.AsSpan());
         }
 
+        private static ID3D11Buffer CreateConstBuffer(ID3D11Device device, int byteWidth) => device.CreateBuffer(new BufferDescription
+        {
+            ByteWidth = (uint)byteWidth,
+            Usage = ResourceUsage.Dynamic,
+            BindFlags = BindFlags.ConstantBuffer,
+            CPUAccessFlags = CpuAccessFlags.Write
+        });
+
         private void InitEffectsShader()
         {
             if (_d3d11Device == null) return;
-
             _effectsCs = CompileCs(_d3d11Device, EffectsShaderSource, "CSMain", "GpuEffects");
-
-            // cbufferは16バイトアライメント。float4個分ちょうど16バイト。
-            _cbEffects = _d3d11Device.CreateBuffer(new BufferDescription
-            {
-                ByteWidth = 16,
-                Usage = ResourceUsage.Dynamic,
-                BindFlags = BindFlags.ConstantBuffer,
-                CPUAccessFlags = CpuAccessFlags.Write
-            });
+            _cbEffects = CreateConstBuffer(_d3d11Device, 16);
         }
 
         private void InitDynamicContrastShaders()
@@ -286,8 +416,6 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
             _lumaDownSrv = _d3d11Device.CreateShaderResourceView(_lumaDownTex);
             _lumaDownUav = _d3d11Device.CreateUnorderedAccessView(_lumaDownTex);
 
-            // RWStructuredBuffer<float>、要素数1。初期値は中間的な明るさ(0.4)にしておき、
-            // 再生開始直後の1〜2フレームだけ極端な補正がかかるのを防ぐ。
             _avgLumaBuffer = _d3d11Device.CreateBuffer(new BufferDescription
             {
                 ByteWidth = 4,
@@ -297,20 +425,23 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
                 StructureByteStride = 4
             });
             float initialLuma = 0.4f;
-            _d3d11Context?.UpdateSubresource(ref initialLuma, _avgLumaBuffer);
+            _d3d11Context?.UpdateSubresource(in initialLuma, _avgLumaBuffer);
             _avgLumaSrv = _d3d11Device.CreateShaderResourceView(_avgLumaBuffer);
             _avgLumaUav = _d3d11Device.CreateUnorderedAccessView(_avgLumaBuffer);
 
-            _cbReduce = _d3d11Device.CreateBuffer(new BufferDescription
-            {
-                ByteWidth = 16,
-                Usage = ResourceUsage.Dynamic,
-                BindFlags = BindFlags.ConstantBuffer,
-                CPUAccessFlags = CpuAccessFlags.Write
-            });
+            _cbReduce = CreateConstBuffer(_d3d11Device, 16);
         }
 
-        /// <summary>コントラスト/彩度/ガンマ（-1〜1、AVEngine.SetEffectsと同じ意味）を設定する。</summary>
+        private void InitSuperResolutionShaders()
+        {
+            if (_d3d11Device == null) return;
+            _srHorizCs = CompileCs(_d3d11Device, SrHorizShaderSource, "CSUpscaleH", "GpuSrHoriz");
+            _srVertCs = CompileCs(_d3d11Device, SrVertShaderSource, "CSUpscaleV", "GpuSrVert");
+            _srUnsharpCs = CompileCs(_d3d11Device, SrUnsharpShaderSource, "CSUnsharp", "GpuSrUnsharp");
+            _cbScale = CreateConstBuffer(_d3d11Device, 16);
+            _cbSharp = CreateConstBuffer(_d3d11Device, 16);
+        }
+
         public void SetEffects(double contrast, double saturation, double gamma)
         {
             _contrast = (float)contrast;
@@ -318,24 +449,37 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
             _gamma = (float)gamma;
         }
 
-        /// <summary>ダイナミックコントラスト（簡易オートレベル）の強さ。0で完全無効。
-        /// 経験則として0.5〜0.7程度を推奨（強すぎると不自然な明滅感が出る）。</summary>
         public void SetDynamicContrast(float strength)
         {
             _dynamicContrastStrength = Math.Clamp(strength, 0f, 1f);
         }
 
+        /// <summary>超解像の拡大倍率。1.0以下で無効。設計提案書2章・案B（古典Lanczos＋アンシャープ）。</summary>
+        public void SetSuperResolution(float scale)
+        {
+            _srScale = scale <= 1.01f ? 1f : scale;
+        }
+
         public void EnsureSize(int width, int height)
         {
-            if (!_d3dReady || (width == _w && height == _h && _sharedTex11 != null)) return;
+            if (!_d3dReady) return;
+            if (width == _w && height == _h && _sharedTex11 != null && Math.Abs(_lastSrScale - _srScale) < 0.001f)
+                return;
             _w = width; _h = height;
+            _lastSrScale = _srScale;
             RecreateTextures();
         }
+
+        private bool SrActive => _srShaderReady && _srScale > 1f;
 
         private void RecreateTextures()
         {
             DisposeSizedTextures();
             if (_d3d11Device == null || _d3d9Device == null || _w <= 0 || _h <= 0) return;
+
+            bool srActive = SrActive;
+            _outW = srActive ? Math.Max(1, (int)Math.Round(_w * _srScale)) : _w;
+            _outH = srActive ? Math.Max(1, (int)Math.Round(_h * _srScale)) : _h;
 
             _uploadTex = _d3d11Device.CreateTexture2D(new Texture2DDescription
             {
@@ -353,8 +497,8 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
 
             _sharedTex11 = _d3d11Device.CreateTexture2D(new Texture2DDescription
             {
-                Width = (uint)_w,
-                Height = (uint)_h,
+                Width = (uint)_outW,
+                Height = (uint)_outH,
                 MipLevels = 1,
                 ArraySize = 1,
                 Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
@@ -369,12 +513,66 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
             IntPtr sharedHandle = dxgiResource.SharedHandle;
 
             _sharedTex9 = _d3d9Device.CreateTexture(
-                (uint)_w, (uint)_h, 1, Vortice.Direct3D9.Usage.RenderTarget, Vortice.Direct3D9.Format.A8R8G8B8, Pool.Default, ref sharedHandle);
+                (uint)_outW, (uint)_outH, 1, Vortice.Direct3D9.Usage.RenderTarget, Vortice.Direct3D9.Format.A8R8G8B8, Pool.Default, ref sharedHandle);
             _surface9 = _sharedTex9.GetSurfaceLevel(0);
 
             if (_effectsShaderReady)
             {
                 _srvUpload = _d3d11Device.CreateShaderResourceView(_uploadTex);
+
+                if (srActive)
+                {
+                    // 効果適用(CSMain)は常に原寸で行い、その後の拡大パスへ渡す。
+                    _nativeProcessedTex = _d3d11Device.CreateTexture2D(new Texture2DDescription
+                    {
+                        Width = (uint)_w,
+                        Height = (uint)_h,
+                        MipLevels = 1,
+                        ArraySize = 1,
+                        Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
+                        SampleDescription = new SampleDescription(1, 0),
+                        Usage = ResourceUsage.Default,
+                        BindFlags = BindFlags.ShaderResource | BindFlags.UnorderedAccess,
+                        CPUAccessFlags = CpuAccessFlags.None,
+                        MiscFlags = ResourceOptionFlags.None
+                    });
+                    _srvNativeProcessed = _d3d11Device.CreateShaderResourceView(_nativeProcessedTex);
+                    _uavNativeProcessed = _d3d11Device.CreateUnorderedAccessView(_nativeProcessedTex);
+
+                    _srHorizTex = _d3d11Device.CreateTexture2D(new Texture2DDescription
+                    {
+                        Width = (uint)_outW,
+                        Height = (uint)_h,
+                        MipLevels = 1,
+                        ArraySize = 1,
+                        Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
+                        SampleDescription = new SampleDescription(1, 0),
+                        Usage = ResourceUsage.Default,
+                        BindFlags = BindFlags.ShaderResource | BindFlags.UnorderedAccess,
+                        CPUAccessFlags = CpuAccessFlags.None,
+                        MiscFlags = ResourceOptionFlags.None
+                    });
+                    _srHorizSrv = _d3d11Device.CreateShaderResourceView(_srHorizTex);
+                    _srHorizUav = _d3d11Device.CreateUnorderedAccessView(_srHorizTex);
+
+                    _srVertTex = _d3d11Device.CreateTexture2D(new Texture2DDescription
+                    {
+                        Width = (uint)_outW,
+                        Height = (uint)_outH,
+                        MipLevels = 1,
+                        ArraySize = 1,
+                        Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
+                        SampleDescription = new SampleDescription(1, 0),
+                        Usage = ResourceUsage.Default,
+                        BindFlags = BindFlags.ShaderResource | BindFlags.UnorderedAccess,
+                        CPUAccessFlags = CpuAccessFlags.None,
+                        MiscFlags = ResourceOptionFlags.None
+                    });
+                    _srVertSrv = _d3d11Device.CreateShaderResourceView(_srVertTex);
+                    _srVertUav = _d3d11Device.CreateUnorderedAccessView(_srVertTex);
+                }
+
+                // srActiveなら「効果適用の出力先」は_nativeProcessedTex、そうでなければ従来どおり共有テクスチャへ直接。
                 _uavShared = _d3d11Device.CreateUnorderedAccessView(_sharedTex11);
             }
 
@@ -385,7 +583,7 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
                 D3DImage.Unlock();
             }
 
-            System.Diagnostics.Trace.WriteLine($"GpuFramePresenter: textures ({_w}x{_h}) recreated");
+            System.Diagnostics.Trace.WriteLine($"GpuFramePresenter: textures native=({_w}x{_h}) out=({_outW}x{_outH}) srActive={srActive}");
         }
 
         public void Present(byte[] bgra, int width, int height, int stride)
@@ -408,15 +606,15 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
                 }
                 _d3d11Context.Unmap(_uploadTex, 0);
 
+                bool srActive = SrActive && _uavNativeProcessed != null && _srHorizUav != null && _srVertUav != null;
+
                 if (_effectsShaderReady && _effectsCs != null && _srvUpload != null && _uavShared != null && _cbEffects != null)
                 {
-                    // ── 段階4：ダイナミックコントラスト用の平均輝度をGPU上だけで更新 ──
                     if (_dynamicContrastShaderReady && _dynamicContrastStrength > 0f &&
                         _lumaDownCs != null && _lumaReduceCs != null &&
                         _lumaDownUav != null && _lumaDownSrv != null &&
                         _avgLumaUav != null && _cbReduce != null)
                     {
-                        // Pass A: 入力を32x32へ簡易ダウンサンプル＋輝度化
                         _d3d11Context.CSSetShader(_lumaDownCs);
                         _d3d11Context.CSSetShaderResources(0, new[] { _srvUpload });
                         _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _lumaDownUav });
@@ -424,7 +622,6 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
                         _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
                         _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
 
-                        // Pass B: 32x32を1スレッドで平均し、前フレームとEMAで時間平滑化
                         UpdateReduceConstantBuffer();
                         _d3d11Context.CSSetShader(_lumaReduceCs);
                         _d3d11Context.CSSetShaderResources(0, new[] { _lumaDownSrv });
@@ -435,22 +632,56 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
                         _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
                     }
 
-                    // Pass C: コントラスト/彩度/ガンマ＋ダイナミックコントラストを一括適用
+                    // Pass C: コントラスト/彩度/ガンマ＋ダイナミックコントラスト（常に原寸=width x height）
                     UpdateEffectsConstantBuffer();
+                    var effectsTarget = srActive ? _uavNativeProcessed! : _uavShared;
                     _d3d11Context.CSSetShader(_effectsCs);
                     var srvs = (_dynamicContrastShaderReady && _avgLumaSrv != null)
                         ? new[] { _srvUpload, _avgLumaSrv }
-                        : new[] { _srvUpload }; // AvgLuma未使用時もシェーダー自体はt1参照するため、下のフォールバックに注意
+                        : new[] { _srvUpload };
                     _d3d11Context.CSSetShaderResources(0, srvs);
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavShared });
+                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { effectsTarget });
                     _d3d11Context.CSSetConstantBuffers(0, new[] { _cbEffects });
                     _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
                     _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null!, null! });
                     _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+
+                    if (srActive && _srHorizCs != null && _srVertCs != null && _srUnsharpCs != null &&
+                        _srvNativeProcessed != null && _srHorizSrv != null && _srVertSrv != null && _cbScale != null && _cbSharp != null)
+                    {
+                        UpdateScaleConstantBuffer();
+
+                        // Pass D: 水平Lanczos（原寸高さのまま、幅だけ拡大）
+                        _d3d11Context.CSSetShader(_srHorizCs);
+                        _d3d11Context.CSSetShaderResources(0, new[] { _srvNativeProcessed });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _srHorizUav! });
+                        _d3d11Context.CSSetConstantBuffers(0, new[] { _cbScale });
+                        _d3d11Context.Dispatch((uint)((_outW + 7) / 8), (uint)((height + 7) / 8), 1);
+                        _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+
+                        // Pass E: 垂直Lanczos（拡大後サイズ）
+                        _d3d11Context.CSSetShader(_srVertCs);
+                        _d3d11Context.CSSetShaderResources(0, new[] { _srHorizSrv });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _srVertUav! });
+                        _d3d11Context.CSSetConstantBuffers(0, new[] { _cbScale });
+                        _d3d11Context.Dispatch((uint)((_outW + 7) / 8), (uint)((_outH + 7) / 8), 1);
+                        _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+
+                        // Pass F: アンシャープ→最終共有テクスチャ
+                        UpdateSharpConstantBuffer();
+                        _d3d11Context.CSSetShader(_srUnsharpCs);
+                        _d3d11Context.CSSetShaderResources(0, new[] { _srVertSrv });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavShared });
+                        _d3d11Context.CSSetConstantBuffers(0, new[] { _cbSharp });
+                        _d3d11Context.Dispatch((uint)((_outW + 7) / 8), (uint)((_outH + 7) / 8), 1);
+                        _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                    }
                 }
                 else
                 {
-                    // 段階1相当：Compute Shaderが使えない場合は単純コピー（無加工）
                     _d3d11Context.CopyResource(_sharedTex11, _uploadTex);
                 }
                 _d3d11Context.Flush();
@@ -458,7 +689,7 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
                 if (D3DImage.IsFrontBufferAvailable)
                 {
                     D3DImage.Lock();
-                    D3DImage.AddDirtyRect(new Int32Rect(0, 0, width, height));
+                    D3DImage.AddDirtyRect(new Int32Rect(0, 0, _outW > 0 ? _outW : width, _outH > 0 ? _outH : height));
                     D3DImage.Unlock();
                 }
             }
@@ -490,10 +721,37 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
             unsafe
             {
                 float* p = (float*)mapped.DataPointer;
-                p[0] = 0.08f; // EMAの平滑化係数（小さいほどゆっくり追従＝ちらつきにくい）
+                p[0] = 0.08f;
                 p[1] = p[2] = p[3] = 0f;
             }
             _d3d11Context.Unmap(_cbReduce, 0);
+        }
+
+        private void UpdateScaleConstantBuffer()
+        {
+            if (_d3d11Context == null || _cbScale == null || _w <= 0 || _h <= 0) return;
+            var mapped = _d3d11Context.Map(_cbScale, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+            unsafe
+            {
+                float* p = (float*)mapped.DataPointer;
+                p[0] = (float)_outW / _w;
+                p[1] = (float)_outH / _h;
+                p[2] = p[3] = 0f;
+            }
+            _d3d11Context.Unmap(_cbScale, 0);
+        }
+
+        private void UpdateSharpConstantBuffer()
+        {
+            if (_d3d11Context == null || _cbSharp == null) return;
+            var mapped = _d3d11Context.Map(_cbSharp, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+            unsafe
+            {
+                float* p = (float*)mapped.DataPointer;
+                p[0] = 0.5f; // アンシャープ強度（経験則。強すぎるとハローが目立つ）
+                p[1] = p[2] = p[3] = 0f;
+            }
+            _d3d11Context.Unmap(_cbSharp, 0);
         }
 
         private void DisposeSizedTextures()
@@ -504,6 +762,18 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
             _sharedTex9?.Dispose(); _sharedTex9 = null;
             _sharedTex11?.Dispose(); _sharedTex11 = null;
             _uploadTex?.Dispose(); _uploadTex = null;
+
+            _uavNativeProcessed?.Dispose(); _uavNativeProcessed = null;
+            _srvNativeProcessed?.Dispose(); _srvNativeProcessed = null;
+            _nativeProcessedTex?.Dispose(); _nativeProcessedTex = null;
+
+            _srHorizUav?.Dispose(); _srHorizUav = null;
+            _srHorizSrv?.Dispose(); _srHorizSrv = null;
+            _srHorizTex?.Dispose(); _srHorizTex = null;
+
+            _srVertUav?.Dispose(); _srVertUav = null;
+            _srVertSrv?.Dispose(); _srVertSrv = null;
+            _srVertTex?.Dispose(); _srVertTex = null;
         }
 
         public void Dispose()
@@ -518,6 +788,11 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
             _cbReduce?.Dispose(); _cbReduce = null;
             _lumaReduceCs?.Dispose(); _lumaReduceCs = null;
             _lumaDownCs?.Dispose(); _lumaDownCs = null;
+            _cbScale?.Dispose(); _cbScale = null;
+            _cbSharp?.Dispose(); _cbSharp = null;
+            _srHorizCs?.Dispose(); _srHorizCs = null;
+            _srVertCs?.Dispose(); _srVertCs = null;
+            _srUnsharpCs?.Dispose(); _srUnsharpCs = null;
             _cbEffects?.Dispose(); _cbEffects = null;
             _effectsCs?.Dispose(); _effectsCs = null;
             _d3d9Device?.Dispose(); _d3d9Device = null;

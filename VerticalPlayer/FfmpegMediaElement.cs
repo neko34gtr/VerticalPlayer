@@ -169,6 +169,19 @@ namespace VerticalPlayer.Media
             }
         }
 
+        private float _superResolutionScale = 1f;
+        /// <summary>超解像（段階5、Lanczos-3＋アンシャープ）の拡大倍率。1.0=無効。
+        /// GPU描画パス(UseGpuPresenter)が有効な時のみ実際に効果がある。</summary>
+        public float SuperResolutionScale
+        {
+            get => _superResolutionScale;
+            set
+            {
+                _superResolutionScale = value;
+                _engine.SetSuperResolution(value);
+            }
+        }
+
         // ── 表示倍率／アスペクト比（黒帯なしフィット・固定ズーム・強制比率） ──
         private VideoScaleMode _scaleMode = VideoScaleMode.Auto;
         public VideoScaleMode ScaleMode
