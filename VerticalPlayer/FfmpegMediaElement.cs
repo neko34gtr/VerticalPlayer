@@ -162,14 +162,16 @@ namespace VerticalPlayer.Media
 
         private bool _dynamicContrast;
         /// <summary>ダイナミックコントラスト（段階4、シーン平均輝度ベースの簡易オートレベル）。
-        /// GPU描画パス(UseGpuPresenter)が有効な時のみ実際に効果がある。</summary>
+        /// GPU描画パス(UseGpuPresenter)が有効な時のみ実際に効果がある。
+        /// _gpuPresenterへ直接設定する（AVEngine.GpuPresenterはファイルを開いた後にしかセットされない
+        /// ため、それ経由だと起動直後の設定復元タイミングで値が握りつぶされるバグがあった）。</summary>
         public bool DynamicContrast
         {
             get => _dynamicContrast;
             set
             {
                 _dynamicContrast = value;
-                _engine.SetDynamicContrast(value ? 0.6f : 0f);
+                _gpuPresenter.SetDynamicContrast(value ? 0.6f : 0f);
             }
         }
 
@@ -182,20 +184,20 @@ namespace VerticalPlayer.Media
             set
             {
                 _superResolutionScale = value;
-                _engine.SetSuperResolution(value);
+                _gpuPresenter.SetSuperResolution(value);
             }
         }
 
-        private bool _compareMode;
-        /// <summary>PowerDVD TrueTheater風の左右比較表示（左＝無加工、右＝加工済み）。
-        /// GPU描画パス(UseGpuPresenter)が有効な時のみ実際に効果がある。</summary>
-        public bool CompareMode
+        private int _compareViewMode; // 0=通常、1=1枚分割（ワイプ）、2=2枚分割（フル画像を左右に並べる）
+        /// <summary>PowerDVD TrueTheater風の比較表示モード。GPU描画パス(UseGpuPresenter)が
+        /// 有効な時のみ実際に効果がある。</summary>
+        public int CompareViewMode
         {
-            get => _compareMode;
+            get => _compareViewMode;
             set
             {
-                _compareMode = value;
-                _engine.SetCompareMode(value);
+                _compareViewMode = value;
+                _gpuPresenter.SetCompareMode(value);
             }
         }
 

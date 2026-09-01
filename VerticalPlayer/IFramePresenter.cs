@@ -32,8 +32,9 @@
         /// WriteableBitmap（非GPU）経路では何もしない。</summary>
         void SetSuperResolution(float scale);
 
-        /// <summary>PowerDVD TrueTheater風の左右比較表示（左＝無加工、右＝加工済み）。
-        /// GPU完結のCompute Shaderでのみ実装されており、WriteableBitmap経路では何もしない。</summary>
-        void SetCompareMode(bool enabled);
+        /// <summary>PowerDVD TrueTheater風の比較表示モード。0=通常、1=1枚分割（ワイプ）、
+        /// 2=2枚分割（フル画像を左右に並べる）。GPU完結のCompute Shaderでのみ実装されており、
+        /// WriteableBitmap経路では何もしない。</summary>
+        void SetCompareMode(int mode);
     }
 }

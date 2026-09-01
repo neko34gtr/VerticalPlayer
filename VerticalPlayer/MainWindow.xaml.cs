@@ -60,7 +60,7 @@ namespace VerticalPlayer
         public double ZoomScaleY { get; set; } = 1.0;
         public bool Denoise { get; set; }
         public bool DynamicContrast { get; set; }
-        public bool CompareMode { get; set; }
+        public int CompareViewMode { get; set; }
 
         // ── プリセット（複数） ──
         public List<PresetSettings> Presets { get; set; } = new();
@@ -314,8 +314,8 @@ namespace VerticalPlayer
             Player.Denoise = s.Denoise; // 再オープン方式のため、次に開くファイルから適用（起動直後は未オープンなのでこれで十分）
             DynamicContrastCheck.IsChecked = s.DynamicContrast;
             Player.DynamicContrast = s.DynamicContrast;
-            CompareModeCheck.IsChecked = s.CompareMode;
-            Player.CompareMode = s.CompareMode;
+            CompareModeCombo.SelectedIndex = Math.Clamp(s.CompareViewMode, 0, 2);
+            Player.CompareViewMode = s.CompareViewMode;
 
             UpdateEffectLabels();
 
@@ -371,7 +371,7 @@ namespace VerticalPlayer
                 ZoomScaleY = PlayerScale.ScaleY,
                 Denoise = DenoiseCheck.IsChecked ?? false,
                 DynamicContrast = DynamicContrastCheck.IsChecked ?? false,
-                CompareMode = CompareModeCheck.IsChecked ?? false,
+                CompareViewMode = CompareModeCombo.SelectedIndex,
 
                 // プリセット
                 Presets = new List<PresetSettings>(_presets),
@@ -1003,9 +1003,14 @@ namespace VerticalPlayer
             }
         }
 
-        private void CompareMode_Changed(object sender, RoutedEventArgs e)
+        private void CompareMode_Changed(object sender, SelectionChangedEventArgs e)
         {
-            Player.CompareMode = CompareModeCheck.IsChecked ?? false;
+            // GPU完結の後段処理のため再オープン不要（ライブ切替）。
+            if (CompareModeCombo.SelectedItem is ComboBoxItem item &&
+                int.TryParse((string)item.Tag, out int mode))
+            {
+                Player.CompareViewMode = mode;
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────

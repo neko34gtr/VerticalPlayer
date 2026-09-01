@@ -975,9 +975,14 @@
                                         <ComboBoxItem Content="2.0倍" Tag="2.0"/>
                                     </ComboBox>
 
-                                    <CheckBox x:Name="CompareModeCheck" Content="比較ビュー（左：無加工 / 右：加工済み）"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4"
-                                              Checked="CompareMode_Changed" Unchecked="CompareMode_Changed"/>
+                                    <TextBlock Text="比較ビュー（TrueTheater風）" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
+                                    <ComboBox x:Name="CompareModeCombo" Margin="0,0,0,6"
+                                              SelectionChanged="CompareMode_Changed" SelectedIndex="0">
+                                        <ComboBoxItem Content="通常" Tag="0"/>
+                                        <ComboBoxItem Content="1枚分割（ワイプ）" Tag="1"/>
+                                        <ComboBoxItem Content="2枚分割（フル画像）" Tag="2"/>
+                                    </ComboBox>
 
                                     <Border Style="{StaticResource Separator}"/>
 

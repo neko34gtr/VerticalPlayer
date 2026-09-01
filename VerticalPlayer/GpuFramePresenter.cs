@@ -91,8 +91,9 @@ namespace VerticalPlayer
         private float _contrast, _saturation, _gamma;
 
         // ── 比較ビュー（PowerDVD TrueTheater風の左右分割表示）──
-        private bool _compareMode;
+        private int _compareMode; // 0=off, 1=single-frame wipe split, 2=dual full-frame side-by-side
         private ID3D11ComputeShader? _compareCs;
+        private ID3D11Buffer? _cbCompare;
         private ID3D11Texture2D? _processedFinalTex; // 出力解像度、加工済み結果の一時保存先（比較モード時のみ使用）
         private ID3D11ShaderResourceView? _srvProcessedFinal;
         private ID3D11UnorderedAccessView? _uavProcessedFinal;
@@ -310,9 +311,15 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
 ";
 
         private const string CompareShaderSource = @"
-Texture2D<float4> ProcessedTex : register(t0); // output resolution, processed
-Texture2D<float4> OrigTex : register(t1);      // native resolution, unprocessed
-RWTexture2D<float4> FinalTex : register(u0);   // output resolution, final shared texture
+cbuffer CompareCB : register(b0)
+{
+    float Mode; // 1=single-frame wipe split, 2=dual full-frame side-by-side
+    float3 _PadC;
+};
+
+Texture2D<float4> ProcessedTex : register(t0); // output resolution, fully processed frame
+Texture2D<float4> OrigTex : register(t1);      // native resolution, unprocessed frame
+RWTexture2D<float4> FinalTex : register(u0);   // output resolution, final canvas
 
 [numthreads(8, 8, 1)]
 void CSCompare(uint3 id : SV_DispatchThreadID)
@@ -321,25 +328,55 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
     FinalTex.GetDimensions(w, h);
     if (id.x >= w || id.y >= h) return;
 
-    uint splitX = w / 2;
-    if (id.x < splitX)
+    uint halfW = max(w / 2, 1);
+    uint rightW = max(w - halfW, 1);
+
+    if ((int)round(Mode) == 2)
     {
-        // left half: unprocessed original, simply upscaled (baseline for comparison, no Lanczos)
-        uint srcW, srcH;
-        OrigTex.GetDimensions(srcW, srcH);
-        uint2 srcXY = uint2(
-            (uint)((id.x + 0.5) * srcW / w),
-            (uint)((id.y + 0.5) * srcH / h));
-        srcXY = min(srcXY, uint2(srcW - 1, srcH - 1));
-        FinalTex[id.xy] = OrigTex.Load(int3(srcXY, 0));
+        // dual full-frame side-by-side: both panes show the ENTIRE frame, shrunk to half width
+        if (id.x < halfW)
+        {
+            uint srcW, srcH;
+            OrigTex.GetDimensions(srcW, srcH);
+            uint2 srcXY = uint2(
+                (uint)((id.x + 0.5) * srcW / halfW),
+                (uint)((id.y + 0.5) * srcH / h));
+            srcXY = min(srcXY, uint2(srcW - 1, srcH - 1));
+            FinalTex[id.xy] = OrigTex.Load(int3(srcXY, 0));
+        }
+        else
+        {
+            uint procW, procH;
+            ProcessedTex.GetDimensions(procW, procH);
+            uint localX = id.x - halfW;
+            uint2 srcXY = uint2(
+                (uint)((localX + 0.5) * procW / rightW),
+                (uint)((id.y + 0.5) * procH / h));
+            srcXY = min(srcXY, uint2(procW - 1, procH - 1));
+            FinalTex[id.xy] = ProcessedTex.Load(int3(srcXY, 0));
+        }
     }
     else
     {
-        FinalTex[id.xy] = ProcessedTex.Load(int3(id.xy, 0));
+        // single-frame wipe split: one frame, left half = original crop, right half = processed crop
+        if (id.x < halfW)
+        {
+            uint srcW, srcH;
+            OrigTex.GetDimensions(srcW, srcH);
+            uint2 srcXY = uint2(
+                (uint)((id.x + 0.5) * srcW / w),
+                (uint)((id.y + 0.5) * srcH / h));
+            srcXY = min(srcXY, uint2(srcW - 1, srcH - 1));
+            FinalTex[id.xy] = OrigTex.Load(int3(srcXY, 0));
+        }
+        else
+        {
+            FinalTex[id.xy] = ProcessedTex.Load(int3(id.xy, 0));
+        }
     }
 
-    if (abs((int)id.x - (int)splitX) <= 2)
-        FinalTex[id.xy] = float4(1, 0, 0, 1); // split line (red, ~5px wide)
+    if (abs((int)id.x - (int)halfW) <= 2)
+        FinalTex[id.xy] = float4(1, 0, 0, 1); // divider line (red, ~5px wide)
 }
 ";
 
@@ -495,6 +532,7 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
         {
             if (_d3d11Device == null) return;
             _compareCs = CompileCs(_d3d11Device, CompareShaderSource, "CSCompare", "GpuCompare");
+            _cbCompare = CreateConstBuffer(_d3d11Device, 16);
         }
 
         public void SetEffects(double contrast, double saturation, double gamma)
@@ -515,10 +553,11 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
             _srScale = scale <= 1.01f ? 1f : scale;
         }
 
-        /// <summary>PowerDVD TrueTheater風の左右比較表示。左半分＝無加工、右半分＝加工済み。</summary>
-        public void SetCompareMode(bool enabled)
+        /// <summary>PowerDVD TrueTheater風の比較表示モード。0=通常、1=1枚分割（ワイプ、1枚の画を
+        /// 左右に切り出す）、2=2枚分割（フル画像を2面並べる）。</summary>
+        public void SetCompareMode(int mode)
         {
-            _compareMode = enabled;
+            _compareMode = Math.Clamp(mode, 0, 2);
         }
 
         public void EnsureSize(int width, int height)
@@ -688,7 +727,7 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
                 _d3d11Context.Unmap(_uploadTex, 0);
 
                 bool srActive = SrActive && _uavNativeProcessed != null && _srHorizUav != null && _srVertUav != null;
-                bool compareActive = _compareMode && _compareShaderReady && _compareCs != null &&
+                bool compareActive = _compareMode > 0 && _compareShaderReady && _compareCs != null && _cbCompare != null &&
                     _uavProcessedFinal != null && _srvProcessedFinal != null;
                 // 比較モード時は「最終パス」の出力先を一時テクスチャへ差し替え、
                 // 最後にCSCompareで無加工/加工済みを左右に並べたものを共有テクスチャへ書く。
@@ -766,12 +805,14 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
                         _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
                     }
 
-                    // Pass G: 比較ビュー（左＝無加工、右＝加工済み）
+                    // Pass G: compare view (mode 1: single-frame wipe / mode 2: dual full-frame side-by-side)
                     if (compareActive)
                     {
+                        UpdateCompareConstantBuffer();
                         _d3d11Context.CSSetShader(_compareCs);
                         _d3d11Context.CSSetShaderResources(0, new[] { _srvProcessedFinal!, _srvUpload });
                         _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavShared });
+                        _d3d11Context.CSSetConstantBuffers(0, new[] { _cbCompare! });
                         _d3d11Context.Dispatch((uint)((_outW + 7) / 8), (uint)((_outH + 7) / 8), 1);
                         _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null!, null! });
                         _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
@@ -851,6 +892,19 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
             _d3d11Context.Unmap(_cbSharp, 0);
         }
 
+        private void UpdateCompareConstantBuffer()
+        {
+            if (_d3d11Context == null || _cbCompare == null) return;
+            var mapped = _d3d11Context.Map(_cbCompare, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+            unsafe
+            {
+                float* p = (float*)mapped.DataPointer;
+                p[0] = _compareMode;
+                p[1] = p[2] = p[3] = 0f;
+            }
+            _d3d11Context.Unmap(_cbCompare, 0);
+        }
+
         private void DisposeSizedTextures()
         {
             _uavShared?.Dispose(); _uavShared = null;
@@ -902,6 +956,8 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
             _srHorizCs?.Dispose(); _srHorizCs = null;
             _srVertCs?.Dispose(); _srVertCs = null;
             _srUnsharpCs?.Dispose(); _srUnsharpCs = null;
+            _cbCompare?.Dispose(); _cbCompare = null;
+            _compareCs?.Dispose(); _compareCs = null;
             _cbEffects?.Dispose(); _cbEffects = null;
             _effectsCs?.Dispose(); _effectsCs = null;
             _d3d9Device?.Dispose(); _d3d9Device = null;

@@ -63,8 +63,8 @@ namespace VerticalPlayer.Media
         /// <summary>超解像（段階5）の拡大倍率。1.0以下で無効。GPU側のみで完結する機能。</summary>
         public void SetSuperResolution(float scale) => GpuPresenter?.SetSuperResolution(scale);
 
-        /// <summary>比較ビュー（左＝無加工、右＝加工済み）。GPU側のみで完結する機能。</summary>
-        public void SetCompareMode(bool enabled) => GpuPresenter?.SetCompareMode(enabled);
+        /// <summary>比較ビュー（段階5拡張）のモード。GPU側のみで完結する機能。</summary>
+        public void SetCompareMode(int mode) => GpuPresenter?.SetCompareMode(mode);
 
         /// <summary>簡易デインターレース（隣接ラインのブレンド方式）の有効/無効。</summary>
         public bool DeinterlaceEnabled
