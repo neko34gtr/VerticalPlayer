@@ -31,5 +31,9 @@
         /// 1.0以下で無効。GPU完結のCompute Shaderでのみ実装されており、
         /// WriteableBitmap（非GPU）経路では何もしない。</summary>
         void SetSuperResolution(float scale);
+
+        /// <summary>PowerDVD TrueTheater風の左右比較表示（左＝無加工、右＝加工済み）。
+        /// GPU完結のCompute Shaderでのみ実装されており、WriteableBitmap経路では何もしない。</summary>
+        void SetCompareMode(bool enabled);
     }
 }

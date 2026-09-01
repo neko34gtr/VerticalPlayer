@@ -90,6 +90,14 @@ namespace VerticalPlayer
 
         private float _contrast, _saturation, _gamma;
 
+        // ── 比較ビュー（PowerDVD TrueTheater風の左右分割表示）──
+        private bool _compareMode;
+        private ID3D11ComputeShader? _compareCs;
+        private ID3D11Texture2D? _processedFinalTex; // 出力解像度、加工済み結果の一時保存先（比較モード時のみ使用）
+        private ID3D11ShaderResourceView? _srvProcessedFinal;
+        private ID3D11UnorderedAccessView? _uavProcessedFinal;
+        private bool _compareShaderReady;
+
         private int _w, _h;       // 原寸（デコード解像度）
         private int _outW, _outH; // 表示用最終サイズ（SR無効時は_w/_hと同じ）
         private bool _d3dReady;
@@ -207,7 +215,7 @@ cbuffer ScaleCB : register(b0)
 };
 
 Texture2D<float4> SrcTex : register(t0);
-RWTexture2D<float4> DstTex : register(u0); // 横だけ拡大（縦は原寸のまま）
+RWTexture2D<float4> DstTex : register(u0); // horizontal upscale target (height unchanged)
 
 [numthreads(8, 8, 1)]
 void CSUpscaleH(uint3 id : SV_DispatchThreadID)
@@ -244,7 +252,7 @@ cbuffer ScaleCB : register(b0)
 };
 
 Texture2D<float4> SrcTex : register(t0);
-RWTexture2D<float4> DstTex : register(u0); // 横縦とも拡大後
+RWTexture2D<float4> DstTex : register(u0); // vertical upscale target (both dims upscaled)
 
 [numthreads(8, 8, 1)]
 void CSUpscaleV(uint3 id : SV_DispatchThreadID)
@@ -301,6 +309,40 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
 }
 ";
 
+        private const string CompareShaderSource = @"
+Texture2D<float4> ProcessedTex : register(t0); // output resolution, processed
+Texture2D<float4> OrigTex : register(t1);      // native resolution, unprocessed
+RWTexture2D<float4> FinalTex : register(u0);   // output resolution, final shared texture
+
+[numthreads(8, 8, 1)]
+void CSCompare(uint3 id : SV_DispatchThreadID)
+{
+    uint w, h;
+    FinalTex.GetDimensions(w, h);
+    if (id.x >= w || id.y >= h) return;
+
+    uint splitX = w / 2;
+    if (id.x < splitX)
+    {
+        // left half: unprocessed original, simply upscaled (baseline for comparison, no Lanczos)
+        uint srcW, srcH;
+        OrigTex.GetDimensions(srcW, srcH);
+        uint2 srcXY = uint2(
+            (uint)((id.x + 0.5) * srcW / w),
+            (uint)((id.y + 0.5) * srcH / h));
+        srcXY = min(srcXY, uint2(srcW - 1, srcH - 1));
+        FinalTex[id.xy] = OrigTex.Load(int3(srcXY, 0));
+    }
+    else
+    {
+        FinalTex[id.xy] = ProcessedTex.Load(int3(id.xy, 0));
+    }
+
+    if (abs((int)id.x - (int)splitX) <= 2)
+        FinalTex[id.xy] = float4(1, 0, 0, 1); // split line (red, ~5px wide)
+}
+";
+
         public GpuFramePresenter()
         {
             try
@@ -310,7 +352,7 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"GpuFramePresenter init failed: {ex}");
+                Trace($"GpuFramePresenter init failed: {ex}");
                 _d3dReady = false;
             }
 
@@ -319,14 +361,14 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
                 try { InitEffectsShader(); _effectsShaderReady = true; }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Trace.WriteLine($"GpuFramePresenter effects shader init failed: {ex}");
+                    Trace($"GpuFramePresenter effects shader init failed: {ex}");
                     _effectsShaderReady = false;
                 }
 
                 try { InitDynamicContrastShaders(); _dynamicContrastShaderReady = true; }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Trace.WriteLine($"GpuFramePresenter dynamic contrast shader init failed: {ex}");
+                    Trace($"GpuFramePresenter dynamic contrast shader init failed: {ex}");
                     _dynamicContrastShaderReady = false;
                 }
 
@@ -334,8 +376,15 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
                 catch (Exception ex)
                 {
                     // 超解像だけ失敗しても、段階1/2/4は継続できるようにする。
-                    System.Diagnostics.Trace.WriteLine($"GpuFramePresenter SR shader init failed: {ex}");
+                    Trace($"GpuFramePresenter SR shader init failed: {ex}");
                     _srShaderReady = false;
+                }
+
+                try { InitCompareShader(); _compareShaderReady = true; }
+                catch (Exception ex)
+                {
+                    Trace($"GpuFramePresenter compare shader init failed: {ex}");
+                    _compareShaderReady = false;
                 }
             }
         }
@@ -442,6 +491,12 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
             _cbSharp = CreateConstBuffer(_d3d11Device, 16);
         }
 
+        private void InitCompareShader()
+        {
+            if (_d3d11Device == null) return;
+            _compareCs = CompileCs(_d3d11Device, CompareShaderSource, "CSCompare", "GpuCompare");
+        }
+
         public void SetEffects(double contrast, double saturation, double gamma)
         {
             _contrast = (float)contrast;
@@ -458,6 +513,12 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
         public void SetSuperResolution(float scale)
         {
             _srScale = scale <= 1.01f ? 1f : scale;
+        }
+
+        /// <summary>PowerDVD TrueTheater風の左右比較表示。左半分＝無加工、右半分＝加工済み。</summary>
+        public void SetCompareMode(bool enabled)
+        {
+            _compareMode = enabled;
         }
 
         public void EnsureSize(int width, int height)
@@ -574,6 +635,26 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
 
                 // srActiveなら「効果適用の出力先」は_nativeProcessedTex、そうでなければ従来どおり共有テクスチャへ直接。
                 _uavShared = _d3d11Device.CreateUnorderedAccessView(_sharedTex11);
+
+                // 比較モード用：加工済み結果の一時保存先（常時確保しておき、ライブ切替可能にする）
+                if (_compareShaderReady)
+                {
+                    _processedFinalTex = _d3d11Device.CreateTexture2D(new Texture2DDescription
+                    {
+                        Width = (uint)_outW,
+                        Height = (uint)_outH,
+                        MipLevels = 1,
+                        ArraySize = 1,
+                        Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
+                        SampleDescription = new SampleDescription(1, 0),
+                        Usage = ResourceUsage.Default,
+                        BindFlags = BindFlags.ShaderResource | BindFlags.UnorderedAccess,
+                        CPUAccessFlags = CpuAccessFlags.None,
+                        MiscFlags = ResourceOptionFlags.None
+                    });
+                    _srvProcessedFinal = _d3d11Device.CreateShaderResourceView(_processedFinalTex);
+                    _uavProcessedFinal = _d3d11Device.CreateUnorderedAccessView(_processedFinalTex);
+                }
             }
 
             if (D3DImage.IsFrontBufferAvailable)
@@ -583,7 +664,7 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
                 D3DImage.Unlock();
             }
 
-            System.Diagnostics.Trace.WriteLine($"GpuFramePresenter: textures native=({_w}x{_h}) out=({_outW}x{_outH}) srActive={srActive}");
+            Trace($"GpuFramePresenter: textures native=({_w}x{_h}) out=({_outW}x{_outH}) srActive={srActive}");
         }
 
         public void Present(byte[] bgra, int width, int height, int stride)
@@ -607,6 +688,11 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
                 _d3d11Context.Unmap(_uploadTex, 0);
 
                 bool srActive = SrActive && _uavNativeProcessed != null && _srHorizUav != null && _srVertUav != null;
+                bool compareActive = _compareMode && _compareShaderReady && _compareCs != null &&
+                    _uavProcessedFinal != null && _srvProcessedFinal != null;
+                // 比較モード時は「最終パス」の出力先を一時テクスチャへ差し替え、
+                // 最後にCSCompareで無加工/加工済みを左右に並べたものを共有テクスチャへ書く。
+                var lastStageTarget = (compareActive ? _uavProcessedFinal : _uavShared)!;
 
                 if (_effectsShaderReady && _effectsCs != null && _srvUpload != null && _uavShared != null && _cbEffects != null)
                 {
@@ -634,7 +720,7 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
 
                     // Pass C: コントラスト/彩度/ガンマ＋ダイナミックコントラスト（常に原寸=width x height）
                     UpdateEffectsConstantBuffer();
-                    var effectsTarget = srActive ? _uavNativeProcessed! : _uavShared;
+                    var effectsTarget = (srActive ? _uavNativeProcessed : lastStageTarget)!;
                     _d3d11Context.CSSetShader(_effectsCs);
                     var srvs = (_dynamicContrastShaderReady && _avgLumaSrv != null)
                         ? new[] { _srvUpload, _avgLumaSrv }
@@ -669,14 +755,25 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
                         _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
                         _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
 
-                        // Pass F: アンシャープ→最終共有テクスチャ
+                        // Pass F: アンシャープ→最終段（比較モード時は一時テクスチャ、通常時は共有テクスチャ）
                         UpdateSharpConstantBuffer();
                         _d3d11Context.CSSetShader(_srUnsharpCs);
                         _d3d11Context.CSSetShaderResources(0, new[] { _srVertSrv });
-                        _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavShared });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new[] { lastStageTarget });
                         _d3d11Context.CSSetConstantBuffers(0, new[] { _cbSharp });
                         _d3d11Context.Dispatch((uint)((_outW + 7) / 8), (uint)((_outH + 7) / 8), 1);
                         _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                    }
+
+                    // Pass G: 比較ビュー（左＝無加工、右＝加工済み）
+                    if (compareActive)
+                    {
+                        _d3d11Context.CSSetShader(_compareCs);
+                        _d3d11Context.CSSetShaderResources(0, new[] { _srvProcessedFinal!, _srvUpload });
+                        _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavShared });
+                        _d3d11Context.Dispatch((uint)((_outW + 7) / 8), (uint)((_outH + 7) / 8), 1);
+                        _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null!, null! });
                         _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
                     }
                 }
@@ -695,7 +792,7 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"GpuFramePresenter.Present failed: {ex.Message}");
+                Trace($"GpuFramePresenter.Present failed: {ex.Message}");
             }
         }
 
@@ -774,6 +871,18 @@ void CSUnsharp(uint3 id : SV_DispatchThreadID)
             _srVertUav?.Dispose(); _srVertUav = null;
             _srVertSrv?.Dispose(); _srVertSrv = null;
             _srVertTex?.Dispose(); _srVertTex = null;
+        }
+
+        private static void Trace(string msg)
+        {
+            try
+            {
+                System.IO.File.AppendAllText(
+                    System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "trace.log"),
+                    $"{DateTime.Now:HH:mm:ss.fff} | [GpuFramePresenter] {msg}{Environment.NewLine}",
+                    new System.Text.UTF8Encoding(false));
+            }
+            catch { }
         }
 
         public void Dispose()

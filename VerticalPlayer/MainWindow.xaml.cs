@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -57,6 +58,9 @@ namespace VerticalPlayer
         public double Gamma { get; set; }
         public double ZoomScaleX { get; set; } = 1.0;
         public double ZoomScaleY { get; set; } = 1.0;
+        public bool Denoise { get; set; }
+        public bool DynamicContrast { get; set; }
+        public bool CompareMode { get; set; }
 
         // ── プリセット（複数） ──
         public List<PresetSettings> Presets { get; set; } = new();
@@ -87,6 +91,84 @@ namespace VerticalPlayer
         /// <summary>OpenFileDialog用のFilter文字列</summary>
         private static string VideoOpenFileDialogFilter =>
             "動画ファイル|" + string.Join(";", VideoGlobPatterns) + "|すべてのファイル|*.*";
+
+        [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
+        private static extern int StrCmpLogicalW(string psz1, string psz2);
+
+        /// <summary>Windowsエクスプローラーと同じ「自然順」（数字を数値として比較する）でファイル名/
+        /// フォルダ名を比較する。既定のstring.Sort/OrderByは単純な文字コード順のため、
+        /// "file2"より"file10"が先に来るなど、エクスプローラー上の並びと食い違っていた。</summary>
+        private sealed class NaturalNameComparer : IComparer<string>
+        {
+            public static readonly NaturalNameComparer Instance = new();
+            public int Compare(string? x, string? y) =>
+                StrCmpLogicalW(Path.GetFileName(x) ?? "", Path.GetFileName(y) ?? "");
+        }
+
+        /// <summary>指定フォルダ直下の動画ファイル＋サブフォルダを、Windowsエクスプローラーと同じ
+        /// 自然順で並べた一覧を返す（次/前ファイル探索の共通ロジック）。</summary>
+        private static List<string> GetNaturalSortedEntries(string dir)
+        {
+            var entries = new List<string>();
+            foreach (var ext in VideoGlobPatterns) entries.AddRange(Directory.GetFiles(dir, ext));
+            entries.AddRange(Directory.GetDirectories(dir));
+            entries.Sort(NaturalNameComparer.Instance);
+            return entries;
+        }
+
+        /// <summary>指定フォルダ以下（サブフォルダも自然順に再帰的に）から、最初に見つかる動画
+        /// ファイルを返す。フォルダを直接開いた時、および次ファイル探索でフォルダに突き当たった
+        /// 時の両方で使う共通ロジック。</summary>
+        private static string? FindFirstVideoRecursive(string dir)
+        {
+            try
+            {
+                foreach (var entry in GetNaturalSortedEntries(dir))
+                {
+                    if (Directory.Exists(entry))
+                    {
+                        var found = FindFirstVideoRecursive(entry);
+                        if (found != null) return found;
+                    }
+                    else
+                    {
+                        return entry;
+                    }
+                }
+            }
+            catch { /* アクセス権限等で読めないフォルダはスキップ */ }
+            return null;
+        }
+
+        /// <summary>現在のファイルと同じフォルダ内で、自然順に1つ先/前のエントリへ進む。
+        /// フォルダに突き当たった場合はその中を再帰的に探索し、最初に見つかる動画ファイルへ
+        /// 進む（中に動画が無ければ、さらにその次のエントリへスキップを続ける）。</summary>
+        private static string? FindAdjacentVideo(string currentPath, int delta)
+        {
+            string? dir = Path.GetDirectoryName(currentPath);
+            if (string.IsNullOrEmpty(dir)) return null;
+
+            var entries = GetNaturalSortedEntries(dir);
+            int idx = entries.FindIndex(f => f.Equals(currentPath, StringComparison.OrdinalIgnoreCase));
+            if (idx < 0) return null;
+
+            int step = delta >= 0 ? 1 : -1;
+            for (int i = idx + step; i >= 0 && i < entries.Count; i += step)
+            {
+                string entry = entries[i];
+                if (Directory.Exists(entry))
+                {
+                    var found = FindFirstVideoRecursive(entry);
+                    if (found != null) return found;
+                    // 動画が無いフォルダはスキップして次のエントリへ
+                }
+                else
+                {
+                    return entry;
+                }
+            }
+            return null;
+        }
 
         // ── 状態フラグ ──
         private bool _isDragging = false;
@@ -137,6 +219,13 @@ namespace VerticalPlayer
             Trace("=== MainWindow() start ===");
             InitializeComponent();
             Trace("InitializeComponent done");
+
+            // GPU描画パス（D3DImage経由）を有効化。コントラスト/ダイナミックコントラスト/
+            // 超解像/比較ビューはこれがtrueでないと一切効果が出ない（デノイズはCPU/avfilter側
+            // なので無関係）。D3D9Ex/D3D11初期化に失敗した環境では自動的にWriteableBitmap側へ
+            // フォールバックする（GpuFramePresenter.IsAvailable=false時）。
+            Player.UseGpuPresenter = true;
+            Trace($"GpuPresenter available={Player.IsGpuPresenterAvailable}（falseの場合、D3D9Ex/D3D11初期化失敗のためGPU専用機能は全て無効）");
 
             // ドラッグ＆ドロップを有効化
             this.AllowDrop = true;
@@ -221,6 +310,12 @@ namespace VerticalPlayer
             GammaSlider.Value = s.Gamma;
             PlayerScale.ScaleX = s.ZoomScaleX;
             PlayerScale.ScaleY = s.ZoomScaleY;
+            DenoiseCheck.IsChecked = s.Denoise;
+            Player.Denoise = s.Denoise; // 再オープン方式のため、次に開くファイルから適用（起動直後は未オープンなのでこれで十分）
+            DynamicContrastCheck.IsChecked = s.DynamicContrast;
+            Player.DynamicContrast = s.DynamicContrast;
+            CompareModeCheck.IsChecked = s.CompareMode;
+            Player.CompareMode = s.CompareMode;
 
             UpdateEffectLabels();
 
@@ -274,6 +369,9 @@ namespace VerticalPlayer
                 Gamma = GammaSlider.Value,
                 ZoomScaleX = PlayerScale.ScaleX,
                 ZoomScaleY = PlayerScale.ScaleY,
+                Denoise = DenoiseCheck.IsChecked ?? false,
+                DynamicContrast = DynamicContrastCheck.IsChecked ?? false,
+                CompareMode = CompareModeCheck.IsChecked ?? false,
 
                 // プリセット
                 Presets = new List<PresetSettings>(_presets),
@@ -295,6 +393,22 @@ namespace VerticalPlayer
         private void LoadVideo(string path, double seekSeconds = 0)
         {
             Trace($"LoadVideo: {path} seek={seekSeconds}");
+
+            // フォルダが渡された場合（ドラッグ&ドロップ／コマンドライン引数）は、
+            // その中を自然順に再帰探索して最初に見つかる動画ファイルを開く。
+            if (Directory.Exists(path))
+            {
+                string? first = FindFirstVideoRecursive(path);
+                if (first == null)
+                {
+                    Trace($"LoadVideo: フォルダ内に動画ファイルが見つからない: {path}");
+                    StatusText.Text = "フォルダ内に動画ファイルが見つかりません";
+                    return;
+                }
+                path = first;
+                Trace($"LoadVideo: フォルダを解決 -> {path}");
+            }
+
             try
             {
                 // 特殊再生（自動コマ送り/スロー）状態はファイル単位で持ち回さない。
@@ -488,30 +602,10 @@ namespace VerticalPlayer
         private bool PlayNextVideoInFolder()
         {
             if (string.IsNullOrEmpty(Player.Source?.LocalPath)) return false;
-
-            string currentPath = Player.Source.LocalPath;
-            string? directory = Path.GetDirectoryName(currentPath);
-            if (string.IsNullOrEmpty(directory)) return false;
-
-            List<string> fileList = new List<string>();
-            foreach (var ext in VideoGlobPatterns)
-            {
-                fileList.AddRange(Directory.GetFiles(directory, ext).OrderBy(f => f));
-            }
-
-            if (fileList.Count == 0) return false;
-
-            int currentIndex = fileList.FindIndex(f => f.Equals(currentPath, StringComparison.OrdinalIgnoreCase));
-
-            // 次のファイルが存在するか確認（リストの最後ではない場合）
-            if (currentIndex >= 0 && currentIndex < fileList.Count - 1)
-            {
-                string nextPath = fileList[currentIndex + 1];
-                LoadVideo(nextPath);
-                return true;
-            }
-
-            return false;
+            string? nextPath = FindAdjacentVideo(Player.Source.LocalPath, +1);
+            if (nextPath == null) return false;
+            LoadVideo(nextPath);
+            return true;
         }
 
         // ─────────────────────────────────────────────────────────────────
@@ -909,6 +1003,11 @@ namespace VerticalPlayer
             }
         }
 
+        private void CompareMode_Changed(object sender, RoutedEventArgs e)
+        {
+            Player.CompareMode = CompareModeCheck.IsChecked ?? false;
+        }
+
         // ─────────────────────────────────────────────────────────────────
         // ハードウェアアクセラレーション設定（次に開くファイルから適用）
         // ─────────────────────────────────────────────────────────────────
@@ -1234,14 +1333,7 @@ namespace VerticalPlayer
         public string? GetAdjacentFile(int delta)
         {
             if (string.IsNullOrEmpty(_lastFilePath)) return null;
-            string? dir = Path.GetDirectoryName(_lastFilePath);
-            if (string.IsNullOrEmpty(dir)) return null;
-            var files = new List<string>();
-            foreach (var ext in VideoGlobPatterns) files.AddRange(Directory.GetFiles(dir, ext));
-            files.Sort();
-            int idx = files.FindIndex(f => f.Equals(_lastFilePath, StringComparison.OrdinalIgnoreCase));
-            int next = idx + delta;
-            return (next >= 0 && next < files.Count) ? files[next] : null;
+            return FindAdjacentVideo(_lastFilePath, delta);
         }
 
         // FullScreenWindow終了時に再生状態を受け取る
@@ -1403,17 +1495,11 @@ namespace VerticalPlayer
         private bool NavigateFile(int delta)
         {
             if (string.IsNullOrEmpty(_lastFilePath)) return false;
-            string? dir = Path.GetDirectoryName(_lastFilePath);
-            if (string.IsNullOrEmpty(dir)) return false;
-            var files = new List<string>();
-            foreach (var ext in VideoGlobPatterns) files.AddRange(Directory.GetFiles(dir, ext));
-            files.Sort();
-            int idx = files.FindIndex(f => f.Equals(_lastFilePath, StringComparison.OrdinalIgnoreCase));
-            int next = idx + delta;
-            Trace($"NavigateFile delta={delta} idx={idx} next={next} total={files.Count}");
-            if (next < 0 || next >= files.Count) return false;
-            LoadVideo(files[next]);
-            StatusText.Text = $"{next + 1}/{files.Count}  {Path.GetFileName(files[next])}";
+            string? next = FindAdjacentVideo(_lastFilePath, delta);
+            Trace($"NavigateFile delta={delta} next={next}");
+            if (next == null) return false;
+            LoadVideo(next);
+            StatusText.Text = Path.GetFileName(next);
             return true;
         }
 

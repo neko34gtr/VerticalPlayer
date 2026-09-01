@@ -63,6 +63,9 @@ namespace VerticalPlayer.Media
         /// <summary>超解像（段階5）の拡大倍率。1.0以下で無効。GPU側のみで完結する機能。</summary>
         public void SetSuperResolution(float scale) => GpuPresenter?.SetSuperResolution(scale);
 
+        /// <summary>比較ビュー（左＝無加工、右＝加工済み）。GPU側のみで完結する機能。</summary>
+        public void SetCompareMode(bool enabled) => GpuPresenter?.SetCompareMode(enabled);
+
         /// <summary>簡易デインターレース（隣接ラインのブレンド方式）の有効/無効。</summary>
         public bool DeinterlaceEnabled
         {
@@ -140,6 +143,8 @@ namespace VerticalPlayer.Media
                 // 音声再生位置（シーク後も音声はリアルタイムで進み続ける）で
                 // 上書きしてしまい、結局アンカーが実時間でズルズル前進 → デコードが
                 // 追いつけない、という同じ「目標が逃げる」問題を再発させていた。
+                // [原因究明用ログ] シーク直後のキャッチアップ中のみ発生（通常再生時は到達しない）。
+                // クロック凍結が正しく機能しているかの確認用。
                 Trace($"SetExternalClock ignored (catching up) seconds={seconds:F3}");
                 return;
             }
@@ -470,6 +475,9 @@ namespace VerticalPlayer.Media
 
                                 if (drop)
                                 {
+                                    // [原因究明用ログ] シーク/再オープン直後のキャッチアップ中のみ発生（通常再生時は
+                                    // 到達しない）。まとまった枚数が短時間に出る前提のログなので、通常再生中に
+                                    // 出続けている場合はキャッチアップが終わらない不具合を疑うこと。
                                     Trace($"Frame dropped (behind {(-diff) * 1000:F0}ms) pts={ptsSeconds:F3}");
                                     Thread.Sleep(1); // 大量ドロップ時にデコーダ/GPUを連続で叩き過ぎないようにする
                                     continue;

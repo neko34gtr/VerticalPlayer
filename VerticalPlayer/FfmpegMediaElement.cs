@@ -77,6 +77,10 @@ namespace VerticalPlayer.Media
         /// 「高画質化エンジン設計提案」段階1の検証用フラグ。既定はfalse（従来どおり）。
         /// D3D9Ex/D3D11初期化に失敗した環境では自動的にfalse相当（WriteableBitmap）にフォールバックする。</summary>
         public bool UseGpuPresenter { get; set; }
+        /// <summary>D3D9Ex/D3D11の初期化に成功しGPU描画パスが実際に使えるかどうか。
+        /// falseの場合、UseGpuPresenter=trueにしていてもWriteableBitmap経路のまま
+        /// （GPU専用機能＝コントラスト/ダイナミックコントラスト/超解像/比較ビューは無効）。</summary>
+        public bool IsGpuPresenterAvailable => _gpuPresenter.IsAvailable;
         private Uri? _source;
         private bool _isPlaying;
 
@@ -179,6 +183,19 @@ namespace VerticalPlayer.Media
             {
                 _superResolutionScale = value;
                 _engine.SetSuperResolution(value);
+            }
+        }
+
+        private bool _compareMode;
+        /// <summary>PowerDVD TrueTheater風の左右比較表示（左＝無加工、右＝加工済み）。
+        /// GPU描画パス(UseGpuPresenter)が有効な時のみ実際に効果がある。</summary>
+        public bool CompareMode
+        {
+            get => _compareMode;
+            set
+            {
+                _compareMode = value;
+                _engine.SetCompareMode(value);
             }
         }
 
