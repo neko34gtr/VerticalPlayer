@@ -807,6 +807,26 @@ namespace VerticalPlayer
             sl.Value = t;
             Player.Position = TimeSpan.FromSeconds(t);
         }
+        private void SeekBar_MouseMove(object sender, MouseEventArgs e)
+        {
+            double width = SeekBar.ActualWidth;
+            if (!Player.NaturalDuration.HasTimeSpan || width <= 0) { SeekPreviewPopup.IsOpen = false; return; }
+            double ratio = Math.Clamp(e.GetPosition(SeekBar).X / width, 0, 1);
+            double total = Player.NaturalDuration.TimeSpan.TotalSeconds;
+            SeekPreviewText.Text = Fmt(TimeSpan.FromSeconds(ratio * total));
+
+            SeekPreviewPopup.IsOpen = true;
+            var popupChild = (FrameworkElement)SeekPreviewPopup.Child;
+            popupChild.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double halfW = popupChild.DesiredSize.Width / 2;
+            double cursorX = e.GetPosition(SeekBar).X;
+            SeekPreviewPopup.HorizontalOffset = Math.Clamp(cursorX - halfW, 0, Math.Max(0, width - halfW * 2));
+        }
+
+        private void SeekBar_MouseLeave(object sender, MouseEventArgs e)
+        {
+            SeekPreviewPopup.IsOpen = false;
+        }
 
         // ─────────────────────────────────────────────────────────────────
         // ドラッグ＆ドロップ

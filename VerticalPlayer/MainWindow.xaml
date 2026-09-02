@@ -696,6 +696,13 @@
                                     PreviewMouseLeftButtonUp="SeekBar_PreviewMouseLeftButtonUp"/>
                             <Canvas x:Name="ChapterTicksCanvas" Height="3" VerticalAlignment="Bottom"
                                     Margin="6,0" IsHitTestVisible="False"/>
+                            <Popup x:Name="SeekPreviewPopup" Placement="Relative" PlacementTarget="{Binding ElementName=SeekBar}"
+                                   AllowsTransparency="True" IsHitTestVisible="False" VerticalOffset="-34">
+                                <Border Background="#E6202020" CornerRadius="4" Padding="6,3"
+                                        BorderBrush="{StaticResource TextMuted}" BorderThickness="1">
+                                    <TextBlock x:Name="SeekPreviewText" Foreground="White" FontSize="11" FontFamily="Consolas"/>
+                                </Border>
+                            </Popup>    
                         </Grid>
                         <TextBlock x:Name="TimeDisplay" Grid.Column="1"
                                    Foreground="{StaticResource TextMuted}" Text="0:00 / 0:00"
