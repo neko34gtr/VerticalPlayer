@@ -333,27 +333,52 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
 
     if ((int)round(Mode) == 2)
     {
-        // dual full-frame side-by-side: both panes show the ENTIRE frame, shrunk to half width
+        // dual full-frame side-by-side: each pane fits the ENTIRE frame with aspect ratio
+        // preserved (letterbox/pillarbox padding), instead of stretching to fill the pane.
         if (id.x < halfW)
         {
             uint srcW, srcH;
             OrigTex.GetDimensions(srcW, srcH);
-            uint2 srcXY = uint2(
-                (uint)((id.x + 0.5) * srcW / halfW),
-                (uint)((id.y + 0.5) * srcH / h));
-            srcXY = min(srcXY, uint2(srcW - 1, srcH - 1));
-            FinalTex[id.xy] = OrigTex.Load(int3(srcXY, 0));
+            float scale = min((float)halfW / srcW, (float)h / srcH);
+            float dispW = srcW * scale;
+            float dispH = srcH * scale;
+            float offX = (halfW - dispW) * 0.5;
+            float offY = (h - dispH) * 0.5;
+            float lx = (float)id.x - offX;
+            float ly = (float)id.y - offY;
+            if (lx >= 0 && lx < dispW && ly >= 0 && ly < dispH)
+            {
+                uint2 srcXY = uint2((uint)(lx / scale), (uint)(ly / scale));
+                srcXY = min(srcXY, uint2(srcW - 1, srcH - 1));
+                FinalTex[id.xy] = OrigTex.Load(int3(srcXY, 0));
+            }
+            else
+            {
+                FinalTex[id.xy] = float4(0, 0, 0, 1); // letterbox/pillarbox bar
+            }
         }
         else
         {
             uint procW, procH;
             ProcessedTex.GetDimensions(procW, procH);
             uint localX = id.x - halfW;
-            uint2 srcXY = uint2(
-                (uint)((localX + 0.5) * procW / rightW),
-                (uint)((id.y + 0.5) * procH / h));
-            srcXY = min(srcXY, uint2(procW - 1, procH - 1));
-            FinalTex[id.xy] = ProcessedTex.Load(int3(srcXY, 0));
+            float scale = min((float)rightW / procW, (float)h / procH);
+            float dispW = procW * scale;
+            float dispH = procH * scale;
+            float offX = (rightW - dispW) * 0.5;
+            float offY = (h - dispH) * 0.5;
+            float lx = (float)localX - offX;
+            float ly = (float)id.y - offY;
+            if (lx >= 0 && lx < dispW && ly >= 0 && ly < dispH)
+            {
+                uint2 srcXY = uint2((uint)(lx / scale), (uint)(ly / scale));
+                srcXY = min(srcXY, uint2(procW - 1, procH - 1));
+                FinalTex[id.xy] = ProcessedTex.Load(int3(srcXY, 0));
+            }
+            else
+            {
+                FinalTex[id.xy] = float4(0, 0, 0, 1);
+            }
         }
     }
     else

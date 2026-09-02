@@ -66,10 +66,10 @@ namespace VerticalPlayer.Media
             Width = 0,
             Height = 0
         };
-        private readonly DispatcherTimer _clockTimer = new(DispatcherPriority.Send)
-        {
-            Interval = TimeSpan.FromMilliseconds(50)
-        };
+        //private readonly DispatcherTimer _clockTimer = new(DispatcherPriority.Send)
+        //{
+        //    Interval = TimeSpan.FromMilliseconds(50)
+        //};
 
         private readonly AVEngine _engine;
         private readonly GpuFramePresenter _gpuPresenter = new();
@@ -287,15 +287,22 @@ namespace VerticalPlayer.Media
             _audio.MediaEnded += (s, e) => RaiseEvent(new RoutedEventArgs(MediaEndedEvent, this));
             _audio.MediaFailed += (s, e) => RaiseEvent(new FfmpegMediaFailedEventArgs(MediaFailedEvent, this, e.ErrorException));
 
-            _clockTimer.Tick += (s, e) =>
-            {
-                _engine.SetExternalClock(_audio.Position.TotalSeconds, _isPlaying);
-            };
-            _clockTimer.Start();
+            CompositionTarget.Rendering += OnRendering;
 
             // クライアント領域サイズが変わるたびに再フィット計算（黒帯なしレイアウトの追従）
             this.SizeChanged += (s, e) => RecomputeLayout();
             this.Loaded += (s, e) => RecomputeLayout();
+            this.Unloaded += (s, e) => CompositionTarget.Rendering -= OnRendering;
+        }
+
+        private void OnRendering(object? sender, EventArgs e)
+        {
+            if (!_isPlaying) return;
+            try
+            {
+                _engine.SetExternalClock(_audio.Position.TotalSeconds, _isPlaying);
+            }
+            catch { }
         }
 
         private void OnEngineOpened(int w, int h, TimeSpan duration)

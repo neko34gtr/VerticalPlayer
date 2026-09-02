@@ -61,6 +61,7 @@ namespace VerticalPlayer
         public bool Denoise { get; set; }
         public bool DynamicContrast { get; set; }
         public int CompareViewMode { get; set; }
+        public float SuperResolutionScale { get; set; } = 1f;
 
         // ── プリセット（複数） ──
         public List<PresetSettings> Presets { get; set; } = new();
@@ -216,6 +217,13 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         public MainWindow()
         {
+            try
+            {
+                // アプリ起動時にログファイルを初期化（空にする）
+                File.WriteAllText(TracePath, string.Empty, new UTF8Encoding(false));
+            }
+            catch { }
+
             Trace("=== MainWindow() start ===");
             InitializeComponent();
             Trace("InitializeComponent done");
@@ -316,6 +324,13 @@ namespace VerticalPlayer
             Player.DynamicContrast = s.DynamicContrast;
             CompareModeCombo.SelectedIndex = Math.Clamp(s.CompareViewMode, 0, 2);
             Player.CompareViewMode = s.CompareViewMode;
+            SuperResolutionCombo.SelectedIndex = s.SuperResolutionScale switch
+            {
+                >= 1.9f => 2,
+                >= 1.4f => 1,
+                _ => 0
+            };
+            Player.SuperResolutionScale = s.SuperResolutionScale;
 
             UpdateEffectLabels();
 
@@ -372,6 +387,9 @@ namespace VerticalPlayer
                 Denoise = DenoiseCheck.IsChecked ?? false,
                 DynamicContrast = DynamicContrastCheck.IsChecked ?? false,
                 CompareViewMode = CompareModeCombo.SelectedIndex,
+                SuperResolutionScale = (SuperResolutionCombo.SelectedItem is ComboBoxItem srItem &&
+                    float.TryParse((string)srItem.Tag, System.Globalization.CultureInfo.InvariantCulture, out float srScale))
+                    ? srScale : 1f,
 
                 // プリセット
                 Presets = new List<PresetSettings>(_presets),
