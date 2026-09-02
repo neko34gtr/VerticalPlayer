@@ -36,5 +36,10 @@
         /// 2=2枚分割（フル画像を左右に並べる）。GPU完結のCompute Shaderでのみ実装されており、
         /// WriteableBitmap経路では何もしない。</summary>
         void SetCompareMode(int mode);
+        /// <summary>PowerDVD TrueTheater風の比較表示モード。0=通常、1=1枚分割（ワイプ）、
+        /// 超解像度のスライダー値。GPU完結のCompute Shaderでのみ実装されており、
+        /// WriteableBitmap経路では何もしない。</summary>
+        void SetSharpAmount(float amount);
+        void SetColorMatrixMode(int mode);
     }
 }

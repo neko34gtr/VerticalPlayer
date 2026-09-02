@@ -687,12 +687,16 @@
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <Slider x:Name="SeekBar" Grid.Column="0" Style="{StaticResource ModernSlider}"
-                                Minimum="0" VerticalAlignment="Center"
-                                Thumb.DragStarted="SeekBar_DragStarted"
-                                Thumb.DragCompleted="SeekBar_DragCompleted"
-                                PreviewMouseLeftButtonDown="SeekBar_PreviewMouseLeftButtonDown"
-                                PreviewMouseLeftButtonUp="SeekBar_PreviewMouseLeftButtonUp"/>
+                        <Grid Grid.Column="0">
+                            <Slider x:Name="SeekBar" Style="{StaticResource ModernSlider}"
+                                    Minimum="0" VerticalAlignment="Center"
+                                    Thumb.DragStarted="SeekBar_DragStarted"
+                                    Thumb.DragCompleted="SeekBar_DragCompleted"
+                                    PreviewMouseLeftButtonDown="SeekBar_PreviewMouseLeftButtonDown"
+                                    PreviewMouseLeftButtonUp="SeekBar_PreviewMouseLeftButtonUp"/>
+                            <Canvas x:Name="ChapterTicksCanvas" Height="3" VerticalAlignment="Bottom"
+                                    Margin="6,0" IsHitTestVisible="False"/>
+                        </Grid>
                         <TextBlock x:Name="TimeDisplay" Grid.Column="1"
                                    Foreground="{StaticResource TextMuted}" Text="0:00 / 0:00"
                                    FontSize="10" FontFamily="Consolas" Margin="10,0,0,0"
@@ -999,6 +1003,9 @@
                                     <CheckBox x:Name="AlwaysOnTopCheck" Content="常に最前面"
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="AlwaysOnTop_Changed" Unchecked="AlwaysOnTop_Changed"/>
+                                    <CheckBox x:Name="AutoPlayNextCheck" Content="再生終了時に次のファイルを自動再生"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
+                                              Checked="AutoPlayNext_Changed" Unchecked="AutoPlayNext_Changed"/>
 
                                     <Border Style="{StaticResource Separator}"/>
 
@@ -1065,6 +1072,23 @@
                                                 Minimum="-1" Maximum="1" Value="0"
                                                 IsSnapToTickEnabled="True" TickFrequency="0.1"
                                                 ValueChanged="Effect_Changed" Margin="0,0,0,10"/>
+
+                                        <!-- シャープネス（超解像のアンシャープマスク強度、GPU専用） -->
+                                        <DockPanel Margin="0,0,0,4">
+                                            <TextBlock Text="シャープネス（超解像用）" Foreground="{StaticResource TextMuted}"
+                                                       FontSize="10" FontWeight="SemiBold"/>
+                                            <TextBlock x:Name="SharpnessLabel" DockPanel.Dock="Right"
+                                                       Foreground="{StaticResource AccentCyan}"
+                                                       FontSize="10" FontFamily="Consolas" Text="0.5"/>
+                                        </DockPanel>
+                                        <Slider x:Name="SharpnessSlider" Style="{StaticResource ModernSlider}"
+                                                Minimum="0" Maximum="1.5" Value="0.5"
+                                                IsSnapToTickEnabled="True" TickFrequency="0.1"
+                                                ValueChanged="Sharpness_Changed" Margin="0,0,0,10"/>
+
+                                        <CheckBox x:Name="ColorMatrixCheck" Content="BT.601→BT.709 色空間補正"
+                                                  Style="{StaticResource ModernCheck}" Margin="0,0,0,10"
+                                                  Checked="ColorMatrix_Changed" Unchecked="ColorMatrix_Changed"/>
                                     </StackPanel>
 
                                     <Button Content="エフェクトをリセット" Style="{StaticResource DangerBtn}"

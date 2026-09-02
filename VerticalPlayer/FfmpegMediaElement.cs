@@ -115,6 +115,13 @@ namespace VerticalPlayer.Media
             remove => _engine.DecodeModeChanged -= value;
         }
 
+        /// <summary>ファイルのチャプター開始秒（先頭0秒は除く）をUIスレッドで通知。</summary>
+        public event Action<System.Collections.Generic.List<double>>? ChaptersLoaded
+        {
+            add => _engine.ChaptersLoaded += value;
+            remove => _engine.ChaptersLoaded -= value;
+        }
+
         /// <summary>実際に1フレームが描画された（WritePixels済み）タイミングで、そのフレームの
         /// 再生時刻(秒)を伴って発火する。コマ送り/戻しのように「指定位置のフレームが実際に
         /// 画面に出るまで待ちたい」用途向け。固定ディレイでのポーリングより確実。</summary>
@@ -200,6 +207,11 @@ namespace VerticalPlayer.Media
                 _gpuPresenter.SetCompareMode(value);
             }
         }
+
+        private float _sharpAmount = 0.5f;
+        public float SharpAmount { get => _sharpAmount; set { _sharpAmount = value; _gpuPresenter.SetSharpAmount(value); } }
+        private int _colorMatrixMode;
+        public int ColorMatrixMode { get => _colorMatrixMode; set { _colorMatrixMode = value; _gpuPresenter.SetColorMatrixMode(value); } }
 
         // ── 表示倍率／アスペクト比（黒帯なしフィット・固定ズーム・強制比率） ──
         private VideoScaleMode _scaleMode = VideoScaleMode.Auto;

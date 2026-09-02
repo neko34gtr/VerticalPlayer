@@ -38,6 +38,7 @@ namespace VerticalPlayer
         public double WindowWidth { get; set; } = 460;
         public double WindowHeight { get; set; } = 860;
         public bool AlwaysOnTop { get; set; }
+        public bool AutoPlayNext { get; set; } = true;
 
         // ── 再生 ──
         public double Volume { get; set; } = 0.7;
@@ -62,6 +63,8 @@ namespace VerticalPlayer
         public bool DynamicContrast { get; set; }
         public int CompareViewMode { get; set; }
         public float SuperResolutionScale { get; set; } = 1f;
+        public double SharpAmount { get; set; } = 0.5;
+        public bool ColorMatrix601To709 { get; set; }
 
         // ── プリセット（複数） ──
         public List<PresetSettings> Presets { get; set; } = new();
@@ -250,8 +253,7 @@ namespace VerticalPlayer
             // キーボードショートカット
             this.KeyDown += MainWindow_KeyDown;
 
-            // 実際のデコードモード（HW/SW）表示。設定パネル内のDecodeModeTextと
-            // コントロールバーのHwStatusLabelを同じイベントで同時に更新することで連動させる。
+            // 実際のデコードモード（HW/SW）表示。設定パネル内のDecodeModeTextと            // コントロールバーのHwStatusLabelを同じイベントで同時に更新することで連動させる。
             Player.DecodeModeChanged += mode =>
             {
                 DecodeModeText.Text = $"デコード: {mode}";
@@ -265,6 +267,40 @@ namespace VerticalPlayer
                     ? "現在: ハードウェアデコード（クリックでソフトウェアへ切替）"
                     : "現在: ソフトウェアデコード（クリックでハードウェアへ切替）";
             };
+
+            // チャプター目盛り（MPC-HC風）。ファイルを開くたびに更新、シークバーの
+            // 幅が変わった時（ウィンドウリサイズ）も再配置する。
+            Player.ChaptersLoaded += chapters =>
+            {
+                _chapterSeconds = chapters;
+                RedrawChapterTicks();
+            };
+            ChapterTicksCanvas.SizeChanged += (s, e) => RedrawChapterTicks();
+        }
+
+        private List<double> _chapterSeconds = new();
+
+        private void RedrawChapterTicks()
+        {
+            ChapterTicksCanvas.Children.Clear();
+            if (_chapterSeconds.Count == 0 || !Player.NaturalDuration.HasTimeSpan) return;
+            double total = Player.NaturalDuration.TimeSpan.TotalSeconds;
+            double width = ChapterTicksCanvas.ActualWidth;
+            if (total <= 0 || width <= 0) return;
+
+            foreach (var t in _chapterSeconds)
+            {
+                double x = Math.Clamp(t / total, 0, 1) * width;
+                var tick = new System.Windows.Shapes.Rectangle
+                {
+                    Width = 2,
+                    Height = ChapterTicksCanvas.ActualHeight > 0 ? ChapterTicksCanvas.ActualHeight : 3,
+                    Fill = (Brush)FindResource("TextMuted")
+                };
+                Canvas.SetLeft(tick, x - 1);
+                Canvas.SetTop(tick, 0);
+                ChapterTicksCanvas.Children.Add(tick);
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────
@@ -307,6 +343,7 @@ namespace VerticalPlayer
             ForceVerticalMode.IsChecked = s.IsForceVertical;
             AlwaysOnTopCheck.IsChecked = s.AlwaysOnTop;
             this.Topmost = s.AlwaysOnTop;
+            AutoPlayNextCheck.IsChecked = s.AutoPlayNext;
             _currentRotation = s.Rotation;
             PlayerRotation.Angle = _currentRotation;
             Player.DisplayRotation = _currentRotation;
@@ -316,6 +353,11 @@ namespace VerticalPlayer
             ContrastSlider.Value = s.Contrast;
             SaturationSlider.Value = s.Saturation;
             GammaSlider.Value = s.Gamma;
+            SharpnessSlider.Value = s.SharpAmount;
+            if (SharpnessLabel != null) SharpnessLabel.Text = $"{s.SharpAmount:0.0}";
+            Player.SharpAmount = (float)s.SharpAmount;
+            ColorMatrixCheck.IsChecked = s.ColorMatrix601To709;
+            Player.ColorMatrixMode = s.ColorMatrix601To709 ? 1 : 0;
             PlayerScale.ScaleX = s.ZoomScaleX;
             PlayerScale.ScaleY = s.ZoomScaleY;
             DenoiseCheck.IsChecked = s.Denoise;
@@ -364,6 +406,7 @@ namespace VerticalPlayer
                 WindowWidth = this.Width,
                 WindowHeight = this.Height,
                 AlwaysOnTop = this.Topmost,
+                AutoPlayNext = AutoPlayNextCheck.IsChecked ?? true,
 
                 // 再生
                 Volume = VolumeSlider.Value,
@@ -382,6 +425,8 @@ namespace VerticalPlayer
                 Contrast = ContrastSlider.Value,
                 Saturation = SaturationSlider.Value,
                 Gamma = GammaSlider.Value,
+                SharpAmount = SharpnessSlider.Value,
+                ColorMatrix601To709 = ColorMatrixCheck.IsChecked ?? false,
                 ZoomScaleX = PlayerScale.ScaleX,
                 ZoomScaleY = PlayerScale.ScaleY,
                 Denoise = DenoiseCheck.IsChecked ?? false,
@@ -437,6 +482,8 @@ namespace VerticalPlayer
                 VideoCodecLabel.Text = "";
                 AudioCodecLabel.Text = "";
                 AudioChannelLabel.Text = "";
+                _chapterSeconds = new List<double>();
+                ChapterTicksCanvas.Children.Clear();
 
                 Player.LoadedBehavior = MediaState.Stop; // 停止状態に明示固定
                 Player.Source = null;
@@ -607,8 +654,8 @@ namespace VerticalPlayer
             }
             else
             {
-                // フォルダ内の次のファイルを再生して止めるかを判定
-                if (!PlayNextVideoInFolder())
+                // フォルダ内の次のファイルを自動再生するか（設定でOFFにできる）
+                if (!(AutoPlayNextCheck.IsChecked ?? true) || !PlayNextVideoInFolder())
                 {
                     _isPlaying = false;
                     UpdatePlayIcon();
@@ -956,6 +1003,17 @@ namespace VerticalPlayer
             Player.Gamma = GammaSlider.Value;
         }
 
+        private void Sharpness_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (SharpnessLabel != null) SharpnessLabel.Text = $"{SharpnessSlider.Value:0.0}";
+            Player.SharpAmount = (float)SharpnessSlider.Value;
+        }
+
+        private void ColorMatrix_Changed(object sender, RoutedEventArgs e)
+        {
+            Player.ColorMatrixMode = (ColorMatrixCheck.IsChecked ?? false) ? 1 : 0;
+        }
+
         // ─────────────────────────────────────────────────────────────────
         // 画面フィット（黒帯なし）・アスペクト比・デインターレース
         // ─────────────────────────────────────────────────────────────────
@@ -1128,6 +1186,8 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         private void AlwaysOnTop_Changed(object sender, RoutedEventArgs e)
             => this.Topmost = AlwaysOnTopCheck.IsChecked ?? false;
+
+        private void AutoPlayNext_Changed(object sender, RoutedEventArgs e) { /* Player_MediaEndedで都度参照するのみ */ }
 
         // ─────────────────────────────────────────────────────────────────
         // 動画情報タブ更新

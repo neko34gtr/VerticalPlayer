@@ -1,5 +1,6 @@
 ﻿using FFmpeg.AutoGen;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -29,6 +30,8 @@ namespace VerticalPlayer.Media
         public event Action<Exception>? Failed;
         /// <summary>実際に使われたデコードモードを通知（例: "HW (D3D11VA)" / "SW"）。UIスレッドで発火。</summary>
         public event Action<string>? DecodeModeChanged;
+        /// <summary>ファイルのチャプター開始秒（先頭0秒は除く）をUIスレッドで通知。</summary>
+        public event Action<List<double>>? ChaptersLoaded;
         /// <summary>1フレームが実際にWritePixelsされた直後、そのフレームの再生時刻(秒)を伴って発火。UIスレッドで発火。</summary>
         public event Action<double>? FrameDisplayed;
 
@@ -361,6 +364,14 @@ namespace VerticalPlayer.Media
                 var duration = TimeSpan.FromSeconds(durSec);
                 string modeLabel = hwActive ? "HW (D3D11VA)" : "SW";
 
+                var chapters = new List<double>();
+                for (uint ci = 0; ci < fmt->nb_chapters; ci++)
+                {
+                    var ch = fmt->chapters[ci];
+                    double startSec = ch->start * ffmpeg.av_q2d(ch->time_base);
+                    if (startSec > 0.01) chapters.Add(startSec); // 先頭0秒は目印として不要
+                }
+
                 if (myGen != _generation) return;
 
                 _ui.BeginInvoke(new Action(() =>
@@ -371,6 +382,7 @@ namespace VerticalPlayer.Media
                     VideoWidth = w; VideoHeight = h; Duration = duration;
                     Opened?.Invoke(w, h, duration);
                     DecodeModeChanged?.Invoke(modeLabel);
+                    ChaptersLoaded?.Invoke(chapters);
                 }));
 
                 Trace($"Opened(gen={myGen}): {path} {w}x{h} dur={duration} mode={modeLabel}");

@@ -75,6 +75,7 @@ namespace VerticalPlayer
         private float _lastSrScale = 1f;
         private ID3D11ComputeShader? _srHorizCs, _srVertCs, _srUnsharpCs;
         private ID3D11Buffer? _cbScale, _cbSharp;
+        private float _sharpAmount = 0.5f; // アンシャープ強度（既定値。UIから調整可能）
 
         private ID3D11Texture2D? _nativeProcessedTex; // 原寸、CSMain(効果適用)の出力先（SR有効時のみ使用）
         private ID3D11ShaderResourceView? _srvNativeProcessed;
@@ -89,6 +90,7 @@ namespace VerticalPlayer
         private ID3D11UnorderedAccessView? _srVertUav;
 
         private float _contrast, _saturation, _gamma;
+        private int _colorMatrixMode; // 0=off, 1=BT.601->BT.709
 
         // ── 比較ビュー（PowerDVD TrueTheater風の左右分割表示）──
         private int _compareMode; // 0=off, 1=single-frame wipe split, 2=dual full-frame side-by-side
@@ -110,6 +112,8 @@ cbuffer EffectsCB : register(b0)
     float Saturation;
     float Gamma;
     float DynamicContrastStrength;
+    float ColorMatrixMode; // 0=off, 1=BT.601->BT.709 correction
+    float3 _PadE;
 };
 
 Texture2D<float4> InputTex : register(t0);
@@ -133,6 +137,19 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     float factor = 1.0 + Contrast;
 
     float3 v = saturate(c.rgb);
+
+    if ((int)round(ColorMatrixMode) == 1)
+    {
+        // BT.601 -> BT.709 color space correction. Combined matrix derived analytically
+        // (RGB(assumed 601) -> YCbCr(601) -> RGB(709)); preserves grays (rows sum to 1).
+        float3x3 m601to709 = float3x3(
+            1.0864, -0.0724, -0.0140,
+            0.0966,  0.8450,  0.0584,
+           -0.0141, -0.0277,  1.0418
+        );
+        v = saturate(mul(m601to709, v));
+    }
+
     v = pow(v, 1.0 / gammaExp);
     v = (v - 0.5019608) * factor + 0.5019608;
 
@@ -501,7 +518,7 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
         {
             if (_d3d11Device == null) return;
             _effectsCs = CompileCs(_d3d11Device, EffectsShaderSource, "CSMain", "GpuEffects");
-            _cbEffects = CreateConstBuffer(_d3d11Device, 16);
+            _cbEffects = CreateConstBuffer(_d3d11Device, 32);
         }
 
         private void InitDynamicContrastShaders()
@@ -567,6 +584,12 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
             _gamma = (float)gamma;
         }
 
+        /// <summary>BT.601→BT.709の色空間補正（MPC-HC等の補正シェーダー相当）。0=無効、1=有効。</summary>
+        public void SetColorMatrixMode(int mode)
+        {
+            _colorMatrixMode = Math.Clamp(mode, 0, 1);
+        }
+
         public void SetDynamicContrast(float strength)
         {
             _dynamicContrastStrength = Math.Clamp(strength, 0f, 1f);
@@ -583,6 +606,13 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
         public void SetCompareMode(int mode)
         {
             _compareMode = Math.Clamp(mode, 0, 2);
+        }
+
+        /// <summary>超解像のアンシャープマスク強度。0で無効（ぼやけたまま）、経験則で0.5前後が目安、
+        /// 上げすぎるとエッジにハローが出る。超解像自体が無効な間は使われない。</summary>
+        public void SetSharpAmount(float amount)
+        {
+            _sharpAmount = Math.Clamp(amount, 0f, 3f);
         }
 
         public void EnsureSize(int width, int height)
@@ -873,6 +903,8 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
                 p[1] = _saturation;
                 p[2] = _gamma;
                 p[3] = (_dynamicContrastShaderReady && _avgLumaSrv != null) ? _dynamicContrastStrength : 0f;
+                p[4] = _colorMatrixMode;
+                p[5] = p[6] = p[7] = 0f;
             }
             _d3d11Context.Unmap(_cbEffects, 0);
         }
@@ -911,7 +943,7 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
             unsafe
             {
                 float* p = (float*)mapped.DataPointer;
-                p[0] = 0.5f; // アンシャープ強度（経験則。強すぎるとハローが目立つ）
+                p[0] = _sharpAmount;
                 p[1] = p[2] = p[3] = 0f;
             }
             _d3d11Context.Unmap(_cbSharp, 0);
