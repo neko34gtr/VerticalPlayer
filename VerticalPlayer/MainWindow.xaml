@@ -693,7 +693,10 @@
                                     Thumb.DragStarted="SeekBar_DragStarted"
                                     Thumb.DragCompleted="SeekBar_DragCompleted"
                                     PreviewMouseLeftButtonDown="SeekBar_PreviewMouseLeftButtonDown"
-                                    PreviewMouseLeftButtonUp="SeekBar_PreviewMouseLeftButtonUp"/>
+                                    PreviewMouseLeftButtonUp="SeekBar_PreviewMouseLeftButtonUp"
+                                    ValueChanged="SeekBar_ValueChanged"
+                                    MouseMove="SeekBar_MouseMove"
+                                    MouseLeave="SeekBar_MouseLeave"/>
                             <Canvas x:Name="ChapterTicksCanvas" Height="3" VerticalAlignment="Bottom"
                                     Margin="6,0" IsHitTestVisible="False"/>
                             <Popup x:Name="SeekPreviewPopup" Placement="Relative" PlacementTarget="{Binding ElementName=SeekBar}"
@@ -702,7 +705,7 @@
                                         BorderBrush="{StaticResource TextMuted}" BorderThickness="1">
                                     <TextBlock x:Name="SeekPreviewText" Foreground="White" FontSize="11" FontFamily="Consolas"/>
                                 </Border>
-                            </Popup>    
+                            </Popup>
                         </Grid>
                         <TextBlock x:Name="TimeDisplay" Grid.Column="1"
                                    Foreground="{StaticResource TextMuted}" Text="0:00 / 0:00"

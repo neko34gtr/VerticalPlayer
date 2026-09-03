@@ -214,6 +214,7 @@ namespace VerticalPlayer
 
         private static void Trace(string msg)
         {
+#if DEBUG
             try
             {
                 File.AppendAllText(
@@ -222,6 +223,7 @@ namespace VerticalPlayer
                     new System.Text.UTF8Encoding(false));
             }
             catch { }
+#endif
         }
     }
 }

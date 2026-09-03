@@ -76,6 +76,19 @@ namespace VerticalPlayer.Media
             set => _deinterlaceEnabled = value;
         }
 
+        // ── シークバードラッグ中の軽量プレビュー用 ──
+        private volatile bool _fastSeekPreview;
+
+        /// <summary>trueの間は、シーク直後の「目標フレームまで追いつきデコード」を行わず、
+        /// 直近のキーフレーム（AVSEEK_FLAG_BACKWARDで着地した最初の1枚）をそのまま即表示する。
+        /// シークバードラッグ中の低遅延プレビュー専用（精度より速さ優先）。
+        /// ドラッグ終了時の最終着地はfalseのまま通常の追いつきロジックで正確な1枚に合わせる。</summary>
+        public bool FastSeekPreview
+        {
+            get => _fastSeekPreview;
+            set => _fastSeekPreview = value;
+        }
+
         // ── 外部マスタークロック（FfmpegMediaElement内の非表示MediaElementのPositionを反映） ──
         private readonly Stopwatch _extClock = new();
         private double _extBaseSeconds;
@@ -485,6 +498,11 @@ namespace VerticalPlayer.Media
                                     drop = true;
                                 }
 
+                                // シークバードラッグ中の軽量プレビュー：追いつき前の最初の1枚を
+                                // dropせず、直近キーフレームの内容をそのまま即表示する（精度より速さ優先）。
+                                if (drop && _catchingUpAfterSeek && _fastSeekPreview)
+                                    drop = false;
+
                                 if (drop)
                                 {
                                     // [原因究明用ログ] シーク/再オープン直後のキャッチアップ中のみ発生（通常再生時は
@@ -777,6 +795,7 @@ namespace VerticalPlayer.Media
 
         private static void Trace(string msg)
         {
+#if DEBUG
             try
             {
                 File.AppendAllText(
@@ -785,6 +804,7 @@ namespace VerticalPlayer.Media
                     new System.Text.UTF8Encoding(false));
             }
             catch { }
+#endif
         }
     }
 }

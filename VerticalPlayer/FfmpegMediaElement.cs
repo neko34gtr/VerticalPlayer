@@ -411,6 +411,7 @@ namespace VerticalPlayer.Media
 
         private static void Trace(string msg)
         {
+#if DEBUG
             try
             {
                 System.IO.File.AppendAllText(
@@ -419,6 +420,7 @@ namespace VerticalPlayer.Media
                     new System.Text.UTF8Encoding(false));
             }
             catch { }
+#endif
         }
 
         private void OnEngineFailed(Exception ex)
@@ -478,6 +480,32 @@ namespace VerticalPlayer.Media
             }
             finally
             {
+                _engine.FrameDisplayed -= OnFrame;
+                _engine.Pause();
+            }
+        }
+
+        /// <summary>シークバードラッグ中の軽量プレビュー専用。目標フレームへの正確な追いつきは
+        /// 行わず、直近のキーフレームへ即シークしてそのまま最初の1枚を表示する
+        /// （低遅延優先、精度は犠牲）。ドラッグ終了時はStepToVideoOnlyAsyncで正確な1枚に
+        /// 合わせ直すこと。StepToVideoOnlyAsyncと同様、音声のPlay/Pauseには一切触れない。</summary>
+        public async Task FastSeekPreviewAsync(TimeSpan target, int timeoutMs = 300)
+        {
+            var tcs = new TaskCompletionSource<bool>();
+            void OnFrame(double pts) => tcs.TrySetResult(true);
+            _engine.FrameDisplayed += OnFrame;
+            try
+            {
+                _audio.Position = target; // シークバー/時刻表示の整合のためだけ
+                _engine.FastSeekPreview = true;
+                _engine.SetExternalClock(target.TotalSeconds, false);
+                _engine.Seek(target);
+                _engine.Play();
+                await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
+            }
+            finally
+            {
+                _engine.FastSeekPreview = false;
                 _engine.FrameDisplayed -= OnFrame;
                 _engine.Pause();
             }

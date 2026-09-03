@@ -176,6 +176,10 @@ namespace VerticalPlayer
 
         // ── 状態フラグ ──
         private bool _isDragging = false;
+        private bool _seekLiveBusy = false;
+        private double? _seekLivePendingSeconds = null;
+        private bool _wasPlayingBeforeSeekDrag = false;
+        private bool _dragCompleting = false;
         private bool _isMuted = false;
         private double _prevVolume = 0.7;
         private bool _isPlaying = false;
@@ -206,6 +210,7 @@ namespace VerticalPlayer
 
         private static void Trace(string msg)
         {
+#if DEBUG
             try
             {
                 File.AppendAllText(TracePath,
@@ -213,6 +218,7 @@ namespace VerticalPlayer
                     new UTF8Encoding(false));
             }
             catch { }
+#endif
         }
 
         // ─────────────────────────────────────────────────────────────────
@@ -220,12 +226,14 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         public MainWindow()
         {
+#if DEBUG
             try
             {
                 // アプリ起動時にログファイルを初期化（空にする）
                 File.WriteAllText(TracePath, string.Empty, new UTF8Encoding(false));
             }
             catch { }
+#endif
 
             Trace("=== MainWindow() start ===");
             InitializeComponent();
@@ -791,12 +799,79 @@ namespace VerticalPlayer
             sl.Value = t;
             Player.Position = TimeSpan.FromSeconds(t);
         }
-        private void SeekBar_DragStarted(object sender, DragStartedEventArgs e) => _isDragging = true;
-
-        private void SeekBar_DragCompleted(object sender, DragCompletedEventArgs e)
+        private void SeekBar_DragStarted(object sender, DragStartedEventArgs e)
         {
-            Player.Position = TimeSpan.FromSeconds(SeekBar.Value);
+            _isDragging = true;
+            // StepToVideoOnlyAsyncは「音声は一時停止済み」前提のため、ドラッグ中に
+            // 再生中のままだと音声だけ実時間で進み続け、位置の連打書き換えで
+            // 早送りパラパラ再生のようになってしまう。ここで確実に一時停止する。
+            _wasPlayingBeforeSeekDrag = _isPlaying;
+            if (_isPlaying)
+            {
+                Player.Pause();
+                _isPlaying = false;
+                UpdatePlayIcon();
+                _timer.Stop();
+            }
+        }
+
+        private async void SeekBar_DragCompleted(object sender, DragCompletedEventArgs e)
+        {
+            _dragCompleting = true;
+            // 直前のライブシーク(StepToVideoOnlyAsync)がまだ処理中の場合、その後始末の
+            // _engine.Pause()がこの後のPlay()を追い越して実行され、映像だけ再度一時停止
+            // してしまうことがあるため、完全に終わるのを待ってから本シークへ移行する。
+            while (_seekLiveBusy)
+                await Task.Delay(15);
+
+            // ここは「投げっぱなしSeek+即Play」ではなく、ドラッグ中のライブプレビューと同じ
+            // StepToVideoOnlyAsyncで実際に目標フレームへ追いついたことを確認してからPlay()する。
+            // 投げっぱなしだと音声だけ即座に新位置から再生が始まり、映像はキーフレームからの
+            // 追いつきデコード中（追いつくまで無表示）のため、GOPが大きい素材で追いつきが遅れると
+            // 音声だけ先に進んで「キーフレーム寄りに引っ張られたような着地ズレ」になっていた。
+            // ライブプレビュー用の500msでは大きいGOPで追いつき切らないことがあるため、
+            // 最終着地は精度優先でタイムアウトを長めに取る。
+            var target = TimeSpan.FromSeconds(SeekBar.Value);
+            await Player.StepToVideoOnlyAsync(target, timeoutMs: 2000);
+
             _isDragging = false;
+            _dragCompleting = false;
+            if (_wasPlayingBeforeSeekDrag)
+            {
+                Player.Play();
+                _isPlaying = true;
+                UpdatePlayIcon();
+                _timer.Start();
+            }
+        }
+
+        // ドラッグ中はThumb移動のたびに映像だけ即シーク（音声には触れない）。
+        // 前回のシークが終わっていない間に来た移動要求は最新値だけ残して間引く。
+        private async void SeekBar_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (!_isDragging || _dragCompleting || !Player.NaturalDuration.HasTimeSpan) return;
+            await RequestLiveSeekAsync(SeekBar.Value);
+        }
+
+        private async Task RequestLiveSeekAsync(double seconds)
+        {
+            _seekLivePendingSeconds = seconds;
+            if (_seekLiveBusy) return;
+            _seekLiveBusy = true;
+            try
+            {
+                while (_seekLivePendingSeconds is double target)
+                {
+                    _seekLivePendingSeconds = null;
+                    // ドラッグ中は精度より速さ優先の軽量プレビュー（直近キーフレームを即表示）。
+                    // 正確な1枚への合わせ込みはDragCompleted側のStepToVideoOnlyAsyncで行う。
+                    await Player.FastSeekPreviewAsync(TimeSpan.FromSeconds(target));
+                }
+            }
+            finally
+            {
+                _seekLiveBusy = false;
+            }
         }
 
         private void SeekBar_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -963,17 +1038,20 @@ namespace VerticalPlayer
             double waWidth = SystemParameters.WorkArea.Width;
             double waHeight = SystemParameters.WorkArea.Height;
 
-            // 現在のウィンドウ幅を基準に高さを計算
-            double newH = this.Width / dispRatio;
-
-            // 【修正】計算された高さがタスクバーの限界を超える場合、縦に収まるよう幅を再計算
-            if (newH > waHeight)
+            // 利用可能な高さを基準に幅を算出し、画面幅をはみ出す場合のみ幅基準に切り替える。
+            // （旧ロジックは「現在の幅」を基準にしていたため、回転前の狭い幅がそのまま残り、
+            //   回転後に物理的な縦サイズを最大限使い切れなかった）
+            double newH = waHeight;
+            double newW = newH * dispRatio;
+            if (newW > waWidth)
             {
-                newH = waHeight;
-                this.Width = newH * dispRatio;
+                newW = waWidth;
+                newH = newW / dispRatio;
             }
 
-            if (newH < 300) { newH = 300; this.Width = newH * dispRatio; }
+            if (newH < 300) { newH = 300; newW = newH * dispRatio; }
+
+            this.Width = newW;
             this.Height = newH;
             EnsureOnScreen();
         }

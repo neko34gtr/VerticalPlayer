@@ -986,6 +986,7 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
 
         private static void Trace(string msg)
         {
+#if DEBUG
             try
             {
                 System.IO.File.AppendAllText(
@@ -994,6 +995,7 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
                     new System.Text.UTF8Encoding(false));
             }
             catch { }
+#endif
         }
 
         public void Dispose()
