@@ -63,7 +63,8 @@
                                 Minimum="0" Maximum="100"
                                 PreviewMouseLeftButtonDown="Seek_MouseDown"
                                 Thumb.DragStarted="Seek_DragStarted"
-                                Thumb.DragCompleted="Seek_DragCompleted">
+                                Thumb.DragCompleted="Seek_DragCompleted"
+                                ValueChanged="SeekBar_ValueChanged">
                             <Slider.Template>
                                 <ControlTemplate TargetType="Slider">
                                     <Track x:Name="PART_Track">

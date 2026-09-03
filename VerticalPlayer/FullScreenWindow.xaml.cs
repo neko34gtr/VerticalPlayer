@@ -18,6 +18,10 @@ namespace VerticalPlayer
         private bool _isMuted = false;
         private double _prevVol = 0.7;
         private bool _isDragging = false;
+        private bool _seekLiveBusy = false;
+        private double? _seekLivePendingSeconds = null;
+        private bool _wasPlayingBeforeSeekDrag = false;
+        private bool _dragCompleting = false;
         private double _frameMs = 100;
 
         private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(100) };
@@ -85,9 +89,59 @@ namespace VerticalPlayer
             => ts.TotalHours >= 1 ? ts.ToString(@"h\:mm\:ss") : ts.ToString(@"m\:ss");
 
         // ── シーク ──
-        private void Seek_DragStarted(object sender, DragStartedEventArgs e) => _isDragging = true;
-        private void Seek_DragCompleted(object sender, DragCompletedEventArgs e)
-        { Player.Position = TimeSpan.FromSeconds(SeekBar.Value); _isDragging = false; }
+        private void Seek_DragStarted(object sender, DragStartedEventArgs e)
+        {
+            _isDragging = true;
+            _wasPlayingBeforeSeekDrag = _isPlaying;
+            if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdateIcon(); _timer.Stop(); }
+        }
+
+        private async void Seek_DragCompleted(object sender, DragCompletedEventArgs e)
+        {
+            _dragCompleting = true;
+            while (_seekLiveBusy)
+                await Task.Delay(15);
+
+            var target = TimeSpan.FromSeconds(SeekBar.Value);
+            await Player.StepToVideoOnlyAsync(target, timeoutMs: 2000);
+
+            _isDragging = false;
+            _dragCompleting = false;
+            if (_wasPlayingBeforeSeekDrag)
+            {
+                Player.Play();
+                _isPlaying = true;
+                UpdateIcon();
+                _timer.Start();
+            }
+        }
+
+        // ドラッグ中はThumb移動のたびに軽量プレビュー（直近キーフレーム即表示、音声には触れない）。
+        // 前回のプレビューが終わっていない間に来た移動要求は最新値だけ残して間引く。
+        private async void SeekBar_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (!_isDragging || _dragCompleting || !Player.NaturalDuration.HasTimeSpan) return;
+            await RequestLiveSeekAsync(SeekBar.Value);
+        }
+
+        private async Task RequestLiveSeekAsync(double seconds)
+        {
+            _seekLivePendingSeconds = seconds;
+            if (_seekLiveBusy) return;
+            _seekLiveBusy = true;
+            try
+            {
+                while (_seekLivePendingSeconds is double target)
+                {
+                    _seekLivePendingSeconds = null;
+                    await Player.FastSeekPreviewAsync(TimeSpan.FromSeconds(target));
+                }
+            }
+            finally
+            {
+                _seekLiveBusy = false;
+            }
+        }
 
         private void Seek_MouseDown(object sender, MouseButtonEventArgs e)
         {
