@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using OrtFloat16 = Microsoft.ML.OnnxRuntime.Float16;
 
 namespace VerticalPlayer.Media
 {
@@ -164,11 +165,17 @@ namespace VerticalPlayer.Media
             if (_session == null || _inputName == null || _outputName == null) return false;
             if (width != _builtWidth || height != _builtHeight) return false;
 
+            // NOTE: Microsoft.ML.OnnxRuntime.Float16 のキャスト演算子(float⇔Float16)は
+            // バージョンによって無い場合がある。ビルドエラーになる場合は
+            // OrtFloat16.ToFloat16(x) / value.ToFloat() 等の静的/インスタンスメソッドに
+            // 置き換えること（参照しているOnnxRuntime.Gpuのバージョンで要確認）。
             try
             {
                 // BGRA(byte, 0-255) → RGB正規化float16(0-1) NCHW
                 // モデル仕様: input=[1,3,H,W] float16 0-1正規化NCHW
-                var inputTensor = new DenseTensor<Half>(new[] { 1, 3, height, width });
+                // NOTE: System.Half は OrtValue.CreateFromTensorObject 内部の型マッピングで
+                // 未対応（NullReferenceException）だったため、ONNX Runtime自前のFloat16構造体を使う
+                var inputTensor = new DenseTensor<OrtFloat16>(new[] { 1, 3, height, width });
                 for (int y = 0; y < height; y++)
                 {
                     int rowBase = y * width * 4;
@@ -178,20 +185,20 @@ namespace VerticalPlayer.Media
                         byte b = srcBgra[i];
                         byte g = srcBgra[i + 1];
                         byte r = srcBgra[i + 2];
-                        inputTensor[0, 0, y, x] = (Half)(r / 255f);
-                        inputTensor[0, 1, y, x] = (Half)(g / 255f);
-                        inputTensor[0, 2, y, x] = (Half)(b / 255f);
+                        inputTensor[0, 0, y, x] = (OrtFloat16)(r / 255f);
+                        inputTensor[0, 1, y, x] = (OrtFloat16)(g / 255f);
+                        inputTensor[0, 2, y, x] = (OrtFloat16)(b / 255f);
                     }
                 }
 
                 var inputs = new List<NamedOnnxValue>
                 {
-                    NamedOnnxValue.CreateFromTensor<Half>(_inputName, inputTensor)
+                    NamedOnnxValue.CreateFromTensor<OrtFloat16>(_inputName, inputTensor)
                 };
 
                 using var results = _session.Run(inputs, new[] { _outputName });
                 // モデル仕様: output=[1,3,H*4,W*4] float16 0-1正規化NCHW
-                var outTensor = results[0].AsTensor<Half>();
+                var outTensor = results[0].AsTensor<OrtFloat16>();
                 int outH = outTensor.Dimensions[2];
                 int outW = outTensor.Dimensions[3];
 
