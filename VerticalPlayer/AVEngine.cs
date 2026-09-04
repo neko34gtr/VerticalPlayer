@@ -66,6 +66,39 @@ namespace VerticalPlayer.Media
         /// <summary>超解像（段階5）の拡大倍率。1.0以下で無効。GPU側のみで完結する機能。</summary>
         public void SetSuperResolution(float scale) => GpuPresenter?.SetSuperResolution(scale);
 
+        // ── DNN超解像（段階6、TensorRT） ──
+        private DnnSuperResolutionEngine? _dnnSr;
+        private volatile bool _dnnSrEnabled;
+
+        private static readonly string DnnModelPath = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory, "models", "4x-UltraSharpV2_Lite_fp16_op17.onnx");
+        private const string DnnTrtCacheDir = @"X:\Temp\VerticalPlayer\trtcache";
+        private static readonly string DnnTrtCacheBackupDir = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory, "trtcache_backup");
+
+        /// <summary>DNN超解像(TensorRT)の有効/無効。trueの間はGPU側のLanczos超解像
+        /// (SetSuperResolution)を無効化し、代わりにデコードスレッド内でCPU経由の
+        /// DNN推論によるアップスケールを行う。GpuPresenterが未設定（WriteableBitmap
+        /// フォールバック時）は効果なし。</summary>
+        public void SetDnnSuperResolution(bool enabled)
+        {
+            _dnnSrEnabled = enabled;
+            if (enabled)
+            {
+                // trtcacheはRAMディスク等の揮発ストレージ運用のため、無ければ
+                // exe直下の永続バックアップから復元してからエンジンを読む
+                DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, DnnTrtCacheBackupDir);
+                _dnnSr ??= new DnnSuperResolutionEngine(DnnModelPath, DnnTrtCacheDir);
+                // DNN側で拡大するため、GPU側のLanczos超解像は二重適用を避けるため無効化する
+                GpuPresenter?.SetSuperResolution(1f);
+            }
+        }
+
+        /// <summary>trtcache（RAMディスク等の揮発ストレージ）が使われていれば、
+        /// exe直下の永続バックアップへ丸ごとコピーする。アプリ終了時に呼ぶこと。</summary>
+        public void BackupDnnTrtCacheIfUsed() =>
+            DnnSuperResolutionEngine.BackupCache(DnnTrtCacheDir, DnnTrtCacheBackupDir);
+
         /// <summary>比較ビュー（段階5拡張）のモード。GPU側のみで完結する機能。</summary>
         public void SetCompareMode(int mode) => GpuPresenter?.SetCompareMode(mode);
 
@@ -578,14 +611,33 @@ namespace VerticalPlayer.Media
                                 var localBuf = managedBuf;
                                 int frameGen = myGen;
                                 int frameW = w, frameH = h;
+                                int frameStride = stride;
                                 double shownPts = ptsSeconds;
+
+                                // DNN超解像（段階6）：デコードスレッド上でCPU経由の推論を行う。
+                                // 失敗時（未初期化・解像度不一致・推論例外）はその1フレームだけ
+                                // 等倍のまま表示継続（次フレームで再試行される）。
+                                if (_dnnSrEnabled && GpuPresenter != null && _dnnSr != null)
+                                {
+                                    if (_dnnSr.EnsureEngine(w, h) &&
+                                        _dnnSr.TryInfer(managedBuf, w, h, out var upBuf, out var upW, out var upH))
+                                    {
+                                        localBuf = upBuf;
+                                        frameW = upW;
+                                        frameH = upH;
+                                        frameStride = upW * 4;
+                                    }
+                                }
+
                                 _ui.BeginInvoke(DispatcherPriority.Render, new Action(() =>
                                 {
                                     if (frameGen != _generation) return;
                                     try
                                     {
-                                        Bitmap?.WritePixels(new Int32Rect(0, 0, frameW, frameH), localBuf, stride, 0);
-                                        GpuPresenter?.Present(localBuf, frameW, frameH, stride);
+                                        // WriteableBitmapフォールバック側は常に等倍（DNNの影響を受けない）
+                                        Bitmap?.WritePixels(new Int32Rect(0, 0, w, h), managedBuf, stride, 0);
+                                        GpuPresenter?.EnsureSize(frameW, frameH);
+                                        GpuPresenter?.Present(localBuf, frameW, frameH, frameStride);
                                         FrameDisplayed?.Invoke(shownPts);
                                     }
                                     catch (Exception ex)

@@ -980,13 +980,14 @@
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="DynamicContrast_Changed" Unchecked="DynamicContrast_Changed"/>
 
-                                    <TextBlock Text="超解像（Lanczos + アンシャープ・GPU）" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="超解像（Lanczos＋アンシャープ / DNN・GPU）" Foreground="{StaticResource TextMuted}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
                                     <ComboBox x:Name="SuperResolutionCombo" Margin="0,0,0,6"
                                               SelectionChanged="SuperResolution_Changed" SelectedIndex="0">
                                         <ComboBoxItem Content="なし" Tag="1.0"/>
                                         <ComboBoxItem Content="1.5倍" Tag="1.5"/>
                                         <ComboBoxItem Content="2.0倍" Tag="2.0"/>
+                                        <ComboBoxItem Content="4.0倍（DNN/TensorRT）" Tag="dnn"/>
                                     </ComboBox>
 
                                     <TextBlock Text="比較ビュー（TrueTheater風）" Foreground="{StaticResource TextMuted}"

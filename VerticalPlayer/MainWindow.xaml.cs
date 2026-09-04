@@ -63,6 +63,7 @@ namespace VerticalPlayer
         public bool DynamicContrast { get; set; }
         public int CompareViewMode { get; set; }
         public float SuperResolutionScale { get; set; } = 1f;
+        public bool DnnSuperResolution { get; set; }
         public double SharpAmount { get; set; } = 0.5;
         public bool ColorMatrix601To709 { get; set; }
 
@@ -374,12 +375,15 @@ namespace VerticalPlayer
             Player.DynamicContrast = s.DynamicContrast;
             CompareModeCombo.SelectedIndex = Math.Clamp(s.CompareViewMode, 0, 2);
             Player.CompareViewMode = s.CompareViewMode;
-            SuperResolutionCombo.SelectedIndex = s.SuperResolutionScale switch
-            {
-                >= 1.9f => 2,
-                >= 1.4f => 1,
-                _ => 0
-            };
+            SuperResolutionCombo.SelectedIndex = s.DnnSuperResolution
+                ? 3
+                : s.SuperResolutionScale switch
+                {
+                    >= 1.9f => 2,
+                    >= 1.4f => 1,
+                    _ => 0
+                };
+            Player.DnnSuperResolutionEnabled = s.DnnSuperResolution;
             Player.SuperResolutionScale = s.SuperResolutionScale;
 
             UpdateEffectLabels();
@@ -401,6 +405,8 @@ namespace VerticalPlayer
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
             _mediaInfo?.Dispose();
+            // RAMディスク運用のtrtcacheを、使われていれば永続バックアップへコピー
+            Player.BackupDnnTrtCache();
             // 現在の再生位置を保存
             double lastPos = 0;
             if (Player.NaturalDuration.HasTimeSpan)
@@ -443,6 +449,8 @@ namespace VerticalPlayer
                 SuperResolutionScale = (SuperResolutionCombo.SelectedItem is ComboBoxItem srItem &&
                     float.TryParse((string)srItem.Tag, System.Globalization.CultureInfo.InvariantCulture, out float srScale))
                     ? srScale : 1f,
+                DnnSuperResolution = SuperResolutionCombo.SelectedItem is ComboBoxItem srDnnItem &&
+                    (string)srDnnItem.Tag == "dnn",
 
                 // プリセット
                 Presets = new List<PresetSettings>(_presets),
@@ -1170,9 +1178,15 @@ namespace VerticalPlayer
         private void SuperResolution_Changed(object sender, SelectionChangedEventArgs e)
         {
             // こちらもGPU完結の後段処理のため再オープン不要（ライブ切替）。
-            if (SuperResolutionCombo.SelectedItem is ComboBoxItem item &&
-                float.TryParse((string)item.Tag, System.Globalization.CultureInfo.InvariantCulture, out float scale))
+            if (SuperResolutionCombo.SelectedItem is not ComboBoxItem item) return;
+            string tag = (string)item.Tag;
+            if (tag == "dnn")
             {
+                Player.DnnSuperResolutionEnabled = true;
+            }
+            else if (float.TryParse(tag, System.Globalization.CultureInfo.InvariantCulture, out float scale))
+            {
+                Player.DnnSuperResolutionEnabled = false;
                 Player.SuperResolutionScale = scale;
             }
         }

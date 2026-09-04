@@ -195,6 +195,21 @@ namespace VerticalPlayer.Media
             }
         }
 
+        private bool _dnnSuperResolutionEnabled;
+        /// <summary>超解像モードをDNN(TensorRT、段階6)へ切り替える。trueの間はSuperResolutionScale
+        /// (Lanczos版)は無効化され、AVEngine内部でCPU経由のDNN推論によるアップスケールが行われる。
+        /// GPU描画パス(UseGpuPresenter)が有効な時のみ実際に効果がある。SuperResolutionScaleとは
+        /// 排他（呼び出し側のUIで同時に有効にしないこと）。</summary>
+        public bool DnnSuperResolutionEnabled
+        {
+            get => _dnnSuperResolutionEnabled;
+            set
+            {
+                _dnnSuperResolutionEnabled = value;
+                _engine.SetDnnSuperResolution(value);
+            }
+        }
+
         private int _compareViewMode; // 0=通常、1=1枚分割（ワイプ）、2=2枚分割（フル画像を左右に並べる）
         /// <summary>PowerDVD TrueTheater風の比較表示モード。GPU描画パス(UseGpuPresenter)が
         /// 有効な時のみ実際に効果がある。</summary>
@@ -326,6 +341,10 @@ namespace VerticalPlayer.Media
             bool useGpu = UseGpuPresenter && _gpuPresenter.IsAvailable;
             _engine.GpuPresenter = useGpu ? _gpuPresenter : null;
             _image.Source = useGpu ? (ImageSource)_gpuPresenter.D3DImage : _engine.Bitmap;
+            // ファイル切替時、DNN超解像が有効なままならGPU側Lanczosの無効化を再適用
+            // （_engine.GpuPresenterはファイルを開くたびに新しく割り当てられるため）
+            if (useGpu && _dnnSuperResolutionEnabled)
+                _gpuPresenter.SetSuperResolution(1f);
 
             // デコード準備が実際に整ったこの時点でクロックを再アンカーする。
             // Source設定直後にPosition/Playが呼ばれた場合、デコード開始が間に合わず
@@ -427,6 +446,10 @@ namespace VerticalPlayer.Media
         {
             RaiseEvent(new FfmpegMediaFailedEventArgs(MediaFailedEvent, this, ex));
         }
+
+        /// <summary>DNN超解像のtrtcache（RAMディスク運用）が使われていれば、exe直下の
+        /// 永続バックアップへコピーする。アプリ終了時に呼ぶこと。</summary>
+        public void BackupDnnTrtCache() => _engine.BackupDnnTrtCacheIfUsed();
 
         public void Play()
         {
