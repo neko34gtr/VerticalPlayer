@@ -638,6 +638,7 @@ namespace VerticalPlayer.Media
                                 int frameW = w, frameH = h;
                                 int frameStride = stride;
                                 double shownPts = ptsSeconds;
+                                ushort[]? dnnHalf = null; // 非null時はGpuPresenter.PresentDnnHalfへ直接渡す（段階6-3-2）
 
                                 // DNN超解像（段階6）：EnsureEngine（初回はTensorRTエンジンの
                                 // 実ビルドが走り数十秒かかることがある）を絶対にデコードスレッド上で
@@ -647,12 +648,13 @@ namespace VerticalPlayer.Media
                                 {
                                     if (_dnnSr.IsReadyFor(w, h))
                                     {
-                                        if (_dnnSr.TryInfer(managedBuf, w, h, out var upBuf, out var upW, out var upH))
+                                        // 出力側はCPUで変換せず、生のfloat16平面バッファのまま
+                                        // GpuPresenter側のCompute Shaderへ渡す（段階6-3-2）。
+                                        if (_dnnSr.TryInferToNchwHalf(managedBuf, w, h, out var half, out var upW, out var upH))
                                         {
-                                            localBuf = upBuf;
+                                            dnnHalf = half;
                                             frameW = upW;
                                             frameH = upH;
-                                            frameStride = upW * 4;
                                         }
                                     }
                                     else if (_dnnBuildTask == null ||
@@ -686,7 +688,10 @@ namespace VerticalPlayer.Media
                                         // WriteableBitmapフォールバック側は常に等倍（DNNの影響を受けない）
                                         Bitmap?.WritePixels(new Int32Rect(0, 0, w, h), managedBuf, stride, 0);
                                         GpuPresenter?.EnsureSize(frameW, frameH);
-                                        GpuPresenter?.Present(localBuf, frameW, frameH, frameStride);
+                                        if (dnnHalf != null)
+                                            GpuPresenter?.PresentDnnHalf(dnnHalf, frameW, frameH);
+                                        else
+                                            GpuPresenter?.Present(localBuf, frameW, frameH, frameStride);
                                         FrameDisplayed?.Invoke(shownPts);
                                     }
                                     catch (Exception ex)

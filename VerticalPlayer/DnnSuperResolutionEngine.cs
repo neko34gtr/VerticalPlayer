@@ -63,92 +63,100 @@ namespace VerticalPlayer.Media
         /// </summary>
         /// <returns>利用可能ならtrue。false時は_lastInitFailed=trueとなり、
         /// 呼び出し側はClassic版へフォールバックすること。</returns>
+        private readonly object _buildLock = new();
+
         public bool EnsureEngine(int width, int height)
         {
-            if (_session != null && _builtWidth == width && _builtHeight == height)
-                return true;
-
-            // 解像度が変わった場合は古いセッションを破棄してから作り直す
-            DisposeSession();
-
-            try
+            // 呼び出し元が複数（デコードスレッドのバックグラウンドビルドと、UIスレッドからの
+            // 明示的なPrebuild呼び出し）あるため、同時実行で片方の失敗処理(DisposeSession)が
+            // もう片方が正常に構築したセッションを巻き添えで破棄してしまわないようロックする。
+            lock (_buildLock)
             {
-                if (!File.Exists(_modelPath))
+                if (_session != null && _builtWidth == width && _builtHeight == height)
+                    return true;
+
+                // 解像度が変わった場合は古いセッションを破棄してから作り直す
+                DisposeSession();
+
+                try
                 {
-                    Trace($"モデルファイルが見つかりません: {_modelPath}");
+                    if (!File.Exists(_modelPath))
+                    {
+                        Trace($"モデルファイルが見つかりません: {_modelPath}");
+                        _lastInitFailed = true;
+                        return false;
+                    }
+
+                    Directory.CreateDirectory(_cacheDir);
+
+                    var so = new SessionOptions();
+                    so.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
+
+                    // TensorRT EP: 解像度固定（min=opt=max）でエンジンをビルドし、_cacheDirへキャッシュ。
+                    // 2回目以降の同一解像度はキャッシュから高速ロードされる。
+                    // NOTE: プロバイダオプションのキー名・APIはOnnxRuntime.Gpuのバージョンに依存するため、
+                    // 実際に参照するバージョンのドキュメント/サンプルと突き合わせて確認すること
+                    // （ここではv1.20系のC# APIを想定して記述）。
+                    try
+                    {
+                        var trtOptions = new OrtTensorRTProviderOptions();
+                        string shapeSpec = $"1x3x{height}x{width}";
+                        var trtDict = new Dictionary<string, string>
+                        {
+                            ["device_id"] = "0",
+                            ["trt_fp16_enable"] = "1",
+                            ["trt_engine_cache_enable"] = "1",
+                            ["trt_engine_cache_path"] = _cacheDir,
+                            ["trt_timing_cache_enable"] = "1",
+                            // min=opt=max固定にすることで解像度ごとの専用エンジンとしてビルドさせる
+                            ["trt_profile_min_shapes"] = $"input:{shapeSpec}",
+                            ["trt_profile_opt_shapes"] = $"input:{shapeSpec}",
+                            ["trt_profile_max_shapes"] = $"input:{shapeSpec}",
+                        };
+                        trtOptions.UpdateOptions(trtDict);
+                        so.AppendExecutionProvider_Tensorrt(trtOptions);
+                        Trace($"TensorRT EP追加: {width}x{height}, cache={_cacheDir}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Trace($"TensorRT EP追加失敗、CUDA EPへフォールバック: {ex.Message}");
+                    }
+
+                    // TensorRTが使えない/失敗環境向けにCUDA EPも積んでおく（ORTはセッション内で
+                    // EPを優先順に試すため、TensorRT非対応でもCUDAで動作継続できる）
+                    try
+                    {
+                        so.AppendExecutionProvider_CUDA(0);
+                    }
+                    catch (Exception ex)
+                    {
+                        Trace($"CUDA EP追加失敗（CPU実行にフォールバックされます）: {ex.Message}");
+                    }
+
+                    _session = new InferenceSession(_modelPath, so);
+
+                    // 入出力テンサー名はモデルに依存するためハードコードせず動的に取得
+                    var inputEnum = new List<string>(_session.InputMetadata.Keys);
+                    var outputEnum = new List<string>(_session.OutputMetadata.Keys);
+                    if (inputEnum.Count == 0 || outputEnum.Count == 0)
+                        throw new InvalidOperationException("モデルの入出力メタデータを取得できません");
+
+                    _inputName = inputEnum[0];
+                    _outputName = outputEnum[0];
+                    _builtWidth = width;
+                    _builtHeight = height;
+                    _lastInitFailed = false;
+
+                    Trace($"DNN超解像エンジン初期化完了: {width}x{height} input={_inputName} output={_outputName}");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Trace($"DNN超解像エンジン初期化失敗: {ex}");
+                    DisposeSession();
                     _lastInitFailed = true;
                     return false;
                 }
-
-                Directory.CreateDirectory(_cacheDir);
-
-                var so = new SessionOptions();
-                so.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
-
-                // TensorRT EP: 解像度固定（min=opt=max）でエンジンをビルドし、_cacheDirへキャッシュ。
-                // 2回目以降の同一解像度はキャッシュから高速ロードされる。
-                // NOTE: プロバイダオプションのキー名・APIはOnnxRuntime.Gpuのバージョンに依存するため、
-                // 実際に参照するバージョンのドキュメント/サンプルと突き合わせて確認すること
-                // （ここではv1.20系のC# APIを想定して記述）。
-                try
-                {
-                    var trtOptions = new OrtTensorRTProviderOptions();
-                    string shapeSpec = $"1x3x{height}x{width}";
-                    var trtDict = new Dictionary<string, string>
-                    {
-                        ["device_id"] = "0",
-                        ["trt_fp16_enable"] = "1",
-                        ["trt_engine_cache_enable"] = "1",
-                        ["trt_engine_cache_path"] = _cacheDir,
-                        ["trt_timing_cache_enable"] = "1",
-                        // min=opt=max固定にすることで解像度ごとの専用エンジンとしてビルドさせる
-                        ["trt_profile_min_shapes"] = $"input:{shapeSpec}",
-                        ["trt_profile_opt_shapes"] = $"input:{shapeSpec}",
-                        ["trt_profile_max_shapes"] = $"input:{shapeSpec}",
-                    };
-                    trtOptions.UpdateOptions(trtDict);
-                    so.AppendExecutionProvider_Tensorrt(trtOptions);
-                    Trace($"TensorRT EP追加: {width}x{height}, cache={_cacheDir}");
-                }
-                catch (Exception ex)
-                {
-                    Trace($"TensorRT EP追加失敗、CUDA EPへフォールバック: {ex.Message}");
-                }
-
-                // TensorRTが使えない/失敗環境向けにCUDA EPも積んでおく（ORTはセッション内で
-                // EPを優先順に試すため、TensorRT非対応でもCUDAで動作継続できる）
-                try
-                {
-                    so.AppendExecutionProvider_CUDA(0);
-                }
-                catch (Exception ex)
-                {
-                    Trace($"CUDA EP追加失敗（CPU実行にフォールバックされます）: {ex.Message}");
-                }
-
-                _session = new InferenceSession(_modelPath, so);
-
-                // 入出力テンサー名はモデルに依存するためハードコードせず動的に取得
-                var inputEnum = new List<string>(_session.InputMetadata.Keys);
-                var outputEnum = new List<string>(_session.OutputMetadata.Keys);
-                if (inputEnum.Count == 0 || outputEnum.Count == 0)
-                    throw new InvalidOperationException("モデルの入出力メタデータを取得できません");
-
-                _inputName = inputEnum[0];
-                _outputName = outputEnum[0];
-                _builtWidth = width;
-                _builtHeight = height;
-                _lastInitFailed = false;
-
-                Trace($"DNN超解像エンジン初期化完了: {width}x{height} input={_inputName} output={_outputName}");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Trace($"DNN超解像エンジン初期化失敗: {ex}");
-                DisposeSession();
-                _lastInitFailed = true;
-                return false;
             }
         }
 
@@ -234,6 +242,80 @@ namespace VerticalPlayer.Media
                 else
                 {
                     Trace($"DNN超解像 推論失敗: {ex.GetType().Name}: {ex.Message}");
+                }
+                return false;
+            }
+        }
+
+        /// <summary>段階6-3-2：出力側のCPU変換ループを行わず、ONNX Runtimeの出力テンソルの
+        /// 生バッファ（float16ビットパターンのushort、NCHW平面レイアウト）をそのまま返す。
+        /// GPU側（GpuFramePresenter.PresentDnnHalf）でCompute ShaderによりBGRAへ変換することを
+        /// 前提とする。入力側の変換（BGRA→NCHW half）は従来通りCPUで行う。</summary>
+        public bool TryInferToNchwHalf(byte[] srcBgra, int width, int height, out ushort[] dstNchwHalf, out int outWidth, out int outHeight)
+        {
+            dstNchwHalf = Array.Empty<ushort>();
+            outWidth = 0;
+            outHeight = 0;
+
+            if (_session == null || _inputName == null || _outputName == null) return false;
+            if (width != _builtWidth || height != _builtHeight) return false;
+
+            try
+            {
+                var inputTensor = new DenseTensor<OrtFloat16>(new[] { 1, 3, height, width });
+                for (int y = 0; y < height; y++)
+                {
+                    int rowBase = y * width * 4;
+                    for (int x = 0; x < width; x++)
+                    {
+                        int i = rowBase + x * 4;
+                        byte b = srcBgra[i];
+                        byte g = srcBgra[i + 1];
+                        byte r = srcBgra[i + 2];
+                        inputTensor[0, 0, y, x] = (OrtFloat16)(r / 255f);
+                        inputTensor[0, 1, y, x] = (OrtFloat16)(g / 255f);
+                        inputTensor[0, 2, y, x] = (OrtFloat16)(b / 255f);
+                    }
+                }
+
+                var inputs = new List<NamedOnnxValue>
+                {
+                    NamedOnnxValue.CreateFromTensor<OrtFloat16>(_inputName, inputTensor)
+                };
+
+                using var results = _session.Run(inputs, new[] { _outputName });
+                var outTensor = results[0].AsTensor<OrtFloat16>();
+                int outH = outTensor.Dimensions[2];
+                int outW = outTensor.Dimensions[3];
+
+                // NOTE: OrtFloat16は内部的にushort1個分のビットパターンのみを保持する前提
+                // （ONNX Runtimeの一般的な実装）。DenseTensorでない場合や将来のバージョンで
+                // レイアウトが変わった場合はここで例外になり、catch節でfalseを返すだけなので
+                // 安全側に倒れる（呼び出し側は失敗時、その1フレームだけ等倍表示継続する）。
+                if (outTensor is DenseTensor<OrtFloat16> dense)
+                {
+                    var span = System.Runtime.InteropServices.MemoryMarshal.Cast<OrtFloat16, ushort>(dense.Buffer.Span);
+                    dstNchwHalf = span.ToArray();
+                }
+                else
+                {
+                    return false;
+                }
+
+                outWidth = outW;
+                outHeight = outH;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (!_loggedInferError)
+                {
+                    _loggedInferError = true;
+                    Trace($"DNN超解像(half出力) 推論失敗（詳細、以後この種のエラーは簡略ログ）: {ex}");
+                }
+                else
+                {
+                    Trace($"DNN超解像(half出力) 推論失敗: {ex.GetType().Name}: {ex.Message}");
                 }
                 return false;
             }

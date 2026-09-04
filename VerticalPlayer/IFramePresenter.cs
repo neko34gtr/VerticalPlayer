@@ -17,6 +17,7 @@
         /// <summary>1フレーム分のBGRAピクセルデータを表示する。AVEngineのデコードスレッドから
         /// UIスレッドへディスパッチされた後（WritePixels相当のタイミング）に呼ばれる想定。</summary>
         void Present(byte[] bgra, int width, int height, int stride);
+        void PresentDnnHalf(ushort[] nchwHalf, int width, int height);
 
         /// <summary>コントラスト/彩度/ガンマ（段階2：Compute Shader版）を設定する。
         /// 値の意味・範囲は AVEngine.SetEffects と同一（-1〜1、0=無効）。</summary>

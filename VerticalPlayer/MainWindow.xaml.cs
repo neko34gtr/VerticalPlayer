@@ -570,7 +570,7 @@ namespace VerticalPlayer
 
         private double _pendingSeek = 0;
 
-        private void Player_MediaOpened(object sender, RoutedEventArgs e)
+        private async void Player_MediaOpened(object sender, RoutedEventArgs e)
         {
             Trace($"MediaOpened: {Player.Source} {Player.NaturalVideoWidth}x{Player.NaturalVideoHeight} dur={Player.NaturalDuration}");
             ApplyLayout();
@@ -590,6 +590,15 @@ namespace VerticalPlayer
 
             // 動画情報タブ更新
             UpdateVideoInfo();
+
+            // DNNモード選択中に解像度の異なるファイルを開いた場合、「待ってから再生」設定なら
+            // ライブ切替時と同じく一時停止→ビルド待ちにする（未対応だと常にバックグラウンド版
+            // ＝等倍のまま再生継続になり、設定と挙動が食い違って見えていた）
+            if (SuperResolutionCombo.SelectedItem is ComboBoxItem srItem && (string)srItem.Tag == "dnn" &&
+                DnnWaitForBuildCheck.IsChecked == true && !Player.IsDnnReadyForCurrentResolution)
+            {
+                await EnableDnnSuperResolutionAsync();
+            }
         }
 
         // MediaInfoNative で詳細解析
@@ -1209,6 +1218,17 @@ namespace VerticalPlayer
         // （ビルド中に低解像度のまま再生し続けると「今どちらの画質か分かりにくい」ため）。
         private async Task EnableDnnSuperResolutionAsync()
         {
+            // 動画が未オープン（解像度0x0）の場合はビルドしようがないため、
+            // フラグだけ立てて実際のビルドはMediaOpened後に回す
+            // （起動時のRestoreSettingsによるコンボ初期化がSelectionChangedを誤発火させ、
+            // 0x0でビルドを試みて失敗し、その後始末が別解像度の正常なビルドを巻き添えで
+            // 破棄してしまう不具合があったため、ここで確実にガードする）。
+            if (Player.NaturalVideoWidth <= 0 || Player.NaturalVideoHeight <= 0)
+            {
+                Player.DnnSuperResolutionEnabled = true;
+                return;
+            }
+
             if (Player.IsDnnReadyForCurrentResolution)
             {
                 Player.DnnSuperResolutionEnabled = true;
