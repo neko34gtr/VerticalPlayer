@@ -451,6 +451,25 @@ namespace VerticalPlayer.Media
         /// 永続バックアップへコピーする。アプリ終了時に呼ぶこと。</summary>
         public void BackupDnnTrtCache() => _engine.BackupDnnTrtCacheIfUsed();
 
+        /// <summary>DNN超解像エンジンのバックグラウンドビルド中/完了が変化した時に発火。</summary>
+        public event Action<bool>? DnnBuildStateChanged
+        {
+            add => _engine.DnnBuildStateChanged += value;
+            remove => _engine.DnnBuildStateChanged -= value;
+        }
+
+        /// <summary>現在の動画の解像度でDNN超解像エンジンが既にビルド済み（即切替可能）か。</summary>
+        public bool IsDnnReadyForCurrentResolution => _engine.IsDnnReadyFor(NaturalVideoWidth, NaturalVideoHeight);
+
+        /// <summary>現在の動画の解像度用にDNN超解像エンジンをビルドする（未ビルドならTensorRTの
+        /// 実ビルドが走り数十秒かかることがある）。呼び出し側で一時停止→本メソッド待機→
+        /// 再生再開、のUIフローにすることを想定。</summary>
+        public Task<bool> PrebuildDnnSuperResolutionAsync()
+        {
+            int w = NaturalVideoWidth, h = NaturalVideoHeight;
+            return Task.Run(() => _engine.PrebuildDnnEngine(w, h));
+        }
+
         public void Play()
         {
             _isPlaying = true;

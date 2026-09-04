@@ -69,6 +69,12 @@ namespace VerticalPlayer.Media
         // ── DNN超解像（段階6、TensorRT） ──
         private DnnSuperResolutionEngine? _dnnSr;
         private volatile bool _dnnSrEnabled;
+        private Task? _dnnBuildTask;
+        private int _dnnBuildW, _dnnBuildH;
+
+        /// <summary>DNN超解像エンジンのバックグラウンドビルド中/完了が変化した時に発火
+        /// （UIスレッドにディスパッチ済み）。呼び出し側で進捗表示等に利用できる。</summary>
+        public event Action<bool>? DnnBuildStateChanged;
 
         private static readonly string DnnModelPath = Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory, "models", "4x-UltraSharpV2_Lite_fp16_op17.onnx");
@@ -94,10 +100,29 @@ namespace VerticalPlayer.Media
             }
         }
 
+        /// <summary>指定解像度で即座に推論可能か（ビルド済みか）。呼び出し元がライブ切替前に
+        /// 「既にキャッシュ済みだから待たずに切り替えてよいか」を判定するのに使う。</summary>
+        public bool IsDnnReadyFor(int width, int height) => _dnnSr?.IsReadyFor(width, height) ?? false;
+
+        /// <summary>指定解像度用のDNNエンジンを同期的に（呼び出し元スレッドをブロックして）
+        /// ビルドする。ライブ切替時に「一時停止→ビルド完了待ち→再生再開」のUIフローで使うことを
+        /// 想定し、呼び出し元でTask.Run等により別スレッドから呼ぶこと（デコードスレッド上や
+        /// UIスレッド上で直接呼ばないこと）。</summary>
+        public bool PrebuildDnnEngine(int width, int height)
+        {
+            DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, DnnTrtCacheBackupDir);
+            _dnnSr ??= new DnnSuperResolutionEngine(DnnModelPath, DnnTrtCacheDir);
+            GpuPresenter?.SetSuperResolution(1f);
+            return _dnnSr.EnsureEngine(width, height);
+        }
+
         /// <summary>trtcache（RAMディスク等の揮発ストレージ）が使われていれば、
         /// exe直下の永続バックアップへ丸ごとコピーする。アプリ終了時に呼ぶこと。</summary>
         public void BackupDnnTrtCacheIfUsed() =>
             DnnSuperResolutionEngine.BackupCache(DnnTrtCacheDir, DnnTrtCacheBackupDir);
+
+        private void RaiseDnnBuildState(bool building) =>
+            _ui.BeginInvoke(DispatcherPriority.Normal, new Action(() => DnnBuildStateChanged?.Invoke(building)));
 
         /// <summary>比較ビュー（段階5拡張）のモード。GPU側のみで完結する機能。</summary>
         public void SetCompareMode(int mode) => GpuPresenter?.SetCompareMode(mode);
@@ -614,19 +639,43 @@ namespace VerticalPlayer.Media
                                 int frameStride = stride;
                                 double shownPts = ptsSeconds;
 
-                                // DNN超解像（段階6）：デコードスレッド上でCPU経由の推論を行う。
-                                // 失敗時（未初期化・解像度不一致・推論例外）はその1フレームだけ
-                                // 等倍のまま表示継続（次フレームで再試行される）。
+                                // DNN超解像（段階6）：EnsureEngine（初回はTensorRTエンジンの
+                                // 実ビルドが走り数十秒かかることがある）を絶対にデコードスレッド上で
+                                // 同期実行しない。ビルドはバックグラウンドTaskへ逃がし、完了するまでの
+                                // フレームは等倍のまま表示継続する（真っ黒/デコード停止を防ぐ）。
                                 if (_dnnSrEnabled && GpuPresenter != null && _dnnSr != null)
                                 {
-                                    if (_dnnSr.EnsureEngine(w, h) &&
-                                        _dnnSr.TryInfer(managedBuf, w, h, out var upBuf, out var upW, out var upH))
+                                    if (_dnnSr.IsReadyFor(w, h))
                                     {
-                                        localBuf = upBuf;
-                                        frameW = upW;
-                                        frameH = upH;
-                                        frameStride = upW * 4;
+                                        if (_dnnSr.TryInfer(managedBuf, w, h, out var upBuf, out var upW, out var upH))
+                                        {
+                                            localBuf = upBuf;
+                                            frameW = upW;
+                                            frameH = upH;
+                                            frameStride = upW * 4;
+                                        }
                                     }
+                                    else if (_dnnBuildTask == null ||
+                                             (_dnnBuildTask.IsCompleted && (_dnnBuildW != w || _dnnBuildH != h)))
+                                    {
+                                        _dnnBuildW = w;
+                                        _dnnBuildH = h;
+                                        var dnn = _dnnSr;
+                                        int bw = w, bh = h;
+                                        Trace($"DNN超解像エンジンのバックグラウンドビルド開始: {bw}x{bh}（初回は数十秒かかることがあります）");
+                                        RaiseDnnBuildState(true);
+                                        var sw = System.Diagnostics.Stopwatch.StartNew();
+                                        _dnnBuildTask = Task.Run(() =>
+                                        {
+                                            bool ok = dnn.EnsureEngine(bw, bh);
+                                            sw.Stop();
+                                            Trace(ok
+                                                ? $"DNN超解像エンジンのビルド完了: {bw}x{bh} ({sw.ElapsedMilliseconds}ms)"
+                                                : $"DNN超解像エンジンのビルド失敗: {bw}x{bh} ({sw.ElapsedMilliseconds}ms)");
+                                            RaiseDnnBuildState(false);
+                                        });
+                                    }
+                                    // ビルド中/未完了のこのフレームは等倍のまま何もしない
                                 }
 
                                 _ui.BeginInvoke(DispatcherPriority.Render, new Action(() =>

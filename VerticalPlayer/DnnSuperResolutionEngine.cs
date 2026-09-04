@@ -33,10 +33,14 @@ namespace VerticalPlayer.Media
         private int _builtWidth;
         private int _builtHeight;
         private bool _lastInitFailed;
+        private bool _loggedInferError;
 
-        /// <summary>初期化（エンジンビルド）に成功しているか。falseの間は呼び出し側で
-        /// 従来のLanczos版へフォールバックすること。</summary>
+        /// <summary>利用可能か。falseの間は呼び出し側で従来のLanczos版へフォールバックすること。</summary>
         public bool IsAvailable => _session != null;
+
+        /// <summary>指定解像度で即座に推論可能か（ビルド済みかの軽量チェック、ブロックしない）。
+        /// デコードスレッドから毎フレーム呼んでよい。</summary>
+        public bool IsReadyFor(int width, int height) => _session != null && _builtWidth == width && _builtHeight == height;
 
         /// <summary>直近のBuildOrReuse呼び出しで初期化に失敗したか（同一解像度での
         /// 再試行ループを避けるための参照用）。</summary>
@@ -215,7 +219,15 @@ namespace VerticalPlayer.Media
             }
             catch (Exception ex)
             {
-                Trace($"DNN超解像 推論失敗: {ex.Message}");
+                if (!_loggedInferError)
+                {
+                    _loggedInferError = true;
+                    Trace($"DNN超解像 推論失敗（詳細、以後この種のエラーは簡略ログ）: {ex}");
+                }
+                else
+                {
+                    Trace($"DNN超解像 推論失敗: {ex.GetType().Name}: {ex.Message}");
+                }
                 return false;
             }
         }
@@ -228,6 +240,7 @@ namespace VerticalPlayer.Media
             _outputName = null;
             _builtWidth = 0;
             _builtHeight = 0;
+            _loggedInferError = false;
         }
 
         public void Dispose() => DisposeSession();

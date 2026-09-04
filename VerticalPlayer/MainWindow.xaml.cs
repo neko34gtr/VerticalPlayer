@@ -64,6 +64,7 @@ namespace VerticalPlayer
         public int CompareViewMode { get; set; }
         public float SuperResolutionScale { get; set; } = 1f;
         public bool DnnSuperResolution { get; set; }
+        public bool DnnWaitForBuild { get; set; } = true;
         public double SharpAmount { get; set; } = 0.5;
         public bool ColorMatrix601To709 { get; set; }
 
@@ -247,6 +248,13 @@ namespace VerticalPlayer
             Player.UseGpuPresenter = true;
             Trace($"GpuPresenter available={Player.IsGpuPresenterAvailable}（falseの場合、D3D9Ex/D3D11初期化失敗のためGPU専用機能は全て無効）");
 
+            // DNN超解像エンジンのバックグラウンドビルド中はStatusTextで見える化する
+            // （初回ビルドは数十秒かかることがあり、無表示だと固まったように見えるため）
+            Player.DnnBuildStateChanged += building =>
+            {
+                StatusText.Text = building ? "超解像エンジンをビルド中…（初回のみ、数十秒かかることがあります）" : "";
+            };
+
             // ドラッグ＆ドロップを有効化
             this.AllowDrop = true;
             this.Drop += Window_Drop;
@@ -385,6 +393,7 @@ namespace VerticalPlayer
                 };
             Player.DnnSuperResolutionEnabled = s.DnnSuperResolution;
             Player.SuperResolutionScale = s.SuperResolutionScale;
+            DnnWaitForBuildCheck.IsChecked = s.DnnWaitForBuild;
 
             UpdateEffectLabels();
 
@@ -451,6 +460,7 @@ namespace VerticalPlayer
                     ? srScale : 1f,
                 DnnSuperResolution = SuperResolutionCombo.SelectedItem is ComboBoxItem srDnnItem &&
                     (string)srDnnItem.Tag == "dnn",
+                DnnWaitForBuild = DnnWaitForBuildCheck.IsChecked ?? true,
 
                 // プリセット
                 Presets = new List<PresetSettings>(_presets),
@@ -1175,20 +1185,51 @@ namespace VerticalPlayer
             Player.DynamicContrast = DynamicContrastCheck.IsChecked ?? false;
         }
 
-        private void SuperResolution_Changed(object sender, SelectionChangedEventArgs e)
+        private async void SuperResolution_Changed(object sender, SelectionChangedEventArgs e)
         {
             // こちらもGPU完結の後段処理のため再オープン不要（ライブ切替）。
             if (SuperResolutionCombo.SelectedItem is not ComboBoxItem item) return;
             string tag = (string)item.Tag;
             if (tag == "dnn")
             {
-                Player.DnnSuperResolutionEnabled = true;
+                if (DnnWaitForBuildCheck.IsChecked == true)
+                    await EnableDnnSuperResolutionAsync();
+                else
+                    Player.DnnSuperResolutionEnabled = true; // バックグラウンドビルド（等倍表示のまま継続）
             }
             else if (float.TryParse(tag, System.Globalization.CultureInfo.InvariantCulture, out float scale))
             {
                 Player.DnnSuperResolutionEnabled = false;
                 Player.SuperResolutionScale = scale;
             }
+        }
+
+        // DNNへのライブ切替: 既にビルド済みの解像度なら待たずに即切替。未ビルドの場合は
+        // 一時停止してオーバーレイ表示（StatusText）を出し、ビルド完了を待ってから再生再開する
+        // （ビルド中に低解像度のまま再生し続けると「今どちらの画質か分かりにくい」ため）。
+        private async Task EnableDnnSuperResolutionAsync()
+        {
+            if (Player.IsDnnReadyForCurrentResolution)
+            {
+                Player.DnnSuperResolutionEnabled = true;
+                return;
+            }
+
+            bool wasPlaying = _isPlaying;
+            if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdatePlayIcon(); _timer.Stop(); }
+
+            StatusText.Text = "超解像エンジンをビルド中…（初回のみ、数十秒かかることがあります）";
+            bool ok = await Player.PrebuildDnnSuperResolutionAsync();
+            StatusText.Text = ok ? "" : "DNN超解像エンジンの初期化に失敗しました（Lanczos版のままです）";
+
+            Player.DnnSuperResolutionEnabled = ok;
+            if (!ok)
+            {
+                // 失敗時は無限に黒画面/低解像度のままにしないよう「なし」へ戻す
+                SuperResolutionCombo.SelectedIndex = 0;
+            }
+
+            if (wasPlaying) { Player.Play(); _isPlaying = true; UpdatePlayIcon(); _timer.Start(); }
         }
 
         private void CompareMode_Changed(object sender, SelectionChangedEventArgs e)
