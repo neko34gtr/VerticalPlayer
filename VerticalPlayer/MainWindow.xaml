@@ -879,6 +879,11 @@
                                        Foreground="{StaticResource TextMuted}"
                                        FontSize="9" FontWeight="Bold"
                                        VerticalAlignment="Center" Margin="5,0,0,0"/>
+                            <!-- 実測FPS（表示された実フレーム数を1秒間隔で集計） -->
+                            <TextBlock x:Name="ActualFpsLabel" Text=""
+                                       Foreground="{StaticResource TextMuted}"
+                                       FontSize="9" FontWeight="Bold"
+                                       VerticalAlignment="Center" Margin="5,0,0,0"/>
                         </StackPanel>
                         <!-- fps選択 -->
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">

@@ -103,8 +103,12 @@ namespace VerticalPlayer
 
         // ── DNN超解像（段階6-3-2）：NCHW float16平面バッファ→BGRAテクスチャ変換 ──
         private ID3D11ComputeShader? _nchw2BgraCs;
-        private ID3D11Buffer? _dnnHalfBuf;              // CPUからMap/Unmapで書き込む生half平面バッファ
+        private ID3D11Buffer? _dnnHalfBuf;              // CPUからMap/Unmapで書き込む生half平面バッファ（Dynamic）
         private ID3D11ShaderResourceView? _srvDnnHalfBuf; // R16_Floatビュー
+        private ID3D11Buffer? _dnnHalfBufCuda;          // CUDA相互運用専用（段階6-3-4、Default usage）
+        private ID3D11ShaderResourceView? _srvDnnHalfBufCuda;
+        private int _dnnCudaBufW, _dnnCudaBufH;
+        private long _dnnCudaBufElemCount;
         private ID3D11Texture2D? _dnnUploadTex;          // 変換先BGRAテクスチャ（Default、UAV+SRV）
         private ID3D11UnorderedAccessView? _uavDnnUpload;
         private ID3D11ShaderResourceView? _srvDnnUpload;
@@ -682,6 +686,86 @@ void CSNchwToBgra(uint3 id : SV_DispatchThreadID)
             _dnnBufH = height;
         }
 
+        /// <summary>段階6-3-4（CUDA直結ゼロコピー化）専用。CUDA相互運用はDefault usageの
+        /// リソースしか登録できないため、CPU書き込み用の_dnnHalfBuf(Dynamic)とは別に
+        /// もう一つ確保する。TensorRTの推論結果がCUDA経由でここへ直接書き込まれる想定。</summary>
+        private void EnsureDnnCudaBuffer(int width, int height)
+        {
+            if (_d3d11Device == null) return;
+            long neededElems = (long)width * height * 3;
+            if (_dnnHalfBufCuda != null && _dnnCudaBufElemCount == neededElems &&
+                _dnnCudaBufW == width && _dnnCudaBufH == height)
+                return;
+
+            _srvDnnHalfBufCuda?.Dispose(); _srvDnnHalfBufCuda = null;
+            _dnnHalfBufCuda?.Dispose(); _dnnHalfBufCuda = null;
+
+            if (width <= 0 || height <= 0) return;
+
+            _dnnHalfBufCuda = _d3d11Device.CreateBuffer(new BufferDescription
+            {
+                ByteWidth = (uint)(neededElems * sizeof(ushort)),
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.ShaderResource,
+                CPUAccessFlags = CpuAccessFlags.None,
+                MiscFlags = ResourceOptionFlags.None,
+                StructureByteStride = 0,
+            });
+            _srvDnnHalfBufCuda = _d3d11Device.CreateShaderResourceView(_dnnHalfBufCuda, new ShaderResourceViewDescription
+            {
+                Format = Vortice.DXGI.Format.R16_Float,
+                ViewDimension = Vortice.Direct3D.ShaderResourceViewDimension.Buffer,
+                Buffer = new BufferShaderResourceView { FirstElement = 0, NumElements = (uint)neededElems },
+            });
+
+            _dnnCudaBufElemCount = neededElems;
+            _dnnCudaBufW = width;
+            _dnnCudaBufH = height;
+        }
+
+        /// <summary>段階6-3-4: 指定解像度のCUDA相互運用専用バッファを（無ければ）確保し、
+        /// そのネイティブCOMポインタ(ID3D11Buffer*)を返す。呼び出し側(DnnSuperResolutionEngine)
+        /// でcudaGraphicsD3D11RegisterResourceに登録することを想定。EnsureSizeも合わせて呼ぶこと
+        /// （_sharedTex11等の表示用リソースが未確保のままだと後段のPresentが失敗するため）。</summary>
+        public IntPtr EnsureDnnCudaBufferAndGetNativePointer(int width, int height)
+        {
+            if (!_d3dReady) return IntPtr.Zero;
+            EnsureDnnCudaBuffer(width, height);
+            return _dnnHalfBufCuda?.NativePointer ?? IntPtr.Zero;
+        }
+
+        /// <summary>段階6-3-4: TensorRTがCUDA経由で直接書き込み済みのバッファ（
+        /// EnsureDnnCudaBufferAndGetNativePointerで取得したもの）を、CPUアップロードを
+        /// 一切行わずにそのままBGRAへ変換して表示する。PresentDnnHalfのCPUコピー省略版。</summary>
+        public void PresentDnnHalfAlreadyInBuffer(int width, int height)
+        {
+            if (!_d3dReady) return;
+            EnsureSize(width, height);
+            if (_sharedTex11 == null || _surface9 == null || _d3d11Context == null || _d3d11Device == null) return;
+            if (_nchw2BgraCs == null) return;
+
+            try
+            {
+                EnsureDnnBuffers(width, height); // _dnnUploadTex等の変換先は共通で使い回す
+                if (_dnnHalfBufCuda == null || _srvDnnHalfBufCuda == null || _dnnUploadTex == null ||
+                    _uavDnnUpload == null || _srvDnnUpload == null)
+                    return;
+
+                _d3d11Context.CSSetShader(_nchw2BgraCs);
+                _d3d11Context.CSSetShaderResources(0, new[] { _srvDnnHalfBufCuda });
+                _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnUpload });
+                _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
+                _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+
+                RunPipelineAndComposite(width, height, _dnnUploadTex, _srvDnnUpload);
+            }
+            catch (Exception ex)
+            {
+                Trace($"GpuFramePresenter.PresentDnnHalfAlreadyInBuffer failed: {ex.Message}");
+            }
+        }
+
         public void SetEffects(double contrast, double saturation, double gamma)
         {
             _contrast = (float)contrast;
@@ -1182,6 +1266,8 @@ void CSNchwToBgra(uint3 id : SV_DispatchThreadID)
             _nchw2BgraCs?.Dispose(); _nchw2BgraCs = null;
             _srvDnnHalfBuf?.Dispose(); _srvDnnHalfBuf = null;
             _dnnHalfBuf?.Dispose(); _dnnHalfBuf = null;
+            _srvDnnHalfBufCuda?.Dispose(); _srvDnnHalfBufCuda = null;
+            _dnnHalfBufCuda?.Dispose(); _dnnHalfBufCuda = null;
             _uavDnnUpload?.Dispose(); _uavDnnUpload = null;
             _srvDnnUpload?.Dispose(); _srvDnnUpload = null;
             _dnnUploadTex?.Dispose(); _dnnUploadTex = null;

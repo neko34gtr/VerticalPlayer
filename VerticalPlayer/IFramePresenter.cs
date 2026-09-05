@@ -1,5 +1,7 @@
 ﻿namespace VerticalPlayer
 {
+    using System;
+
     /// <summary>
     /// デコード済みBGRAフレームの表示先を差し替え可能にするための抽象化。
     ///
@@ -18,6 +20,15 @@
         /// UIスレッドへディスパッチされた後（WritePixels相当のタイミング）に呼ばれる想定。</summary>
         void Present(byte[] bgra, int width, int height, int stride);
         void PresentDnnHalf(ushort[] nchwHalf, int width, int height);
+
+        /// <summary>段階6-3-4（CUDA直結ゼロコピー化）専用。指定解像度のCUDA相互運用専用
+        /// バッファを（無ければ）確保し、そのネイティブCOMポインタ(ID3D11Buffer*)を返す。</summary>
+        IntPtr EnsureDnnCudaBufferAndGetNativePointer(int width, int height);
+
+        /// <summary>段階6-3-4（CUDA直結ゼロコピー化）専用。TensorRTがCUDA経由で直接書き込み
+        /// 済みのバッファ（EnsureDnnCudaBufferAndGetNativePointerで取得したもの）を、
+        /// CPUアップロードを一切行わずにそのままBGRAへ変換して表示する。</summary>
+        void PresentDnnHalfAlreadyInBuffer(int width, int height);
 
         /// <summary>コントラスト/彩度/ガンマ（段階2：Compute Shader版）を設定する。
         /// 値の意味・範囲は AVEngine.SetEffects と同一（-1〜1、0=無効）。</summary>

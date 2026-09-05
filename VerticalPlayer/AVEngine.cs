@@ -81,6 +81,7 @@ namespace VerticalPlayer.Media
         private const string DnnTrtCacheDir = @"X:\Temp\VerticalPlayer\trtcache";
         private static readonly string DnnTrtCacheBackupDir = Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory, "trtcache_backup");
+        private const int DnnScale = 4; // 4x-UltraSharpV2の拡大倍率
 
         /// <summary>DNN超解像(TensorRT)の有効/無効。trueの間はGPU側のLanczos超解像
         /// (SetSuperResolution)を無効化し、代わりにデコードスレッド内でCPU経由の
@@ -639,6 +640,7 @@ namespace VerticalPlayer.Media
                                 int frameStride = stride;
                                 double shownPts = ptsSeconds;
                                 ushort[]? dnnHalf = null; // 非null時はGpuPresenter.PresentDnnHalfへ直接渡す（段階6-3-2）
+                                bool dnnCudaReady = false; // true時はCUDA直結でPresentDnnHalfAlreadyInBufferを使う（段階6-3-4）
 
                                 // DNN超解像（段階6）：EnsureEngine（初回はTensorRTエンジンの
                                 // 実ビルドが走り数十秒かかることがある）を絶対にデコードスレッド上で
@@ -648,13 +650,22 @@ namespace VerticalPlayer.Media
                                 {
                                     if (_dnnSr.IsReadyFor(w, h))
                                     {
-                                        // 出力側はCPUで変換せず、生のfloat16平面バッファのまま
-                                        // GpuPresenter側のCompute Shaderへ渡す（段階6-3-2）。
-                                        if (_dnnSr.TryInferToNchwHalf(managedBuf, w, h, out var half, out var upW, out var upH))
+                                        int upW = w * DnnScale, upH = h * DnnScale;
+                                        // まずCUDA直結ゼロコピー（段階6-3-4）を試し、失敗したら
+                                        // 従来のCPU経由（段階6-3-2）へ自動フォールバックする。
+                                        IntPtr cudaBufPtr = GpuPresenter.EnsureDnnCudaBufferAndGetNativePointer(upW, upH);
+                                        if (cudaBufPtr != IntPtr.Zero &&
+                                            _dnnSr.TryInferWithCudaOutput(managedBuf, w, h, cudaBufPtr, upW, upH))
                                         {
-                                            dnnHalf = half;
+                                            dnnCudaReady = true;
                                             frameW = upW;
                                             frameH = upH;
+                                        }
+                                        else if (_dnnSr.TryInferToNchwHalf(managedBuf, w, h, out var half, out var uw, out var uh))
+                                        {
+                                            dnnHalf = half;
+                                            frameW = uw;
+                                            frameH = uh;
                                         }
                                     }
                                     else if (_dnnBuildTask == null ||
@@ -688,7 +699,9 @@ namespace VerticalPlayer.Media
                                         // WriteableBitmapフォールバック側は常に等倍（DNNの影響を受けない）
                                         Bitmap?.WritePixels(new Int32Rect(0, 0, w, h), managedBuf, stride, 0);
                                         GpuPresenter?.EnsureSize(frameW, frameH);
-                                        if (dnnHalf != null)
+                                        if (dnnCudaReady)
+                                            GpuPresenter?.PresentDnnHalfAlreadyInBuffer(frameW, frameH);
+                                        else if (dnnHalf != null)
                                             GpuPresenter?.PresentDnnHalf(dnnHalf, frameW, frameH);
                                         else
                                             GpuPresenter?.Present(localBuf, frameW, frameH, frameStride);

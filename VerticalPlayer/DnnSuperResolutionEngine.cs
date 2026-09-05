@@ -35,6 +35,8 @@ namespace VerticalPlayer.Media
         private int _builtHeight;
         private bool _lastInitFailed;
         private bool _loggedInferError;
+        private bool _loggedCudaError;
+        private readonly Dictionary<IntPtr, CudaD3D11BufferMap> _cudaOutputRegistrations = new();
 
         /// <summary>利用可能か。falseの間は呼び出し側で従来のLanczos版へフォールバックすること。</summary>
         public bool IsAvailable => _session != null;
@@ -321,6 +323,93 @@ namespace VerticalPlayer.Media
             }
         }
 
+        /// <summary>段階6-3-4: 出力側をゼロコピー化する。ONNX Runtimeの推論結果をCPUへ
+        /// 読み戻さず、CUDA相互運用登録済みのD3D11バッファ(outputD3D11BufferPtr)へ
+        /// TensorRTから直接書き込ませる。入力側は現時点ではまだCPU変換のまま
+        /// （段階6-3-1未着手のため）。
+        /// 失敗時（IOBinding非対応、CUDA相互運用エラー等）はfalseを返し、呼び出し側は
+        /// TryInferToNchwHalf（CPU経由、段階6-3-2版）へフォールバックすること。
+        /// NOTE: OrtMemoryInfo/OrtValueのCUDAメモリ直接バインド関連APIはバージョン依存が
+        /// 大きい部分。以下はONNX Runtime C# APIの一般的な形を想定した実装で、実機ビルドでの
+        /// 調整が必要になる可能性が高い（クラス名・メソッド名が実際のバージョンと異なる場合、
+        /// コンパイルエラーのメッセージを元に直すこと）。</summary>
+        public bool TryInferWithCudaOutput(byte[] srcBgra, int width, int height,
+            IntPtr outputD3D11BufferPtr, int outWidth, int outHeight)
+        {
+            if (_session == null || _inputName == null || _outputName == null) return false;
+            if (width != _builtWidth || height != _builtHeight) return false;
+            if (outputD3D11BufferPtr == IntPtr.Zero) return false;
+
+            lock (_buildLock)
+            {
+                try
+                {
+                    // 入力は引き続きCPUで変換（段階6-3-1未着手）
+                    var inputTensor = new DenseTensor<OrtFloat16>(new[] { 1, 3, height, width });
+                    for (int y = 0; y < height; y++)
+                    {
+                        int rowBase = y * width * 4;
+                        for (int x = 0; x < width; x++)
+                        {
+                            int i = rowBase + x * 4;
+                            byte b = srcBgra[i];
+                            byte g = srcBgra[i + 1];
+                            byte r = srcBgra[i + 2];
+                            inputTensor[0, 0, y, x] = (OrtFloat16)(r / 255f);
+                            inputTensor[0, 1, y, x] = (OrtFloat16)(g / 255f);
+                            inputTensor[0, 2, y, x] = (OrtFloat16)(b / 255f);
+                        }
+                    }
+
+                    // 出力先バッファをCUDAへ登録（ポインタが変わらない限りキャッシュを再利用）
+                    if (!_cudaOutputRegistrations.TryGetValue(outputD3D11BufferPtr, out var reg))
+                    {
+                        reg = new CudaD3D11BufferMap(outputD3D11BufferPtr);
+                        _cudaOutputRegistrations[outputD3D11BufferPtr] = reg;
+                    }
+
+                    using var unmapScope = reg.Map();
+
+                    using var cudaMemInfo = new OrtMemoryInfo(
+                        "Cuda", OrtAllocatorType.DeviceAllocator, 0, OrtMemType.Default);
+
+                    long outElemCount = (long)outWidth * outHeight * 3;
+                    var outputShape = new long[] { 1, 3, outHeight, outWidth };
+                    using var outputOrtValue = OrtValue.CreateTensorValueWithData(
+                        cudaMemInfo, TensorElementType.Float16, outputShape,
+                        reg.DevicePointer, outElemCount * sizeof(ushort));
+
+                    using var inputOrtValue = OrtValue.CreateTensorValueFromMemory<OrtFloat16>(
+                        inputTensor.Buffer.ToArray(), new long[] { 1, 3, height, width });
+
+                    using var ioBinding = _session.CreateIoBinding();
+                    ioBinding.BindInput(_inputName, inputOrtValue);
+                    ioBinding.BindOutput(_outputName, outputOrtValue);
+
+                    using var runOptions = new RunOptions();
+                    _session.RunWithBinding(runOptions, ioBinding);
+
+                    // TensorRT/CUDA側の実行完了を、後段のCompute Shaderが読む前に保証する
+                    CudaD3D11Interop.cudaDeviceSynchronize();
+
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    if (!_loggedCudaError)
+                    {
+                        _loggedCudaError = true;
+                        Trace($"DNN超解像(CUDA IOBinding) 失敗（詳細、以後この種のエラーは簡略ログ、CPU経路へフォールバック）: {ex}");
+                    }
+                    else
+                    {
+                        Trace($"DNN超解像(CUDA IOBinding) 失敗: {ex.GetType().Name}: {ex.Message}");
+                    }
+                    return false;
+                }
+            }
+        }
+
         private void DisposeSession()
         {
             _session?.Dispose();
@@ -330,6 +419,14 @@ namespace VerticalPlayer.Media
             _builtWidth = 0;
             _builtHeight = 0;
             _loggedInferError = false;
+            _loggedCudaError = false;
+
+            // 解像度変更時、GpuFramePresenter側のCUDA用バッファも作り直されて古いポインタは
+            // 無効になるため、対応するCUDA登録も破棄しておく（キーがポインタなので放置すると
+            // 無効ポインタをキーにしたエントリが溜まり続ける）。
+            foreach (var reg in _cudaOutputRegistrations.Values)
+                reg.Dispose();
+            _cudaOutputRegistrations.Clear();
         }
 
         public void Dispose() => DisposeSession();

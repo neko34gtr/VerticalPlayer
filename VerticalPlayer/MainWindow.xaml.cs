@@ -182,6 +182,8 @@ namespace VerticalPlayer
         private double? _seekLivePendingSeconds = null;
         private bool _wasPlayingBeforeSeekDrag = false;
         private bool _dragCompleting = false;
+        private int _actualFrameCount;
+        private readonly System.Diagnostics.Stopwatch _fpsStopwatch = System.Diagnostics.Stopwatch.StartNew();
         private bool _isMuted = false;
         private double _prevVolume = 0.7;
         private bool _isPlaying = false;
@@ -254,6 +256,9 @@ namespace VerticalPlayer
             {
                 StatusText.Text = building ? "超解像エンジンをビルド中…（初回のみ、数十秒かかることがあります）" : "";
             };
+
+            // 実測FPS表示（1秒間隔で実際に表示されたフレーム数を集計）
+            Player.FrameDisplayed += _ => OnFrameDisplayedForFps();
 
             // ドラッグ＆ドロップを有効化
             this.AllowDrop = true;
@@ -826,6 +831,20 @@ namespace VerticalPlayer
             sl.Value = t;
             Player.Position = TimeSpan.FromSeconds(t);
         }
+        // 実測FPS: Player.FrameDisplayed（実際に画面へ表示されたフレーム）を1秒集計して表示。
+        // DNN超解像の性能改善効果を数値で確認できるようにするための計測用。
+        private void OnFrameDisplayedForFps()
+        {
+            _actualFrameCount++;
+            if (_fpsStopwatch.ElapsedMilliseconds >= 1000)
+            {
+                double fps = _actualFrameCount * 1000.0 / _fpsStopwatch.ElapsedMilliseconds;
+                ActualFpsLabel.Text = $"{fps:F1}fps";
+                _actualFrameCount = 0;
+                _fpsStopwatch.Restart();
+            }
+        }
+
         private void SeekBar_DragStarted(object sender, DragStartedEventArgs e)
         {
             _isDragging = true;
