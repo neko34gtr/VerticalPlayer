@@ -262,64 +262,72 @@ namespace VerticalPlayer.Media
             if (_session == null || _inputName == null || _outputName == null) return false;
             if (width != _builtWidth || height != _builtHeight) return false;
 
-            try
+            // Dispose()/EnsureEngine()と同じロックで排他化し、モデル切替等による破棄と
+            // 競合してセッションを掴んだまま使われるのを防ぐ。
+            lock (_buildLock)
             {
-                var inputTensor = new DenseTensor<OrtFloat16>(new[] { 1, 3, height, width });
-                for (int y = 0; y < height; y++)
+                if (_session == null || _inputName == null || _outputName == null) return false;
+                if (width != _builtWidth || height != _builtHeight) return false;
+
+                try
                 {
-                    int rowBase = y * width * 4;
-                    for (int x = 0; x < width; x++)
+                    var inputTensor = new DenseTensor<OrtFloat16>(new[] { 1, 3, height, width });
+                    for (int y = 0; y < height; y++)
                     {
-                        int i = rowBase + x * 4;
-                        byte b = srcBgra[i];
-                        byte g = srcBgra[i + 1];
-                        byte r = srcBgra[i + 2];
-                        inputTensor[0, 0, y, x] = (OrtFloat16)(r / 255f);
-                        inputTensor[0, 1, y, x] = (OrtFloat16)(g / 255f);
-                        inputTensor[0, 2, y, x] = (OrtFloat16)(b / 255f);
+                        int rowBase = y * width * 4;
+                        for (int x = 0; x < width; x++)
+                        {
+                            int i = rowBase + x * 4;
+                            byte b = srcBgra[i];
+                            byte g = srcBgra[i + 1];
+                            byte r = srcBgra[i + 2];
+                            inputTensor[0, 0, y, x] = (OrtFloat16)(r / 255f);
+                            inputTensor[0, 1, y, x] = (OrtFloat16)(g / 255f);
+                            inputTensor[0, 2, y, x] = (OrtFloat16)(b / 255f);
+                        }
                     }
+
+                    var inputs = new List<NamedOnnxValue>
+                    {
+                        NamedOnnxValue.CreateFromTensor<OrtFloat16>(_inputName, inputTensor)
+                    };
+
+                    using var results = _session.Run(inputs, new[] { _outputName });
+                    var outTensor = results[0].AsTensor<OrtFloat16>();
+                    int outH = outTensor.Dimensions[2];
+                    int outW = outTensor.Dimensions[3];
+
+                    // NOTE: OrtFloat16は内部的にushort1個分のビットパターンのみを保持する前提
+                    // （ONNX Runtimeの一般的な実装）。DenseTensorでない場合や将来のバージョンで
+                    // レイアウトが変わった場合はここで例外になり、catch節でfalseを返すだけなので
+                    // 安全側に倒れる（呼び出し側は失敗時、その1フレームだけ等倍表示継続する）。
+                    if (outTensor is DenseTensor<OrtFloat16> dense)
+                    {
+                        var span = System.Runtime.InteropServices.MemoryMarshal.Cast<OrtFloat16, ushort>(dense.Buffer.Span);
+                        dstNchwHalf = span.ToArray();
+                    }
+                    else
+                    {
+                        return false;
+                    }
+
+                    outWidth = outW;
+                    outHeight = outH;
+                    return true;
                 }
-
-                var inputs = new List<NamedOnnxValue>
+                catch (Exception ex)
                 {
-                    NamedOnnxValue.CreateFromTensor<OrtFloat16>(_inputName, inputTensor)
-                };
-
-                using var results = _session.Run(inputs, new[] { _outputName });
-                var outTensor = results[0].AsTensor<OrtFloat16>();
-                int outH = outTensor.Dimensions[2];
-                int outW = outTensor.Dimensions[3];
-
-                // NOTE: OrtFloat16は内部的にushort1個分のビットパターンのみを保持する前提
-                // （ONNX Runtimeの一般的な実装）。DenseTensorでない場合や将来のバージョンで
-                // レイアウトが変わった場合はここで例外になり、catch節でfalseを返すだけなので
-                // 安全側に倒れる（呼び出し側は失敗時、その1フレームだけ等倍表示継続する）。
-                if (outTensor is DenseTensor<OrtFloat16> dense)
-                {
-                    var span = System.Runtime.InteropServices.MemoryMarshal.Cast<OrtFloat16, ushort>(dense.Buffer.Span);
-                    dstNchwHalf = span.ToArray();
-                }
-                else
-                {
+                    if (!_loggedInferError)
+                    {
+                        _loggedInferError = true;
+                        Trace($"DNN超解像(half出力) 推論失敗（詳細、以後この種のエラーは簡略ログ）: {ex}");
+                    }
+                    else
+                    {
+                        Trace($"DNN超解像(half出力) 推論失敗: {ex.GetType().Name}: {ex.Message}");
+                    }
                     return false;
                 }
-
-                outWidth = outW;
-                outHeight = outH;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                if (!_loggedInferError)
-                {
-                    _loggedInferError = true;
-                    Trace($"DNN超解像(half出力) 推論失敗（詳細、以後この種のエラーは簡略ログ）: {ex}");
-                }
-                else
-                {
-                    Trace($"DNN超解像(half出力) 推論失敗: {ex.GetType().Name}: {ex.Message}");
-                }
-                return false;
             }
         }
 
@@ -412,21 +420,27 @@ namespace VerticalPlayer.Media
 
         private void DisposeSession()
         {
-            _session?.Dispose();
-            _session = null;
-            _inputName = null;
-            _outputName = null;
-            _builtWidth = 0;
-            _builtHeight = 0;
-            _loggedInferError = false;
-            _loggedCudaError = false;
+            // TryInferWithCudaOutput/EnsureEngineと同じロックを取ることで、それらが実行中の
+            // 間はDispose()が待機し、実行中のセッション/CUDA登録を横から破棄しないようにする
+            // （lockは同一スレッドから再入可能なため、EnsureEngine内部からの呼び出しとは競合しない）。
+            lock (_buildLock)
+            {
+                _session?.Dispose();
+                _session = null;
+                _inputName = null;
+                _outputName = null;
+                _builtWidth = 0;
+                _builtHeight = 0;
+                _loggedInferError = false;
+                _loggedCudaError = false;
 
-            // 解像度変更時、GpuFramePresenter側のCUDA用バッファも作り直されて古いポインタは
-            // 無効になるため、対応するCUDA登録も破棄しておく（キーがポインタなので放置すると
-            // 無効ポインタをキーにしたエントリが溜まり続ける）。
-            foreach (var reg in _cudaOutputRegistrations.Values)
-                reg.Dispose();
-            _cudaOutputRegistrations.Clear();
+                // 解像度変更時、GpuFramePresenter側のCUDA用バッファも作り直されて古いポインタは
+                // 無効になるため、対応するCUDA登録も破棄しておく（キーがポインタなので放置すると
+                // 無効ポインタをキーにしたエントリが溜まり続ける）。
+                foreach (var reg in _cudaOutputRegistrations.Values)
+                    reg.Dispose();
+                _cudaOutputRegistrations.Clear();
+            }
         }
 
         public void Dispose() => DisposeSession();

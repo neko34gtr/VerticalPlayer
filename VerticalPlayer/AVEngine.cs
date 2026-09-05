@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -71,17 +72,72 @@ namespace VerticalPlayer.Media
         private volatile bool _dnnSrEnabled;
         private Task? _dnnBuildTask;
         private int _dnnBuildW, _dnnBuildH;
+        private volatile bool _dnnInferenceBusy; // 前フレームの推論(Task)がまだ完了していない
 
         /// <summary>DNN超解像エンジンのバックグラウンドビルド中/完了が変化した時に発火
         /// （UIスレッドにディスパッチ済み）。呼び出し側で進捗表示等に利用できる。</summary>
         public event Action<bool>? DnnBuildStateChanged;
 
-        private static readonly string DnnModelPath = Path.Combine(
-            AppDomain.CurrentDomain.BaseDirectory, "models", "4x-UltraSharpV2_Lite_fp16_op17.onnx");
+        private static readonly string DnnModelsDir = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory, "models");
         private const string DnnTrtCacheDir = @"X:\Temp\VerticalPlayer\trtcache";
         private static readonly string DnnTrtCacheBackupDir = Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory, "trtcache_backup");
-        private const int DnnScale = 4; // 4x-UltraSharpV2の拡大倍率
+
+        private string _dnnModelFileName = "4x-UltraSharpV2_Lite_fp16_op17.onnx"; // 既定値（後方互換）
+        private int _dnnScale = 4;
+
+        /// <summary>modelsフォルダ内の.onnxファイル名一覧（今後の軽量モデル差し替え用）。</summary>
+        public static IEnumerable<string> ListAvailableDnnModels()
+        {
+            if (!Directory.Exists(DnnModelsDir)) return Array.Empty<string>();
+            return Directory.GetFiles(DnnModelsDir, "*.onnx")
+                .Select(Path.GetFileName)
+                .Where(n => n != null)
+                .Select(n => n!);
+        }
+
+        /// <summary>使用するDNNモデルのファイル名（modelsフォルダ内、拡張子込み）。
+        /// 変更すると倍率をファイル名から再解析し、既存セッションは破棄する。DNN有効中の
+        /// 場合は新モデル用のインスタンスをその場で作り直す（そうしないと以降デコード
+        /// ループの_dnnSr!=null判定が常にfalseになりDNN分岐自体が丸ごと無効化されたままに
+        /// なってしまう＝停止状態で切り替えても再起動するまで反映されない不具合の原因だった）。
+        /// 実際のTensorRTビルドはEnsureEngine呼び出し元（デコードループの背景Task等）の
+        /// タイミングに従うため、ここでは即座に重い処理は行わない。</summary>
+        public string DnnModelFileName
+        {
+            get => _dnnModelFileName;
+            set
+            {
+                if (_dnnModelFileName == value) return;
+                _dnnModelFileName = value;
+                _dnnScale = ParseScaleFromFileName(value);
+                _dnnSr?.Dispose(); // Dispose側でロック済みのため、実行中の推論と競合しても安全に待機される
+                _dnnSr = null;
+                // デコードループの「この解像度は既にビルド開始済みか」判定(_dnnBuildW/H)は
+                // 解像度のみを見ておりモデルの違いを考慮しないため、モデル切替時は無効化
+                // （-1にして必ず不一致にする）しないと、同じ解像度の動画のままモデルだけ
+                // 変えた場合に新モデルのビルドが一切トリガーされない不具合になっていた。
+                _dnnBuildW = -1;
+                _dnnBuildH = -1;
+                if (_dnnSrEnabled)
+                {
+                    DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, DnnTrtCacheBackupDir);
+                    _dnnSr = new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
+                }
+            }
+        }
+
+        /// <summary>現在のDNNモデルの拡大倍率（ファイル名先頭の"Nx"から自動解析、
+        /// 解析できない場合は4を既定とする）。</summary>
+        public int DnnScale => _dnnScale;
+
+        private static int ParseScaleFromFileName(string fileName)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(
+                fileName, @"^(\d+)x", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            return (m.Success && int.TryParse(m.Groups[1].Value, out int s) && s > 0) ? s : 4;
+        }
 
         /// <summary>DNN超解像(TensorRT)の有効/無効。trueの間はGPU側のLanczos超解像
         /// (SetSuperResolution)を無効化し、代わりにデコードスレッド内でCPU経由の
@@ -95,7 +151,8 @@ namespace VerticalPlayer.Media
                 // trtcacheはRAMディスク等の揮発ストレージ運用のため、無ければ
                 // exe直下の永続バックアップから復元してからエンジンを読む
                 DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, DnnTrtCacheBackupDir);
-                _dnnSr ??= new DnnSuperResolutionEngine(DnnModelPath, DnnTrtCacheDir);
+                _dnnSr ??= new DnnSuperResolutionEngine(
+                    Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
                 // DNN側で拡大するため、GPU側のLanczos超解像は二重適用を避けるため無効化する
                 GpuPresenter?.SetSuperResolution(1f);
             }
@@ -112,7 +169,7 @@ namespace VerticalPlayer.Media
         public bool PrebuildDnnEngine(int width, int height)
         {
             DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, DnnTrtCacheBackupDir);
-            _dnnSr ??= new DnnSuperResolutionEngine(DnnModelPath, DnnTrtCacheDir);
+            _dnnSr ??= new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
             GpuPresenter?.SetSuperResolution(1f);
             return _dnnSr.EnsureEngine(width, height);
         }
@@ -639,33 +696,81 @@ namespace VerticalPlayer.Media
                                 int frameW = w, frameH = h;
                                 int frameStride = stride;
                                 double shownPts = ptsSeconds;
-                                ushort[]? dnnHalf = null; // 非null時はGpuPresenter.PresentDnnHalfへ直接渡す（段階6-3-2）
-                                bool dnnCudaReady = false; // true時はCUDA直結でPresentDnnHalfAlreadyInBufferを使う（段階6-3-4）
 
                                 // DNN超解像（段階6）：EnsureEngine（初回はTensorRTエンジンの
                                 // 実ビルドが走り数十秒かかることがある）を絶対にデコードスレッド上で
                                 // 同期実行しない。ビルドはバックグラウンドTaskへ逃がし、完了するまでの
                                 // フレームは等倍のまま表示継続する（真っ黒/デコード停止を防ぐ）。
+                                //
+                                // 推論本体（TensorRT）も同様にバックグラウンドTaskへ逃がし、
+                                // デコードスレッドはブロックせず次のフレームへ進めるようにする
+                                // （パイプライン化）。前フレームの推論がまだ終わっていない間は
+                                // このフレームのDNN処理も表示更新自体もスキップする（直前の
+                                // DNN結果をそのまま表示し続ける＝処理落ち時はコマ落ちするが、
+                                // 等倍とのちらつきは起きない）。音声・クロック・デコード自体は
+                                // 通常通り止めずに進む。
+                                bool dnnSkippedThisFrame = false;
                                 if (_dnnSrEnabled && GpuPresenter != null && _dnnSr != null)
                                 {
                                     if (_dnnSr.IsReadyFor(w, h))
                                     {
-                                        int upW = w * DnnScale, upH = h * DnnScale;
-                                        // まずCUDA直結ゼロコピー（段階6-3-4）を試し、失敗したら
-                                        // 従来のCPU経由（段階6-3-2）へ自動フォールバックする。
-                                        IntPtr cudaBufPtr = GpuPresenter.EnsureDnnCudaBufferAndGetNativePointer(upW, upH);
-                                        if (cudaBufPtr != IntPtr.Zero &&
-                                            _dnnSr.TryInferWithCudaOutput(managedBuf, w, h, cudaBufPtr, upW, upH))
+                                        // DNNモードでエンジン準備済みの間は、推論開始トリガーになった
+                                        // フレームも含めて常に表示更新をスキップし、非同期タスクの
+                                        // 完了コールバック側だけがPresentする。そうしないと「等倍→
+                                        // 推論完了で4倍→次の推論開始でまた等倍→…」とGPU側の
+                                        // EnsureSizeが毎回行き来してテクスチャの再確保が頻発してしまう。
+                                        dnnSkippedThisFrame = true;
+
+                                        if (!_dnnInferenceBusy)
                                         {
-                                            dnnCudaReady = true;
-                                            frameW = upW;
-                                            frameH = upH;
-                                        }
-                                        else if (_dnnSr.TryInferToNchwHalf(managedBuf, w, h, out var half, out var uw, out var uh))
-                                        {
-                                            dnnHalf = half;
-                                            frameW = uw;
-                                            frameH = uh;
+                                            _dnnInferenceBusy = true;
+                                            int upW = w * DnnScale, upH = h * DnnScale;
+                                            var dnnLocal = _dnnSr;
+                                            var gp = GpuPresenter;
+                                            var bufCopy = (byte[])managedBuf.Clone(); // 次フレームで上書きされるため複製必須
+                                            int bw = w, bh = h;
+                                            Task.Run(() =>
+                                            {
+                                                try
+                                                {
+                                                    // まずCUDA直結ゼロコピー（段階6-3-4）を試し、
+                                                    // 失敗したら従来のCPU経由（段階6-3-2）へフォールバック。
+                                                    IntPtr cudaBufPtr = gp.EnsureDnnCudaBufferAndGetNativePointer(upW, upH);
+                                                    if (cudaBufPtr != IntPtr.Zero &&
+                                                        dnnLocal.TryInferWithCudaOutput(bufCopy, bw, bh, cudaBufPtr, upW, upH))
+                                                    {
+                                                        _ui.BeginInvoke(DispatcherPriority.Render, new Action(() =>
+                                                        {
+                                                            if (myGen != _generation) return;
+                                                            try
+                                                            {
+                                                                gp.EnsureSize(upW, upH);
+                                                                gp.PresentDnnHalfAlreadyInBuffer(upW, upH);
+                                                                FrameDisplayed?.Invoke(shownPts);
+                                                            }
+                                                            catch (Exception ex) { Trace($"PresentDnnHalfAlreadyInBuffer skipped: {ex.Message}"); }
+                                                        }));
+                                                    }
+                                                    else if (dnnLocal.TryInferToNchwHalf(bufCopy, bw, bh, out var half, out var uw, out var uh))
+                                                    {
+                                                        _ui.BeginInvoke(DispatcherPriority.Render, new Action(() =>
+                                                        {
+                                                            if (myGen != _generation) return;
+                                                            try
+                                                            {
+                                                                gp.EnsureSize(uw, uh);
+                                                                gp.PresentDnnHalf(half, uw, uh);
+                                                                FrameDisplayed?.Invoke(shownPts);
+                                                            }
+                                                            catch (Exception ex) { Trace($"PresentDnnHalf skipped: {ex.Message}"); }
+                                                        }));
+                                                    }
+                                                }
+                                                finally
+                                                {
+                                                    _dnnInferenceBusy = false;
+                                                }
+                                            });
                                         }
                                     }
                                     else if (_dnnBuildTask == null ||
@@ -691,27 +796,25 @@ namespace VerticalPlayer.Media
                                     // ビルド中/未完了のこのフレームは等倍のまま何もしない
                                 }
 
-                                _ui.BeginInvoke(DispatcherPriority.Render, new Action(() =>
+                                if (!dnnSkippedThisFrame)
                                 {
-                                    if (frameGen != _generation) return;
-                                    try
+                                    _ui.BeginInvoke(DispatcherPriority.Render, new Action(() =>
                                     {
-                                        // WriteableBitmapフォールバック側は常に等倍（DNNの影響を受けない）
-                                        Bitmap?.WritePixels(new Int32Rect(0, 0, w, h), managedBuf, stride, 0);
-                                        GpuPresenter?.EnsureSize(frameW, frameH);
-                                        if (dnnCudaReady)
-                                            GpuPresenter?.PresentDnnHalfAlreadyInBuffer(frameW, frameH);
-                                        else if (dnnHalf != null)
-                                            GpuPresenter?.PresentDnnHalf(dnnHalf, frameW, frameH);
-                                        else
+                                        if (frameGen != _generation) return;
+                                        try
+                                        {
+                                            // WriteableBitmapフォールバック側は常に等倍（DNNの影響を受けない）
+                                            Bitmap?.WritePixels(new Int32Rect(0, 0, w, h), managedBuf, stride, 0);
+                                            GpuPresenter?.EnsureSize(frameW, frameH);
                                             GpuPresenter?.Present(localBuf, frameW, frameH, frameStride);
-                                        FrameDisplayed?.Invoke(shownPts);
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        Trace($"WritePixels skipped: {ex.Message}");
-                                    }
-                                }));
+                                            FrameDisplayed?.Invoke(shownPts);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Trace($"WritePixels skipped: {ex.Message}");
+                                        }
+                                    }));
+                                }
                             }
                         }
                     }

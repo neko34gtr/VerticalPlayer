@@ -65,6 +65,7 @@ namespace VerticalPlayer
         public float SuperResolutionScale { get; set; } = 1f;
         public bool DnnSuperResolution { get; set; }
         public bool DnnWaitForBuild { get; set; } = true;
+        public string? DnnModelFileName { get; set; }
         public double SharpAmount { get; set; } = 0.5;
         public bool ColorMatrix601To709 { get; set; }
 
@@ -260,6 +261,13 @@ namespace VerticalPlayer
             // 実測FPS表示（1秒間隔で実際に表示されたフレーム数を集計）
             Player.FrameDisplayed += _ => OnFrameDisplayedForFps();
 
+            // DNNモデル一覧をmodelsフォルダから自動スキャンしてコンボへ反映
+            // （軽量モデルへの差し替えを見越して、モデルファイルの追加だけで選べるようにする）
+            foreach (var name in VerticalPlayer.Media.FfmpegMediaElement.ListAvailableDnnModels())
+                DnnModelCombo.Items.Add(new ComboBoxItem { Content = name, Tag = name });
+            if (DnnModelCombo.Items.Count > 0 && DnnModelCombo.SelectedIndex < 0)
+                DnnModelCombo.SelectedIndex = 0;
+
             // ドラッグ＆ドロップを有効化
             this.AllowDrop = true;
             this.Drop += Window_Drop;
@@ -400,6 +408,20 @@ namespace VerticalPlayer
             Player.SuperResolutionScale = s.SuperResolutionScale;
             DnnWaitForBuildCheck.IsChecked = s.DnnWaitForBuild;
 
+            // DNNモデル選択の復元（コンボは既にコンストラクタでmodelsフォルダから
+            // populate済みのはず。見つからない場合は先頭のまま＝規定モデル）
+            if (!string.IsNullOrEmpty(s.DnnModelFileName))
+            {
+                foreach (ComboBoxItem item in DnnModelCombo.Items)
+                {
+                    if ((string)item.Tag == s.DnnModelFileName)
+                    {
+                        DnnModelCombo.SelectedItem = item;
+                        break;
+                    }
+                }
+            }
+
             UpdateEffectLabels();
 
             // ── プリセット ──
@@ -466,6 +488,8 @@ namespace VerticalPlayer
                 DnnSuperResolution = SuperResolutionCombo.SelectedItem is ComboBoxItem srDnnItem &&
                     (string)srDnnItem.Tag == "dnn",
                 DnnWaitForBuild = DnnWaitForBuildCheck.IsChecked ?? true,
+                DnnModelFileName = DnnModelCombo.SelectedItem is ComboBoxItem dnnModelItem
+                    ? (string)dnnModelItem.Tag : null,
 
                 // プリセット
                 Presets = new List<PresetSettings>(_presets),
@@ -843,6 +867,23 @@ namespace VerticalPlayer
                 _actualFrameCount = 0;
                 _fpsStopwatch.Restart();
             }
+        }
+
+        private void DnnModel_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (DnnModelCombo.SelectedItem is ComboBoxItem item)
+            {
+                Player.DnnModelFileName = (string)item.Tag;
+                UpdateDnnComboLabel();
+            }
+        }
+
+        // SuperResolutionCombo側の「DNN/TensorRT」項目に、実際に選択中のモデルの倍率
+        // （ファイル名から自動解析されたもの）を反映する。DnnModelComboの選択が変わる
+        // たびに呼ぶこと（モデルによって倍率が異なる＝2x/4x等が混在するため固定表示にできない）。
+        private void UpdateDnnComboLabel()
+        {
+            DnnComboItem.Content = $"DNN/TensorRT（{Player.DnnScale}倍）";
         }
 
         private void SeekBar_DragStarted(object sender, DragStartedEventArgs e)

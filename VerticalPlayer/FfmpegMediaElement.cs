@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -209,6 +210,20 @@ namespace VerticalPlayer.Media
                 _engine.SetDnnSuperResolution(value);
             }
         }
+
+        /// <summary>使用するDNNモデルのファイル名（modelsフォルダ内、拡張子込み）。
+        /// 変更すると次回のDNN有効化/次フレームで新モデルに基づき再ビルドされる。</summary>
+        public string DnnModelFileName
+        {
+            get => _engine.DnnModelFileName;
+            set => _engine.DnnModelFileName = value;
+        }
+
+        /// <summary>現在のDNNモデルの拡大倍率（ファイル名先頭の"Nx"から自動解析）。</summary>
+        public int DnnScale => _engine.DnnScale;
+
+        /// <summary>modelsフォルダ内で見つかった.onnxファイル名一覧（軽量モデル差し替え用）。</summary>
+        public static IEnumerable<string> ListAvailableDnnModels() => AVEngine.ListAvailableDnnModels();
 
         private int _compareViewMode; // 0=通常、1=1枚分割（ワイプ）、2=2枚分割（フル画像を左右に並べる）
         /// <summary>PowerDVD TrueTheater風の比較表示モード。GPU描画パス(UseGpuPresenter)が

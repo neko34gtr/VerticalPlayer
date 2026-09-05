@@ -992,10 +992,14 @@
                                         <ComboBoxItem Content="なし" Tag="1.0"/>
                                         <ComboBoxItem Content="1.5倍" Tag="1.5"/>
                                         <ComboBoxItem Content="2.0倍" Tag="2.0"/>
-                                        <ComboBoxItem Content="4.0倍（DNN/TensorRT）" Tag="dnn"/>
+                                        <ComboBoxItem x:Name="DnnComboItem" Content="DNN/TensorRT" Tag="dnn"/>
                                     </ComboBox>
                                     <CheckBox x:Name="DnnWaitForBuildCheck" Content="DNN切替時はビルド完了まで待つ（未チェック=バックグラウンドビルド）"
                                               Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"/>
+                                    <TextBlock Text="DNNモデル（差し替え用、modelsフォルダを自動スキャン）" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
+                                    <ComboBox x:Name="DnnModelCombo" Margin="0,0,0,6"
+                                              SelectionChanged="DnnModel_Changed"/>
 
                                     <TextBlock Text="比較ビュー（TrueTheater風）" Foreground="{StaticResource TextMuted}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
