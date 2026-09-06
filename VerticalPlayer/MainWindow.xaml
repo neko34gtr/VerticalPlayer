@@ -830,7 +830,7 @@
                                   Style="{StaticResource ModernCheck}" FontSize="10"
                                   Foreground="{StaticResource TextMuted}"/>
                         <TextBlock x:Name="StatusText" Grid.Column="2"
-                                   Foreground="{StaticResource TextFaint}" FontSize="10"
+                                   Foreground="{StaticResource TextFaint}" FontSize="14"
                                    VerticalAlignment="Center"/>
                     </Grid>
 
@@ -881,8 +881,8 @@
                                        VerticalAlignment="Center" Margin="5,0,0,0"/>
                             <!-- 実測FPS（表示された実フレーム数を1秒間隔で集計） -->
                             <TextBlock x:Name="ActualFpsLabel" Text=""
-                                       Foreground="{StaticResource TextMuted}"
-                                       FontSize="9" FontWeight="Bold"
+                                       Foreground="#4CD964"
+                                       FontSize="14" FontWeight="Bold"
                                        VerticalAlignment="Center" Margin="5,0,0,0"/>
                         </StackPanel>
                         <!-- fps選択 -->

@@ -256,6 +256,9 @@ namespace VerticalPlayer
             Player.DnnBuildStateChanged += building =>
             {
                 StatusText.Text = building ? "超解像エンジンをビルド中…（初回のみ、数十秒かかることがあります）" : "";
+                StatusText.Foreground = building
+                    ? new SolidColorBrush(Color.FromRgb(0xFF, 0x3B, 0x30))
+                    : (Brush)FindResource("TextFaint");
             };
 
             // 実測FPS表示（1秒間隔で実際に表示されたフレーム数を集計）
@@ -605,6 +608,12 @@ namespace VerticalPlayer
             ApplyLayout();
             Player.SpeedRatio = SpeedSlider.Value;
 
+            // 新しいファイルを開いたので、旧ファイル用にビルド中/ビルド済みだったDNNエンジンは
+            // 手放し新ファイル用に作り直す（旧ファイルのビルドが新ファイルのビルドを数分間
+            // ブロックしてしまう不具合の対策。TensorRTのネイティブビルドは中断できないため
+            // 旧ビルドはバックグラウンドで走り続けるが、新ファイル側は別ロックになりブロックされない）
+            Player.ResetDnnEngineForNewFile();
+
             // 動画詳細情報の取得と表示
             if (Player.Source?.LocalPath != null)
                 AnalyzeAndShowMediaInfo(Player.Source.LocalPath);
@@ -869,12 +878,20 @@ namespace VerticalPlayer
             }
         }
 
-        private void DnnModel_Changed(object sender, SelectionChangedEventArgs e)
+        private async void DnnModel_Changed(object sender, SelectionChangedEventArgs e)
         {
             if (DnnModelCombo.SelectedItem is ComboBoxItem item)
             {
                 Player.DnnModelFileName = (string)item.Tag;
                 UpdateDnnComboLabel();
+
+                // DNNが選択中の場合のみ、モデル切替もライブ切替と同じ「待つ/しない」設定を適用する
+                // （以前はDnnWaitForBuildCheckがモデル切替時には無視されていた）。
+                if (SuperResolutionCombo.SelectedItem is ComboBoxItem srItem && (string)srItem.Tag == "dnn" &&
+                    DnnWaitForBuildCheck.IsChecked == true)
+                {
+                    await EnableDnnSuperResolutionAsync();
+                }
             }
         }
 
@@ -1299,8 +1316,10 @@ namespace VerticalPlayer
             if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdatePlayIcon(); _timer.Stop(); }
 
             StatusText.Text = "超解像エンジンをビルド中…（初回のみ、数十秒かかることがあります）";
+            StatusText.Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0x3B, 0x30));
             bool ok = await Player.PrebuildDnnSuperResolutionAsync();
             StatusText.Text = ok ? "" : "DNN超解像エンジンの初期化に失敗しました（Lanczos版のままです）";
+            StatusText.Foreground = (Brush)FindResource("TextFaint");
 
             Player.DnnSuperResolutionEnabled = ok;
             if (!ok)

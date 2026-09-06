@@ -225,6 +225,11 @@ namespace VerticalPlayer.Media
         /// <summary>modelsフォルダ内で見つかった.onnxファイル名一覧（軽量モデル差し替え用）。</summary>
         public static IEnumerable<string> ListAvailableDnnModels() => AVEngine.ListAvailableDnnModels();
 
+        /// <summary>新しいファイルを開いた時に呼ぶこと。旧ファイル用にビルド中/ビルド済み
+        /// だったDNNエンジンを手放し、新ファイル用に作り直す（旧ファイルのビルドが新ファイルの
+        /// ビルドを数分間ブロックしてしまう不具合の対策）。</summary>
+        public void ResetDnnEngineForNewFile() => _engine.ResetDnnEngineForNewFile();
+
         private int _compareViewMode; // 0=通常、1=1枚分割（ワイプ）、2=2枚分割（フル画像を左右に並べる）
         /// <summary>PowerDVD TrueTheater風の比較表示モード。GPU描画パス(UseGpuPresenter)が
         /// 有効な時のみ実際に効果がある。</summary>

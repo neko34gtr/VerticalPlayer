@@ -112,21 +112,43 @@ namespace VerticalPlayer.Media
                 if (_dnnModelFileName == value) return;
                 _dnnModelFileName = value;
                 _dnnScale = ParseScaleFromFileName(value);
-                _dnnSr?.Dispose(); // Dispose側でロック済みのため、実行中の推論と競合しても安全に待機される
-                _dnnSr = null;
-                // デコードループの「この解像度は既にビルド開始済みか」判定(_dnnBuildW/H)は
-                // 解像度のみを見ておりモデルの違いを考慮しないため、モデル切替時は無効化
-                // （-1にして必ず不一致にする）しないと、同じ解像度の動画のままモデルだけ
-                // 変えた場合に新モデルのビルドが一切トリガーされない不具合になっていた。
-                _dnnBuildW = -1;
-                _dnnBuildH = -1;
-                if (_dnnSrEnabled)
-                {
-                    DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, DnnTrtCacheBackupDir);
-                    _dnnSr = new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
-                }
+                DiscardDnnEngineAndRebuildIfEnabled();
             }
         }
+
+        /// <summary>現在のDnnSuperResolutionEngineインスタンスを手放し、DNN有効中なら
+        /// 新しいインスタンスを作り直す。旧インスタンスのビルドが実行中の場合でも、
+        /// TensorRTのネイティブビルド呼び出しは中断できないため、Dispose自体は
+        /// 別スレッドへ逃がして完了を待たせる（呼び出し元のUI/デコードスレッドを
+        /// フリーズさせないため）。新しいインスタンスは別ロックを持つため、旧ビルドの
+        /// 完了を待たされずに独立してビルドを開始できる。
+        /// モデル変更時、および新しいファイルを開いた時（旧ファイルのビルドが新ファイルの
+        /// ビルドを数分間ブロックしてしまう不具合の対策）の両方から呼ぶ。</summary>
+        private void DiscardDnnEngineAndRebuildIfEnabled()
+        {
+            var oldSr = _dnnSr;
+            _dnnSr = null;
+            if (oldSr != null)
+                Task.Run(() => oldSr.Dispose());
+
+            // デコードループの「この解像度は既にビルド開始済みか」判定(_dnnBuildW/H)は
+            // 解像度のみを見ておりモデル/ファイルの違いを考慮しないため、ここで無効化
+            // （-1にして必ず不一致にする）しないと新しいエンジンのビルドがトリガーされない。
+            _dnnBuildW = -1;
+            _dnnBuildH = -1;
+            _dnnBuildTask = null;
+
+            if (_dnnSrEnabled)
+            {
+                DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, DnnTrtCacheBackupDir);
+                _dnnSr = new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
+            }
+        }
+
+        /// <summary>新しいファイルを開いた時に呼ぶこと。旧ファイル用にビルド中/ビルド済み
+        /// だったインスタンスを手放し、新ファイル用のインスタンスを用意する（旧ファイルの
+        /// ビルドが新ファイルのビルドを数分間ブロックしてしまう不具合の対策）。</summary>
+        public void ResetDnnEngineForNewFile() => DiscardDnnEngineAndRebuildIfEnabled();
 
         /// <summary>現在のDNNモデルの拡大倍率（ファイル名先頭の"Nx"から自動解析、
         /// 解析できない場合は4を既定とする）。</summary>
