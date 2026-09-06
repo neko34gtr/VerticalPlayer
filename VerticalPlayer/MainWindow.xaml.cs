@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -51,7 +52,13 @@ namespace VerticalPlayer
         // ── 表示 ──
         public bool IsForceVertical { get; set; }
         public double Rotation { get; set; }
-        public bool HwAccel { get; set; }
+        public bool HwAccel { get; set; } = true;
+        public bool ShowFpsCounter { get; set; } = true;
+
+        /// <summary>TensorRTキャッシュ(trtcache)の永続バックアップ先。未指定(null/空)の場合は
+        /// AVEngine.GetDefaultTrtCacheBackupDir()の既定パス（%LOCALAPPDATA%配下、ビルド構成に
+        /// 依存しない固定パス）を使う。</summary>
+        public string? TrtCacheBackupDir { get; set; }
 
         // ── エフェクト ──
         public double Contrast { get; set; }
@@ -59,8 +66,8 @@ namespace VerticalPlayer
         public double Gamma { get; set; }
         public double ZoomScaleX { get; set; } = 1.0;
         public double ZoomScaleY { get; set; } = 1.0;
-        public bool Denoise { get; set; }
-        public bool DynamicContrast { get; set; }
+        public bool Denoise { get; set; } = true;
+        public bool DynamicContrast { get; set; } = true;
         public int CompareViewMode { get; set; }
         public float SuperResolutionScale { get; set; } = 1f;
         public bool DnnSuperResolution { get; set; }
@@ -251,14 +258,24 @@ namespace VerticalPlayer
             Player.UseGpuPresenter = true;
             Trace($"GpuPresenter available={Player.IsGpuPresenterAvailable}（falseの場合、D3D9Ex/D3D11初期化失敗のためGPU専用機能は全て無効）");
 
+            // trtcacheバックアップ先の初期表示（RestoreSettingsが呼ばれない初回起動でも
+            // 既定パスが見えるように、ここで一度セットしておく）
+            TrtCacheBackupDirBox.Text = Player.TrtCacheBackupDir;
+
             // DNN超解像エンジンのバックグラウンドビルド中はStatusTextで見える化する
             // （初回ビルドは数十秒かかることがあり、無表示だと固まったように見えるため）
             Player.DnnBuildStateChanged += building =>
             {
-                StatusText.Text = building ? "超解像エンジンをビルド中…（初回のみ、数十秒かかることがあります）" : "";
-                StatusText.Foreground = building
-                    ? new SolidColorBrush(Color.FromRgb(0xFF, 0x3B, 0x30))
-                    : (Brush)FindResource("TextFaint");
+                if (building)
+                {
+                    StatusText.Text = "超解像エンジンをビルド中…（初回のみ、数十秒かかることがあります）";
+                    StatusText.Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0x3B, 0x30));
+                }
+                else
+                {
+                    // ビルド完了時：DNNが有効かつ現在解像度でビルド済みならTensorRT再生中を黄色で表示
+                    UpdateDnnStatusText();
+                }
             };
 
             // 実測FPS表示（1秒間隔で実際に表示されたフレーム数を集計）
@@ -381,6 +398,14 @@ namespace VerticalPlayer
             PlayerRotation.Angle = _currentRotation;
             Player.DisplayRotation = _currentRotation;
             HwAccelCheck.IsChecked = s.HwAccel;
+            FpsCounterCheck.IsChecked = s.ShowFpsCounter;
+            ActualFpsLabel.Visibility = s.ShowFpsCounter ? Visibility.Visible : Visibility.Collapsed;
+
+            // trtcacheバックアップ先：未指定なら既定値をそのまま表示（実際にPlayerが
+            // 使う値は常にAVEngine側の既定値と一致しているため上書き不要）
+            if (!string.IsNullOrWhiteSpace(s.TrtCacheBackupDir))
+                Player.TrtCacheBackupDir = s.TrtCacheBackupDir;
+            TrtCacheBackupDirBox.Text = Player.TrtCacheBackupDir;
 
             // ── エフェクト ──
             ContrastSlider.Value = s.Contrast;
@@ -473,6 +498,9 @@ namespace VerticalPlayer
                 IsForceVertical = ForceVerticalMode.IsChecked ?? false,
                 Rotation = _currentRotation,
                 HwAccel = HwAccelCheck.IsChecked ?? false,
+                ShowFpsCounter = FpsCounterCheck.IsChecked ?? true,
+                TrtCacheBackupDir = string.IsNullOrWhiteSpace(TrtCacheBackupDirBox.Text)
+                    ? null : TrtCacheBackupDirBox.Text.Trim(),
 
                 // エフェクト
                 Contrast = ContrastSlider.Value,
@@ -895,6 +923,23 @@ namespace VerticalPlayer
             }
         }
 
+        // TensorRTエンジンで実際に再生中かどうかをStatusTextへ反映する（黄色）。
+        // DNNが無効、またはビルド未完了（現在解像度でIsDnnReadyForCurrentResolution=false）の
+        // 場合は空にする。ビルド中（赤）の表示はDnnBuildStateChanged側が別途担当する。
+        private void UpdateDnnStatusText()
+        {
+            if (Player.DnnSuperResolutionEnabled && Player.IsDnnReadyForCurrentResolution)
+            {
+                StatusText.Text = "TensorRTエンジンで再生中";
+                StatusText.Foreground = new SolidColorBrush(Color.FromRgb(0xFB, 0xBF, 0x24));
+            }
+            else
+            {
+                StatusText.Text = "";
+                StatusText.Foreground = (Brush)FindResource("TextFaint");
+            }
+        }
+
         // SuperResolutionCombo側の「DNN/TensorRT」項目に、実際に選択中のモデルの倍率
         // （ファイル名から自動解析されたもの）を反映する。DnnModelComboの選択が変わる
         // たびに呼ぶこと（モデルによって倍率が異なる＝2x/4x等が混在するため固定表示にできない）。
@@ -1287,6 +1332,7 @@ namespace VerticalPlayer
             {
                 Player.DnnSuperResolutionEnabled = false;
                 Player.SuperResolutionScale = scale;
+                UpdateDnnStatusText();
             }
         }
 
@@ -1309,6 +1355,7 @@ namespace VerticalPlayer
             if (Player.IsDnnReadyForCurrentResolution)
             {
                 Player.DnnSuperResolutionEnabled = true;
+                UpdateDnnStatusText();
                 return;
             }
 
@@ -1318,14 +1365,20 @@ namespace VerticalPlayer
             StatusText.Text = "超解像エンジンをビルド中…（初回のみ、数十秒かかることがあります）";
             StatusText.Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0x3B, 0x30));
             bool ok = await Player.PrebuildDnnSuperResolutionAsync();
-            StatusText.Text = ok ? "" : "DNN超解像エンジンの初期化に失敗しました（Lanczos版のままです）";
-            StatusText.Foreground = (Brush)FindResource("TextFaint");
 
             Player.DnnSuperResolutionEnabled = ok;
-            if (!ok)
+            if (ok)
             {
-                // 失敗時は無限に黒画面/低解像度のままにしないよう「なし」へ戻す
+                UpdateDnnStatusText();
+            }
+            else
+            {
+                // 失敗時は無限に黒画面/低解像度のままにしないよう「なし」へ戻す（これが
+                // SuperResolution_Changedを同期発火させ黄色ステータスを一旦クリアするため、
+                // 失敗メッセージは必ずその後に設定して上書きされないようにする）。
                 SuperResolutionCombo.SelectedIndex = 0;
+                StatusText.Text = "DNN超解像エンジンの初期化に失敗しました（Lanczos版のままです）";
+                StatusText.Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0x3B, 0x30));
             }
 
             if (wasPlaying) { Player.Play(); _isPlaying = true; UpdatePlayIcon(); _timer.Start(); }
@@ -1431,6 +1484,44 @@ namespace VerticalPlayer
                 _presets.Remove(p);
                 StatusText.Text = $"「{p.Name}」を削除しました";
             }
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // fpsカウンタ表示
+        // ─────────────────────────────────────────────────────────────────
+        private void FpsCounter_Changed(object sender, RoutedEventArgs e)
+            => ActualFpsLabel.Visibility = (FpsCounterCheck.IsChecked == true) ? Visibility.Visible : Visibility.Collapsed;
+
+        // ─────────────────────────────────────────────────────────────────
+        // TensorRTキャッシュのバックアップ先
+        // ─────────────────────────────────────────────────────────────────
+        private void TrtCacheBackupDir_Changed(object sender, RoutedEventArgs e)
+        {
+            var path = TrtCacheBackupDirBox.Text?.Trim();
+            if (!string.IsNullOrWhiteSpace(path))
+                Player.TrtCacheBackupDir = path;
+        }
+
+        private void OpenTrtCacheBackupDir_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                Directory.CreateDirectory(Player.TrtCacheBackupDir);
+                Process.Start(new ProcessStartInfo("explorer.exe", $"\"{Player.TrtCacheBackupDir}\"")
+                {
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                Trace($"OpenTrtCacheBackupDir_Click failed: {ex.Message}");
+            }
+        }
+
+        private void ResetTrtCacheBackupDir_Click(object sender, RoutedEventArgs e)
+        {
+            Player.TrtCacheBackupDir = VerticalPlayer.Media.FfmpegMediaElement.GetDefaultTrtCacheBackupDir();
+            TrtCacheBackupDirBox.Text = Player.TrtCacheBackupDir;
         }
 
         // ─────────────────────────────────────────────────────────────────
@@ -1639,6 +1730,26 @@ namespace VerticalPlayer
                 var speed = Player.SpeedRatio;
                 var angle = PlayerRotation?.Angle ?? 0;
 
+                // フルスクリーン側のPlayerはMainWindow側とは別インスタンス（別のAVEngineを
+                // 内部に持つ）のため、明示的にスナップショットを渡さないとHW/Denoise/
+                // DynamicContrast/DNN超解像/色空間補正等が一切引き継がれず、フルスクリーン
+                // だけ画質が落ちてしまう（UseGpuPresenterも同様に未設定のままになる）。
+                var visual = new FullScreenVisualSettings
+                {
+                    HwAccel = Player.HardwareAcceleration,
+                    Denoise = Player.Denoise,
+                    Deinterlace = Player.Deinterlace,
+                    DynamicContrast = Player.DynamicContrast,
+                    ColorMatrixMode = Player.ColorMatrixMode,
+                    Contrast = Player.Contrast,
+                    Saturation = Player.Saturation,
+                    Gamma = Player.Gamma,
+                    SharpAmount = Player.SharpAmount,
+                    DnnEnabled = Player.DnnSuperResolutionEnabled,
+                    DnnModelFileName = Player.DnnModelFileName,
+                    SuperResolutionScale = Player.SuperResolutionScale,
+                };
+
                 Player.Pause();
                 Player.Source = null;
                 _isPlaying = false;
@@ -1653,7 +1764,8 @@ namespace VerticalPlayer
                     isMuted: _isMuted,
                     speed: speed,
                     frameMs: _frameIntervalMs,
-                    rotationAngle: angle);
+                    rotationAngle: angle,
+                    visual: visual);
 
                 fs.ShowDialog(); // 閉じるまでここでブロック
                 Trace("ToggleFullScreen: FullScreenWindow closed");

@@ -81,8 +81,20 @@ namespace VerticalPlayer.Media
         private static readonly string DnnModelsDir = Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory, "models");
         private const string DnnTrtCacheDir = @"X:\Temp\VerticalPlayer\trtcache";
-        private static readonly string DnnTrtCacheBackupDir = Path.Combine(
-            AppDomain.CurrentDomain.BaseDirectory, "trtcache_backup");
+
+        /// <summary>trtcache（RAMディスク運用想定）の永続バックアップ先。
+        /// 既定値は「%LOCALAPPDATA%\VerticalPlayer\trtcache_backup」というOS標準の
+        /// 固定パスとした。以前はexe直下（AppDomain.CurrentDomain.BaseDirectory基準）
+        /// だったため、Debug/Release等ビルド構成違いで出力フォルダが変わるたびに
+        /// バックアップ先も分裂し、同じRAMディスクキャッシュに対して複数のバックアップが
+        /// 無駄にストレージを消費する問題があった。設定パネルから上書きできるよう、
+        /// 通常のプロパティ（setter付き）として公開する。</summary>
+        public string TrtCacheBackupDir { get; set; } = GetDefaultTrtCacheBackupDir();
+
+        /// <summary>TrtCacheBackupDirの既定値を返す（設定パネルの「既定に戻す」用に公開）。</summary>
+        public static string GetDefaultTrtCacheBackupDir() => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "VerticalPlayer", "trtcache_backup");
 
         private string _dnnModelFileName = "4x-UltraSharpV2_Lite_fp16_op17.onnx"; // 既定値（後方互換）
         private int _dnnScale = 4;
@@ -140,7 +152,7 @@ namespace VerticalPlayer.Media
 
             if (_dnnSrEnabled)
             {
-                DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, DnnTrtCacheBackupDir);
+                DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, TrtCacheBackupDir);
                 _dnnSr = new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
             }
         }
@@ -172,7 +184,7 @@ namespace VerticalPlayer.Media
             {
                 // trtcacheはRAMディスク等の揮発ストレージ運用のため、無ければ
                 // exe直下の永続バックアップから復元してからエンジンを読む
-                DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, DnnTrtCacheBackupDir);
+                DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, TrtCacheBackupDir);
                 _dnnSr ??= new DnnSuperResolutionEngine(
                     Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
                 // DNN側で拡大するため、GPU側のLanczos超解像は二重適用を避けるため無効化する
@@ -190,7 +202,7 @@ namespace VerticalPlayer.Media
         /// UIスレッド上で直接呼ばないこと）。</summary>
         public bool PrebuildDnnEngine(int width, int height)
         {
-            DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, DnnTrtCacheBackupDir);
+            DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, TrtCacheBackupDir);
             _dnnSr ??= new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
             GpuPresenter?.SetSuperResolution(1f);
             return _dnnSr.EnsureEngine(width, height);
@@ -199,7 +211,7 @@ namespace VerticalPlayer.Media
         /// <summary>trtcache（RAMディスク等の揮発ストレージ）が使われていれば、
         /// exe直下の永続バックアップへ丸ごとコピーする。アプリ終了時に呼ぶこと。</summary>
         public void BackupDnnTrtCacheIfUsed() =>
-            DnnSuperResolutionEngine.BackupCache(DnnTrtCacheDir, DnnTrtCacheBackupDir);
+            DnnSuperResolutionEngine.BackupCache(DnnTrtCacheDir, TrtCacheBackupDir);
 
         private void RaiseDnnBuildState(bool building) =>
             _ui.BeginInvoke(DispatcherPriority.Normal, new Action(() => DnnBuildStateChanged?.Invoke(building)));

@@ -53,6 +53,25 @@
                     <SolidColorBrush Color="#CC000000"/>
                 </Border.Background>
                 <StackPanel>
+                    <!-- 状態表示行（HW/SW・コーデック・実測fps・TensorRT/ビルド状態） -->
+                    <Grid Margin="0,0,0,8">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock x:Name="HwStatusLabel" Text="H/W" Foreground="#94A3B8"
+                                       FontSize="11" FontWeight="Bold" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="VideoCodecLabel" Text="" Foreground="#94A3B8"
+                                       FontSize="11" FontWeight="Bold" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                            <TextBlock x:Name="AudioCodecLabel" Text="" Foreground="#94A3B8"
+                                       FontSize="11" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                            <TextBlock x:Name="AudioChannelLabel" Text="" Foreground="#94A3B8"
+                                       FontSize="11" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                            <TextBlock x:Name="ActualFpsLabel" Text="" Foreground="#4CD964"
+                                       FontSize="13" FontWeight="Bold" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                        </StackPanel>
+                        <TextBlock x:Name="StatusText" Text="" HorizontalAlignment="Right"
+                                   FontSize="11" FontWeight="Bold" VerticalAlignment="Center"
+                                   Foreground="#94A3B8"/>
+                    </Grid>
+
                     <!-- シーク行 -->
                     <Grid Margin="0,0,0,10">
                         <Grid.ColumnDefinitions>

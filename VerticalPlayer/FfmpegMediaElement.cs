@@ -168,6 +168,17 @@ namespace VerticalPlayer.Media
             set => _engine.DenoiseRequested = value;
         }
 
+        /// <summary>trtcache（RAMディスク運用想定）の永続バックアップ先。設定パネルから
+        /// 上書き可能にするための委譲プロパティ。</summary>
+        public string TrtCacheBackupDir
+        {
+            get => _engine.TrtCacheBackupDir;
+            set => _engine.TrtCacheBackupDir = value;
+        }
+
+        /// <summary>TrtCacheBackupDirの既定値（%LOCALAPPDATA%\VerticalPlayer\trtcache_backup）。</summary>
+        public static string GetDefaultTrtCacheBackupDir() => AVEngine.GetDefaultTrtCacheBackupDir();
+
         private bool _dynamicContrast;
         /// <summary>ダイナミックコントラスト（段階4、シーン平均輝度ベースの簡易オートレベル）。
         /// GPU描画パス(UseGpuPresenter)が有効な時のみ実際に効果がある。

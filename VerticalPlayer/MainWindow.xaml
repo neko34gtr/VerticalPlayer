@@ -315,7 +315,15 @@
             </Setter>
         </Style>
 
-        <!-- ========== CheckBox ========== -->
+        <!-- ========== CheckBox（スイッチ風） ==========
+             既存コードとの互換性のためTargetTypeはCheckBoxのまま、見た目のみ
+             トグルスイッチ（トラック＋ノブがスライド）に変更している。
+             IsChecked/Checked/Unchecked等のAPIは従来のCheckBoxと完全互換。
+             ノブの移動はRenderTransform（TranslateTransform）ではなく、Knob自体の
+             HorizontalAlignmentをLeft/Rightで切り替える方式にしている。Setter.TargetNameは
+             名前付きTransformを直接ターゲットにするとXAMLコンパイラのNameScope解決順の
+             都合でMC4111（ターゲットが見つからない）になることがあるため、FrameworkElement
+             自身のプロパティを切り替える方式の方が確実。 -->
         <Style x:Key="ModernCheck" TargetType="CheckBox">
             <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
             <Setter Property="FontSize"   Value="12"/>
@@ -323,17 +331,18 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="CheckBox">
-                        <DockPanel>
-                            <Border x:Name="Box" Width="16" Height="16" DockPanel.Dock="Left" Margin="0,0,8,0"
-                                    CornerRadius="4" BorderBrush="#334155" BorderThickness="1.5" Background="Transparent">
-                                <TextBlock x:Name="Mark" Text="✓" Foreground="White" FontSize="10"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+                        <DockPanel LastChildFill="True">
+                            <Border x:Name="Track" DockPanel.Dock="Left" Width="34" Height="18"
+                                    CornerRadius="9" Background="#334155" Margin="0,0,8,0"
+                                    VerticalAlignment="Center">
+                                <Border x:Name="Knob" Width="14" Height="14" CornerRadius="7"
+                                        Background="White" HorizontalAlignment="Left" Margin="2,0,2,0"/>
                             </Border>
                             <ContentPresenter VerticalAlignment="Center"/>
                         </DockPanel>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsChecked" Value="True">
-                                <Setter TargetName="Box" Property="Background">
+                                <Setter TargetName="Track" Property="Background">
                                     <Setter.Value>
                                         <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
                                             <GradientStop Color="#3B82F6" Offset="0"/>
@@ -341,8 +350,10 @@
                                         </LinearGradientBrush>
                                     </Setter.Value>
                                 </Setter>
-                                <Setter TargetName="Box"  Property="BorderBrush" Value="Transparent"/>
-                                <Setter TargetName="Mark" Property="Visibility"  Value="Visible"/>
+                                <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Track" Property="Opacity" Value="0.85"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -943,12 +954,9 @@
                                     <TextBlock Text="表示モード" Foreground="{StaticResource TextMuted}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,0,0,6"
                                               />
-                                    <RadioButton x:Name="NormalMode" GroupName="ViewMode"
-                                                 Content="通常モード" Style="{StaticResource ModernRadio}"
-                                                 IsChecked="True" Checked="Mode_Checked"/>
-                                    <RadioButton x:Name="ForceVerticalMode" GroupName="ViewMode"
-                                                 Content="強制縦型モード" Style="{StaticResource ModernRadio}"
-                                                 Checked="Mode_Checked"/>
+                                    <CheckBox x:Name="ForceVerticalMode" Content="強制縦型モード"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                              Checked="Mode_Checked" Unchecked="Mode_Checked"/>
 
                                     <TextBlock Text="表示倍率" Foreground="{StaticResource TextMuted}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
@@ -973,17 +981,42 @@
                                         <ComboBoxItem Content="強制 9:16" Tag="Force9x16"/>
                                     </ComboBox>
 
-                                    <CheckBox x:Name="DeinterlaceCheck" Content="デインターレース（簡易ブレンド方式）"
+                                    <Border Style="{StaticResource Separator}"/>
+
+                                    <!-- 各種ON/OFF設定（スイッチ） -->
+                                    <CheckBox x:Name="DeinterlaceCheck" Content="デインターレース"
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="Deinterlace_Changed" Unchecked="Deinterlace_Changed"/>
 
-                                    <CheckBox x:Name="DenoiseCheck" Content="ノイズリダクション（hqdn3d）"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                    <CheckBox x:Name="DenoiseCheck" Content="ノイズリダクション"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
                                               Checked="Denoise_Changed" Unchecked="Denoise_Changed"/>
 
-                                    <CheckBox x:Name="DynamicContrastCheck" Content="ダイナミックコントラスト（簡易オートレベル・GPU）"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                    <CheckBox x:Name="DynamicContrastCheck" Content="ダイナミックコントラスト"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
                                               Checked="DynamicContrast_Changed" Unchecked="DynamicContrast_Changed"/>
+
+                                    <CheckBox x:Name="DnnWaitForBuildCheck" Content="DNN切替再生待ち"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"/>
+
+                                    <CheckBox x:Name="HwAccelCheck" Content="ハードウェアデコード"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
+                                              Checked="HwAccel_Changed" Unchecked="HwAccel_Changed"/>
+                                    <TextBlock x:Name="DecodeModeText" Text="デコード: -"
+                                               Foreground="{StaticResource TextPrimary}"
+                                               FontSize="16" FontWeight="Bold" FontFamily="Consolas" Margin="0,0,0,4"/>
+
+                                    <CheckBox x:Name="AlwaysOnTopCheck" Content="常に最前面"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                              Checked="AlwaysOnTop_Changed" Unchecked="AlwaysOnTop_Changed"/>
+                                    <CheckBox x:Name="AutoPlayNextCheck" Content="次ファイル自動再生"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
+                                              Checked="AutoPlayNext_Changed" Unchecked="AutoPlayNext_Changed"/>
+                                    <CheckBox x:Name="FpsCounterCheck" Content="fpsカウンタ表示"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
+                                              Checked="FpsCounter_Changed" Unchecked="FpsCounter_Changed"/>
+
+                                    <Border Style="{StaticResource Separator}"/>
 
                                     <TextBlock Text="超解像（Lanczos＋アンシャープ / DNN・GPU）" Foreground="{StaticResource TextMuted}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
@@ -994,12 +1027,24 @@
                                         <ComboBoxItem Content="2.0倍" Tag="2.0"/>
                                         <ComboBoxItem x:Name="DnnComboItem" Content="DNN/TensorRT" Tag="dnn"/>
                                     </ComboBox>
-                                    <CheckBox x:Name="DnnWaitForBuildCheck" Content="DNN切替時はビルド完了まで待つ（未チェック=バックグラウンドビルド）"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"/>
                                     <TextBlock Text="DNNモデル（差し替え用、modelsフォルダを自動スキャン）" Foreground="{StaticResource TextMuted}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
                                     <ComboBox x:Name="DnnModelCombo" Margin="0,0,0,6"
                                               SelectionChanged="DnnModel_Changed"/>
+
+                                    <!-- TensorRTキャッシュのバックアップ先（RAMディスク運用時の保険）。
+                                         既定はビルド構成に依存しない%LOCALAPPDATA%配下の固定パスだが、
+                                         任意のフォルダへ変更できるようにしている。 -->
+                                    <TextBlock Text="TensorRTキャッシュのバックアップ先" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
+                                    <TextBox x:Name="TrtCacheBackupDirBox" Style="{StaticResource ModernTextBox}"
+                                             Margin="0,0,0,4" LostFocus="TrtCacheBackupDir_Changed"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                        <Button Content="開く" Style="{StaticResource SecondaryBtn}"
+                                                Margin="0,0,6,0" Click="OpenTrtCacheBackupDir_Click"/>
+                                        <Button Content="既定に戻す" Style="{StaticResource SecondaryBtn}"
+                                                Click="ResetTrtCacheBackupDir_Click"/>
+                                    </StackPanel>
 
                                     <TextBlock Text="比較ビュー（TrueTheater風）" Foreground="{StaticResource TextMuted}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
@@ -1012,24 +1057,6 @@
 
                                     <Border Style="{StaticResource Separator}"/>
 
-                                    <!-- ハードウェア設定 -->
-                                    <TextBlock Text="ハードウェア" Foreground="{StaticResource TextMuted}"
-                                               FontSize="10" FontWeight="SemiBold" Margin="0,0,0,8"
-                                              />
-                                    <CheckBox x:Name="HwAccelCheck" Content="ハードウェアアクセラレーション"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4"
-                                              Checked="HwAccel_Changed" Unchecked="HwAccel_Changed"/>
-                                    <TextBlock x:Name="DecodeModeText" Text="デコード: -"
-                                               Foreground="{StaticResource TextPrimary}"
-                                               FontSize="16" FontWeight="Bold" FontFamily="Consolas" Margin="0,0,0,4"/>
-                                    <CheckBox x:Name="AlwaysOnTopCheck" Content="常に最前面"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4"
-                                              Checked="AlwaysOnTop_Changed" Unchecked="AlwaysOnTop_Changed"/>
-                                    <CheckBox x:Name="AutoPlayNextCheck" Content="再生終了時に次のファイルを自動再生"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
-                                              Checked="AutoPlayNext_Changed" Unchecked="AutoPlayNext_Changed"/>
-
-                                    <Border Style="{StaticResource Separator}"/>
 
                                     <!-- 再生速度 -->
                                     <DockPanel Margin="0,0,0,4">

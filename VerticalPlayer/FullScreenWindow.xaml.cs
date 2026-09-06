@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
@@ -11,6 +12,27 @@ using System.Windows.Threading;
 
 namespace VerticalPlayer
 {
+    /// <summary>MainWindow側の表示関連設定をFullScreenWindowへ引き継ぐためのスナップショット。
+    /// FullScreenWindowのPlayerはMainWindowのPlayerとは別インスタンス（別のAVEngineを内部に持つ）
+    /// のため、明示的に渡さない限りHW/Denoise/DynamicContrast/DNN超解像/色空間補正/
+    /// コントラスト等の設定は一切引き継がれず、既定値（多くはOFF、UseGpuPresenterに至っては
+    /// 従来は一度もtrueにされていなかった）のまま再生されてしまっていた。</summary>
+    public sealed class FullScreenVisualSettings
+    {
+        public bool HwAccel;
+        public bool Denoise;
+        public bool DynamicContrast;
+        public bool Deinterlace;
+        public int ColorMatrixMode;
+        public double Contrast;
+        public double Saturation;
+        public double Gamma;
+        public float SharpAmount;
+        public bool DnnEnabled;
+        public string? DnnModelFileName;
+        public float SuperResolutionScale;
+    }
+
     public partial class FullScreenWindow : Window
     {
         private readonly MainWindow _owner;
@@ -23,6 +45,9 @@ namespace VerticalPlayer
         private bool _wasPlayingBeforeSeekDrag = false;
         private bool _dragCompleting = false;
         private double _frameMs = 100;
+        private MediaInfoNative? _mediaInfo = null;
+        private int _actualFrameCount = 0;
+        private readonly Stopwatch _fpsStopwatch = Stopwatch.StartNew();
 
         private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(100) };
         private readonly DispatcherTimer _osdTimer = new() { Interval = TimeSpan.FromSeconds(3) };
@@ -30,13 +55,37 @@ namespace VerticalPlayer
         // ── コンストラクタ ──
         public FullScreenWindow(MainWindow owner, Uri source, TimeSpan position,
                                 double volume, bool isMuted, double speed,
-                                double frameMs, double rotationAngle)
+                                double frameMs, double rotationAngle,
+                                FullScreenVisualSettings visual)
         {
             InitializeComponent();
             _owner = owner;
             _frameMs = frameMs;
             _isMuted = isMuted;
             _prevVol = volume;
+
+            // ── MainWindow側の表示設定を引き継ぐ ──
+            // UseGpuPresenter=trueにしない限り、GPU描画パス（D3DImage経由）が有効化されず
+            // WriteableBitmapフォールバックのままになる。ダイナミックコントラスト・超解像
+            // （Lanczos/DNN両方）・色空間補正はすべてこのGPU描画パス上でのみ動作するため、
+            // これが未設定だとフルスクリーンだけ画質が明らかに落ちる（コントラスト/彩度/
+            // ガンマのみCPU版フォールバックがあるため多少は反映されるが、それ以外は完全無効）。
+            Player.UseGpuPresenter = true;
+            Player.HardwareAcceleration = visual.HwAccel;
+            Player.Denoise = visual.Denoise;
+            Player.Deinterlace = visual.Deinterlace;
+            Player.DynamicContrast = visual.DynamicContrast;
+            Player.ColorMatrixMode = visual.ColorMatrixMode;
+            Player.Contrast = visual.Contrast;
+            Player.Saturation = visual.Saturation;
+            Player.Gamma = visual.Gamma;
+            Player.SharpAmount = visual.SharpAmount;
+            if (!string.IsNullOrEmpty(visual.DnnModelFileName))
+                Player.DnnModelFileName = visual.DnnModelFileName;
+            if (visual.DnnEnabled)
+                Player.DnnSuperResolutionEnabled = true; // 未ビルドの解像度ならバックグラウンドでビルドされる
+            else
+                Player.SuperResolutionScale = visual.SuperResolutionScale;
 
             VolSlider.Value = volume;
             SpeedLabel.Text = $"{speed:F1}×";
@@ -47,6 +96,32 @@ namespace VerticalPlayer
             if (rotationAngle != 0)
                 Player.LayoutTransform = new RotateTransform(rotationAngle);
             Player.DisplayRotation = rotationAngle;
+
+            // 実際のデコードモード（HW/SW）表示。MainWindow側と同じ考え方でDecodeModeChangedに連動させる。
+            Player.DecodeModeChanged += mode =>
+            {
+                HwStatusLabel.Text = mode.StartsWith("HW") ? "H/W" : "S/W";
+                HwStatusLabel.Foreground = mode.StartsWith("HW")
+                    ? new SolidColorBrush(Color.FromRgb(0x22, 0xD3, 0xEE))
+                    : new SolidColorBrush(Color.FromRgb(0x94, 0xA3, 0xB8));
+            };
+
+            // 実測FPS表示（1秒間隔で実際に表示されたフレーム数を集計。MainWindow側と同じ方式）
+            Player.FrameDisplayed += _ => OnFrameDisplayedForFps();
+
+            // DNN超解像エンジンのビルド状態表示（ビルド中は赤、ビルド済み＆再生中はTensorRT再生中を黄色）
+            Player.DnnBuildStateChanged += building =>
+            {
+                if (building)
+                {
+                    StatusText.Text = "超解像エンジンをビルド中…";
+                    StatusText.Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0x3B, 0x30));
+                }
+                else
+                {
+                    UpdateDnnStatusText();
+                }
+            };
 
             _timer.Tick += Timer_Tick;
             _osdTimer.Tick += (s, e) => { _osdTimer.Stop(); Osd.Visibility = Visibility.Collapsed; };
@@ -67,6 +142,94 @@ namespace VerticalPlayer
             Trace($"FS MediaOpened: {Player.NaturalVideoWidth}x{Player.NaturalVideoHeight}");
             if (Player.NaturalDuration.HasTimeSpan)
                 SeekBar.Maximum = Player.NaturalDuration.TimeSpan.TotalSeconds;
+
+            // 新しいファイルを開いたので、旧ファイル用にビルド中/ビルド済みだったDNNエンジンは
+            // 手放し新ファイル用に作り直す（MainWindow側と同じ対策。JumpFileでのファイル送り時に必要）
+            Player.ResetDnnEngineForNewFile();
+
+            // HW/コーデック/fps系の状態表示更新用にMediaInfoNativeで詳細解析
+            if (Player.Source?.LocalPath != null)
+                AnalyzeAndShowMediaInfo(Player.Source.LocalPath);
+        }
+
+        // MediaInfoNativeで詳細解析し、コーデック表示ラベルとコマ送り間隔を更新する
+        // （MainWindow.AnalyzeAndShowMediaInfoと同じ考え方。FullScreenWindowは別インスタンスの
+        // Playerを持つため、コーデック表示もこちら側で独立して取得する必要がある）
+        private void AnalyzeAndShowMediaInfo(string path)
+        {
+            try
+            {
+                var mi = new MediaInfoNative(path);
+                if (!mi.Success)
+                {
+                    Trace($"FS MediaInfo: failed for {path}");
+                    _mediaInfo?.Dispose();
+                    _mediaInfo = null;
+                    UpdateCodecStatusBar();
+                    return;
+                }
+
+                double fps = mi.VideoFrameRate;
+                if (fps > 0) _frameMs = 1000.0 / fps;
+
+                _mediaInfo?.Dispose();
+                _mediaInfo = mi;
+                UpdateCodecStatusBar();
+            }
+            catch (Exception ex)
+            {
+                Trace($"FS AnalyzeAndShowMediaInfo EXCEPTION: {ex.Message}");
+            }
+        }
+
+        private void UpdateCodecStatusBar()
+        {
+            if (_mediaInfo == null || !_mediaInfo.Success)
+            {
+                VideoCodecLabel.Text = "";
+                AudioCodecLabel.Text = "";
+                AudioChannelLabel.Text = "";
+                return;
+            }
+
+            VideoCodecLabel.Text = _mediaInfo.VideoCodec ?? "";
+            AudioCodecLabel.Text = _mediaInfo.AudioCodec ?? "";
+            int ch = _mediaInfo.AudioChannelCount;
+            AudioChannelLabel.Text = ch switch
+            {
+                1 => "1.0",
+                2 => "2.0",
+                6 => "5.1",
+                8 => "7.1",
+                _ => ch > 0 ? $"{ch}ch" : ""
+            };
+        }
+
+        private void OnFrameDisplayedForFps()
+        {
+            _actualFrameCount++;
+            if (_fpsStopwatch.ElapsedMilliseconds >= 1000)
+            {
+                double fps = _actualFrameCount * 1000.0 / _fpsStopwatch.ElapsedMilliseconds;
+                ActualFpsLabel.Text = $"{fps:F1}fps";
+                _actualFrameCount = 0;
+                _fpsStopwatch.Restart();
+            }
+        }
+
+        // TensorRTエンジンで実際に再生中かどうかをStatusTextへ反映する（黄色）。MainWindow側と同じ考え方。
+        private void UpdateDnnStatusText()
+        {
+            if (Player.DnnSuperResolutionEnabled && Player.IsDnnReadyForCurrentResolution)
+            {
+                StatusText.Text = "TensorRTエンジンで再生中";
+                StatusText.Foreground = new SolidColorBrush(Color.FromRgb(0xFB, 0xBF, 0x24));
+            }
+            else
+            {
+                StatusText.Text = "";
+                StatusText.Foreground = new SolidColorBrush(Color.FromRgb(0x94, 0xA3, 0xB8));
+            }
         }
 
         private void Player_MediaEnded(object sender, RoutedEventArgs e)
@@ -235,6 +398,7 @@ namespace VerticalPlayer
         {
             Trace("FullScreenWindow: ExitFs");
             _timer.Stop(); _osdTimer.Stop();
+            _mediaInfo?.Dispose();
             _owner.ReturnFromFullScreen(
                 Player.Source, Player.Position,
                 Player.Volume, Player.SpeedRatio, _isPlaying);
