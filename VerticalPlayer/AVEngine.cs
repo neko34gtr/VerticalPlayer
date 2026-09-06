@@ -603,22 +603,12 @@ namespace VerticalPlayer.Media
                         {
                             while (myGen == _generation && ffmpeg.avcodec_receive_frame(vctx, frame) == 0)
                             {
-                                AVFrame* srcFrame = frame;
-                                if (hwActive)
-                                {
-                                    ffmpeg.av_frame_unref(swFrame);
-                                    if (ffmpeg.av_hwframe_transfer_data(swFrame, frame, 0) < 0)
-                                    {
-                                        Trace("av_hwframe_transfer_data failed - frame skipped");
-                                        continue;
-                                    }
-                                    srcFrame = swFrame;
-                                }
-
-                                // pts/diff の判定は sws_scale より先に行う。シーク直後の
+                                // pts/diff の判定は sws_scale・HW転送より先に行う。シーク直後の
                                 // キャッチアップ中は大量のフレームを drop することになるため、
                                 // 捨てるフレームに対して毎回スケーリング処理を行うのは無駄が
                                 // 大きく、それ自体がキャッチアップを遅らせる一因になっていた。
+                                // pts自体は frame（HW転送前）の best_effort_timestamp から取れるため、
+                                // HW転送より先に判定できる。
                                 double ptsSeconds = frame->best_effort_timestamp == ffmpeg.AV_NOPTS_VALUE
                                     ? GetMasterClockSec()
                                     : frame->best_effort_timestamp * ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base);
@@ -649,6 +639,41 @@ namespace VerticalPlayer.Media
                                     Trace($"Frame dropped (behind {(-diff) * 1000:F0}ms) pts={ptsSeconds:F3}");
                                     Thread.Sleep(1); // 大量ドロップ時にデコーダ/GPUを連続で叩き過ぎないようにする
                                     continue;
+                                }
+
+                                // ── DNN超解像がビルド済みだが、前フレームの推論(Task)がまだ
+                                // 完了していない場合 ──
+                                // このフレームはどうせ表示されない（直前のDNN結果を表示し続ける
+                                // だけ）ことが、この時点（pts判定直後）で確定している。HW転送・
+                                // denoise・sws_scale・フルバッファのMarshal.Copyはすべて無駄になる
+                                // ため、ここで丸ごとスキップする（従来はsws_scale等を終えた後の
+                                // DNN readiness/busy判定でようやく捨てていたため、推論が遅い状況
+                                // （＝DNNモードの典型状況）ほど無駄なCPU消費が積み重なっていた）。
+                                // キャッチアップ解除の判定だけは pts のみで完結するためここで行う。
+                                if (_dnnSrEnabled && GpuPresenter != null && _dnnSr != null &&
+                                    _dnnSr.IsReadyFor(w, h) && _dnnInferenceBusy)
+                                {
+                                    if (_catchingUpAfterSeek)
+                                    {
+                                        Trace($"CatchUp done (DNN busy skip) pts={ptsSeconds:F3} desiredPlaying={_desiredPlaying}");
+                                        _catchingUpAfterSeek = false;
+                                        _extBaseSeconds = ptsSeconds;
+                                        _extClock.Restart();
+                                        _extPlaying = _desiredPlaying;
+                                    }
+                                    continue;
+                                }
+
+                                AVFrame* srcFrame = frame;
+                                if (hwActive)
+                                {
+                                    ffmpeg.av_frame_unref(swFrame);
+                                    if (ffmpeg.av_hwframe_transfer_data(swFrame, frame, 0) < 0)
+                                    {
+                                        Trace("av_hwframe_transfer_data failed - frame skipped");
+                                        continue;
+                                    }
+                                    srcFrame = swFrame;
                                 }
 
                                 // ── ノイズリダクション（段階3）──

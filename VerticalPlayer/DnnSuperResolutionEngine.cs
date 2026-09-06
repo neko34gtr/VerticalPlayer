@@ -185,19 +185,26 @@ namespace VerticalPlayer.Media
                 // モデル仕様: input=[1,3,H,W] float16 0-1正規化NCHW
                 // NOTE: System.Half は OrtValue.CreateFromTensorObject 内部の型マッピングで
                 // 未対応（NullReferenceException）だったため、ONNX Runtime自前のFloat16構造体を使う
+                // NOTE: DenseTensorの多次元インデクサ([0,c,y,x])はアクセス毎にストライド計算＋
+                // 境界チェックが走り非常に遅い（480pでも約100万回/フレーム）。Buffer.Spanへ
+                // フラットオフセットで直書き/直読みすることで同じNCHWレイアウトのまま高速化する。
                 var inputTensor = new DenseTensor<OrtFloat16>(new[] { 1, 3, height, width });
+                var inSpan = inputTensor.Buffer.Span;
+                int inPlane = width * height;
                 for (int y = 0; y < height; y++)
                 {
                     int rowBase = y * width * 4;
+                    int rowOut = y * width;
                     for (int x = 0; x < width; x++)
                     {
                         int i = rowBase + x * 4;
                         byte b = srcBgra[i];
                         byte g = srcBgra[i + 1];
                         byte r = srcBgra[i + 2];
-                        inputTensor[0, 0, y, x] = (OrtFloat16)(r / 255f);
-                        inputTensor[0, 1, y, x] = (OrtFloat16)(g / 255f);
-                        inputTensor[0, 2, y, x] = (OrtFloat16)(b / 255f);
+                        int o = rowOut + x;
+                        inSpan[o] = (OrtFloat16)(r / 255f);
+                        inSpan[inPlane + o] = (OrtFloat16)(g / 255f);
+                        inSpan[inPlane * 2 + o] = (OrtFloat16)(b / 255f);
                     }
                 }
 
@@ -213,19 +220,45 @@ namespace VerticalPlayer.Media
                 int outW = outTensor.Dimensions[3];
 
                 var dst = new byte[outW * outH * 4];
-                for (int y = 0; y < outH; y++)
+                if (outTensor is DenseTensor<OrtFloat16> denseOut)
                 {
-                    int rowBase = y * outW * 4;
-                    for (int x = 0; x < outW; x++)
+                    var outSpan = denseOut.Buffer.Span;
+                    int outPlane = outW * outH;
+                    for (int y = 0; y < outH; y++)
                     {
-                        float rf = (float)outTensor[0, 0, y, x];
-                        float gf = (float)outTensor[0, 1, y, x];
-                        float bf = (float)outTensor[0, 2, y, x];
-                        int i = rowBase + x * 4;
-                        dst[i] = (byte)Math.Clamp(bf * 255f, 0, 255);
-                        dst[i + 1] = (byte)Math.Clamp(gf * 255f, 0, 255);
-                        dst[i + 2] = (byte)Math.Clamp(rf * 255f, 0, 255);
-                        dst[i + 3] = 255;
+                        int rowBase = y * outW * 4;
+                        int rowIn = y * outW;
+                        for (int x = 0; x < outW; x++)
+                        {
+                            int o = rowIn + x;
+                            float rf = (float)outSpan[o];
+                            float gf = (float)outSpan[outPlane + o];
+                            float bf = (float)outSpan[outPlane * 2 + o];
+                            int i = rowBase + x * 4;
+                            dst[i] = (byte)Math.Clamp(bf * 255f, 0, 255);
+                            dst[i + 1] = (byte)Math.Clamp(gf * 255f, 0, 255);
+                            dst[i + 2] = (byte)Math.Clamp(rf * 255f, 0, 255);
+                            dst[i + 3] = 255;
+                        }
+                    }
+                }
+                else
+                {
+                    // DenseTensorでない場合のみ、安全側のフォールバックとして従来のインデクサ経由にする
+                    for (int y = 0; y < outH; y++)
+                    {
+                        int rowBase = y * outW * 4;
+                        for (int x = 0; x < outW; x++)
+                        {
+                            float rf = (float)outTensor[0, 0, y, x];
+                            float gf = (float)outTensor[0, 1, y, x];
+                            float bf = (float)outTensor[0, 2, y, x];
+                            int i = rowBase + x * 4;
+                            dst[i] = (byte)Math.Clamp(bf * 255f, 0, 255);
+                            dst[i + 1] = (byte)Math.Clamp(gf * 255f, 0, 255);
+                            dst[i + 2] = (byte)Math.Clamp(rf * 255f, 0, 255);
+                            dst[i + 3] = 255;
+                        }
                     }
                 }
 
@@ -271,19 +304,25 @@ namespace VerticalPlayer.Media
 
                 try
                 {
+                    // NOTE: DenseTensorの多次元インデクサはアクセス毎にストライド計算＋境界
+                    // チェックが走り非常に遅いため、Buffer.Spanへフラットオフセットで直書きする。
                     var inputTensor = new DenseTensor<OrtFloat16>(new[] { 1, 3, height, width });
+                    var inSpan = inputTensor.Buffer.Span;
+                    int inPlane = width * height;
                     for (int y = 0; y < height; y++)
                     {
                         int rowBase = y * width * 4;
+                        int rowOut = y * width;
                         for (int x = 0; x < width; x++)
                         {
                             int i = rowBase + x * 4;
                             byte b = srcBgra[i];
                             byte g = srcBgra[i + 1];
                             byte r = srcBgra[i + 2];
-                            inputTensor[0, 0, y, x] = (OrtFloat16)(r / 255f);
-                            inputTensor[0, 1, y, x] = (OrtFloat16)(g / 255f);
-                            inputTensor[0, 2, y, x] = (OrtFloat16)(b / 255f);
+                            int o = rowOut + x;
+                            inSpan[o] = (OrtFloat16)(r / 255f);
+                            inSpan[inPlane + o] = (OrtFloat16)(g / 255f);
+                            inSpan[inPlane * 2 + o] = (OrtFloat16)(b / 255f);
                         }
                     }
 
@@ -352,20 +391,26 @@ namespace VerticalPlayer.Media
             {
                 try
                 {
-                    // 入力は引き続きCPUで変換（段階6-3-1未着手）
+                    // 入力は引き続きCPUで変換（段階6-3-1未着手）。DenseTensorの多次元インデクサは
+                    // アクセス毎にストライド計算＋境界チェックが走り非常に遅いため、
+                    // Buffer.Spanへフラットオフセットで直書きする。
                     var inputTensor = new DenseTensor<OrtFloat16>(new[] { 1, 3, height, width });
+                    var inSpan = inputTensor.Buffer.Span;
+                    int inPlane = width * height;
                     for (int y = 0; y < height; y++)
                     {
                         int rowBase = y * width * 4;
+                        int rowOut = y * width;
                         for (int x = 0; x < width; x++)
                         {
                             int i = rowBase + x * 4;
                             byte b = srcBgra[i];
                             byte g = srcBgra[i + 1];
                             byte r = srcBgra[i + 2];
-                            inputTensor[0, 0, y, x] = (OrtFloat16)(r / 255f);
-                            inputTensor[0, 1, y, x] = (OrtFloat16)(g / 255f);
-                            inputTensor[0, 2, y, x] = (OrtFloat16)(b / 255f);
+                            int o = rowOut + x;
+                            inSpan[o] = (OrtFloat16)(r / 255f);
+                            inSpan[inPlane + o] = (OrtFloat16)(g / 255f);
+                            inSpan[inPlane * 2 + o] = (OrtFloat16)(b / 255f);
                         }
                     }
 
@@ -387,8 +432,15 @@ namespace VerticalPlayer.Media
                         cudaMemInfo, TensorElementType.Float16, outputShape,
                         reg.DevicePointer, outElemCount * sizeof(ushort));
 
+                    // DenseTensorは内部的にT[]を保持しているため、.ToArray()は不要な
+                    // フルコピーになる。TryGetArrayで内部配列を直接取得し、取得できない
+                    // 場合のみ安全側でToArray()にフォールバックする。
+                    OrtFloat16[] inputArray =
+                        System.Runtime.InteropServices.MemoryMarshal.TryGetArray<OrtFloat16>(inputTensor.Buffer, out var inSeg) && inSeg.Array != null
+                            ? inSeg.Array
+                            : inputTensor.Buffer.ToArray();
                     using var inputOrtValue = OrtValue.CreateTensorValueFromMemory<OrtFloat16>(
-                        inputTensor.Buffer.ToArray(), new long[] { 1, 3, height, width });
+                        inputArray, new long[] { 1, 3, height, width });
 
                     using var ioBinding = _session.CreateIoBinding();
                     ioBinding.BindInput(_inputName, inputOrtValue);
