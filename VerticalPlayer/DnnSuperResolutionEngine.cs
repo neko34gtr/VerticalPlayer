@@ -36,7 +36,25 @@ namespace VerticalPlayer.Media
         private bool _lastInitFailed;
         private bool _loggedInferError;
         private bool _loggedCudaError;
+        private bool _loggedZeroCopyError;
         private readonly Dictionary<IntPtr, CudaD3D11BufferMap> _cudaOutputRegistrations = new();
+        // 段階6-3-1: 入力側ゼロコピー用のCUDA登録（出力用と同じ考え方、ポインタ単位でキャッシュ）
+        private readonly Dictionary<IntPtr, CudaD3D11BufferMap> _cudaInputRegistrations = new();
+
+        // IoBinding/OrtMemoryInfo/RunOptionsは解像度が同じ間は使い回せるにもかかわらず、
+        // 従来は毎フレームnew→using Disposeしていた（ネイティブ相互運用オブジェクトの
+        // 生成/破棄コストを毎フレーム払っていた）。セッション単位で1回だけ作り、
+        // DisposeSession（＝セッション破棄）のタイミングでのみ解放する。
+        private OrtMemoryInfo? _cudaMemInfo;
+        private RunOptions? _runOptions;
+        private OrtIoBinding? _ioBinding;
+
+        private void EnsureRunInfra()
+        {
+            _cudaMemInfo ??= new OrtMemoryInfo("Cuda", OrtAllocatorType.DeviceAllocator, 0, OrtMemType.Default);
+            _runOptions ??= new RunOptions();
+            _ioBinding ??= _session!.CreateIoBinding();
+        }
 
         /// <summary>利用可能か。falseの間は呼び出し側で従来のLanczos版へフォールバックすること。</summary>
         public bool IsAvailable => _session != null;
@@ -423,13 +441,12 @@ namespace VerticalPlayer.Media
 
                     using var unmapScope = reg.Map();
 
-                    using var cudaMemInfo = new OrtMemoryInfo(
-                        "Cuda", OrtAllocatorType.DeviceAllocator, 0, OrtMemType.Default);
+                    EnsureRunInfra();
 
                     long outElemCount = (long)outWidth * outHeight * 3;
                     var outputShape = new long[] { 1, 3, outHeight, outWidth };
                     using var outputOrtValue = OrtValue.CreateTensorValueWithData(
-                        cudaMemInfo, TensorElementType.Float16, outputShape,
+                        _cudaMemInfo!, TensorElementType.Float16, outputShape,
                         reg.DevicePointer, outElemCount * sizeof(ushort));
 
                     // DenseTensorは内部的にT[]を保持しているため、.ToArray()は不要な
@@ -442,12 +459,9 @@ namespace VerticalPlayer.Media
                     using var inputOrtValue = OrtValue.CreateTensorValueFromMemory<OrtFloat16>(
                         inputArray, new long[] { 1, 3, height, width });
 
-                    using var ioBinding = _session.CreateIoBinding();
-                    ioBinding.BindInput(_inputName, inputOrtValue);
-                    ioBinding.BindOutput(_outputName, outputOrtValue);
-
-                    using var runOptions = new RunOptions();
-                    _session.RunWithBinding(runOptions, ioBinding);
+                    _ioBinding!.BindInput(_inputName, inputOrtValue);
+                    _ioBinding!.BindOutput(_outputName, outputOrtValue);
+                    _session.RunWithBinding(_runOptions!, _ioBinding);
 
                     // TensorRT/CUDA側の実行完了を、後段のCompute Shaderが読む前に保証する
                     CudaD3D11Interop.cudaDeviceSynchronize();
@@ -470,6 +484,76 @@ namespace VerticalPlayer.Media
             }
         }
 
+        /// <summary>段階6-3-1+6-3-4: 入力・出力ともにCPUを介さないゼロコピー版。
+        /// inputD3D11BufferPtrは、GpuFramePresenter.ConvertBgraToNchwHalfGpuによって
+        /// 呼び出し側で既にBGRA→NCHW half変換済みのバッファであることが前提（このメソッド自体は
+        /// 変換を一切行わない）。TryInferWithCudaOutputとの違いは入力側もCUDA相互運用経由で
+        /// 直接バインドする点のみで、それ以外（IoBinding/OrtMemoryInfo/RunOptionsの使い回し、
+        /// CUDA登録のキャッシュ）は同じ考え方。
+        /// 失敗時（GPU側の入力変換シェーダ未対応環境等）はfalseを返し、呼び出し側は
+        /// 従来のTryInferWithCudaOutput（CPU入力変換＋CUDA出力）へフォールバックすること。</summary>
+        public bool TryInferZeroCopy(IntPtr inputD3D11BufferPtr, int width, int height,
+            IntPtr outputD3D11BufferPtr, int outWidth, int outHeight)
+        {
+            if (_session == null || _inputName == null || _outputName == null) return false;
+            if (width != _builtWidth || height != _builtHeight) return false;
+            if (inputD3D11BufferPtr == IntPtr.Zero || outputD3D11BufferPtr == IntPtr.Zero) return false;
+
+            lock (_buildLock)
+            {
+                try
+                {
+                    if (!_cudaInputRegistrations.TryGetValue(inputD3D11BufferPtr, out var inReg))
+                    {
+                        inReg = new CudaD3D11BufferMap(inputD3D11BufferPtr);
+                        _cudaInputRegistrations[inputD3D11BufferPtr] = inReg;
+                    }
+                    if (!_cudaOutputRegistrations.TryGetValue(outputD3D11BufferPtr, out var outReg))
+                    {
+                        outReg = new CudaD3D11BufferMap(outputD3D11BufferPtr);
+                        _cudaOutputRegistrations[outputD3D11BufferPtr] = outReg;
+                    }
+
+                    using var unmapIn = inReg.Map();
+                    using var unmapOut = outReg.Map();
+
+                    EnsureRunInfra();
+
+                    long inElemCount = (long)width * height * 3;
+                    var inputShape = new long[] { 1, 3, height, width };
+                    using var inputOrtValue = OrtValue.CreateTensorValueWithData(
+                        _cudaMemInfo!, TensorElementType.Float16, inputShape,
+                        inReg.DevicePointer, inElemCount * sizeof(ushort));
+
+                    long outElemCount = (long)outWidth * outHeight * 3;
+                    var outputShape = new long[] { 1, 3, outHeight, outWidth };
+                    using var outputOrtValue = OrtValue.CreateTensorValueWithData(
+                        _cudaMemInfo!, TensorElementType.Float16, outputShape,
+                        outReg.DevicePointer, outElemCount * sizeof(ushort));
+
+                    _ioBinding!.BindInput(_inputName, inputOrtValue);
+                    _ioBinding!.BindOutput(_outputName, outputOrtValue);
+                    _session.RunWithBinding(_runOptions!, _ioBinding);
+
+                    CudaD3D11Interop.cudaDeviceSynchronize();
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    if (!_loggedZeroCopyError)
+                    {
+                        _loggedZeroCopyError = true;
+                        Trace($"DNN超解像(入力ゼロコピー) 失敗（詳細、以後この種のエラーは簡略ログ、CPU入力経路へフォールバック）: {ex}");
+                    }
+                    else
+                    {
+                        Trace($"DNN超解像(入力ゼロコピー) 失敗: {ex.GetType().Name}: {ex.Message}");
+                    }
+                    return false;
+                }
+            }
+        }
+
         private void DisposeSession()
         {
             // TryInferWithCudaOutput/EnsureEngineと同じロックを取ることで、それらが実行中の
@@ -485,6 +569,16 @@ namespace VerticalPlayer.Media
                 _builtHeight = 0;
                 _loggedInferError = false;
                 _loggedCudaError = false;
+                _loggedZeroCopyError = false;
+
+                // IoBinding/RunOptionsはセッションに紐づくため、セッション破棄と一緒に解放する
+                // （EnsureRunInfraが次回EnsureEngine成功時に作り直す）
+                _ioBinding?.Dispose();
+                _ioBinding = null;
+                _runOptions?.Dispose();
+                _runOptions = null;
+                _cudaMemInfo?.Dispose();
+                _cudaMemInfo = null;
 
                 // 解像度変更時、GpuFramePresenter側のCUDA用バッファも作り直されて古いポインタは
                 // 無効になるため、対応するCUDA登録も破棄しておく（キーがポインタなので放置すると
@@ -492,6 +586,9 @@ namespace VerticalPlayer.Media
                 foreach (var reg in _cudaOutputRegistrations.Values)
                     reg.Dispose();
                 _cudaOutputRegistrations.Clear();
+                foreach (var reg in _cudaInputRegistrations.Values)
+                    reg.Dispose();
+                _cudaInputRegistrations.Clear();
             }
         }
 

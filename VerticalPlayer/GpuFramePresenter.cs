@@ -115,6 +115,16 @@ namespace VerticalPlayer
         private long _dnnBufElemCount;
         private int _dnnBufW, _dnnBufH;
 
+        // ── DNN超解像 段階6-3-1（入力側ゼロコピー）：BGRA→NCHW half変換をGPU上で完結させる ──
+        private ID3D11ComputeShader? _bgraToNchwCs;
+        private ID3D11Texture2D? _dnnSrcTex;             // 入力BGRA原寸のアップロード先（Dynamic、DNN専用）
+        private ID3D11ShaderResourceView? _dnnSrcSrv;
+        private int _dnnSrcW, _dnnSrcH;
+        private ID3D11Buffer? _dnnInputBufCuda;          // 変換後NCHW half、CUDA相互運用専用（Default usage）
+        private ID3D11UnorderedAccessView? _uavDnnInputBufCuda;
+        private int _dnnInputCudaBufW, _dnnInputCudaBufH;
+        private long _dnnInputCudaBufElemCount;
+
         private int _w, _h;       // 原寸（デコード解像度）
         private int _outW, _outH; // 表示用最終サイズ（SR無効時は_w/_hと同じ）
         private bool _d3dReady;
@@ -625,7 +635,35 @@ void CSNchwToBgra(uint3 id : SV_DispatchThreadID)
         {
             if (_d3d11Device == null) return;
             _nchw2BgraCs = CompileCs(_d3d11Device, Nchw2BgraShaderSource, "CSNchwToBgra", "GpuNchw2Bgra");
+            _bgraToNchwCs = CompileCs(_d3d11Device, BgraToNchwShaderSource, "CSBgraToNchw", "GpuBgraToNchw");
         }
+
+        // ── DNN超解像 段階6-3-1（入力側ゼロコピー）：BGRAテクスチャ→NCHW float16平面バッファ ──
+        // SrcBgraはB8G8R8A8_UNormテクスチャ。UNormテクスチャをfloat4として読むと各チャンネルは
+        // ハードウェアにより自動的に0-1へ正規化される（CPU版の "/255f" と等価）ため、
+        // シェーダ側では追加の正規化計算が不要。DXGIのスウィズルにより.r/.g/.bは常に論理的な
+        // R/G/B成分を指す（メモリ上の格納順はB,G,R,Aだが、シェーダから見た成分の意味は
+        // フォーマット非依存で一定）。
+        private const string BgraToNchwShaderSource = @"
+Texture2D<float4> SrcBgra : register(t0);
+RWBuffer<float> DstNchw : register(u0); // bound as R16_Float UAV view, write as float (HW packs to fp16)
+
+[numthreads(8, 8, 1)]
+void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
+{
+    uint w, h;
+    SrcBgra.GetDimensions(w, h);
+    if (id.x >= w || id.y >= h) return;
+
+    float4 px = SrcBgra.Load(int3(id.xy, 0));
+    uint planeSize = w * h;
+    uint idx = id.y * w + id.x;
+
+    DstNchw[idx] = px.r;
+    DstNchw[planeSize + idx] = px.g;
+    DstNchw[2 * planeSize + idx] = px.b;
+}
+";
 
         /// <summary>DNN超解像用の中間バッファ（NCHW half平面バッファ、BGRA変換先テクスチャ）を
         /// 指定解像度に合わせて（必要な場合のみ）(再)作成する。</summary>
@@ -732,6 +770,137 @@ void CSNchwToBgra(uint3 id : SV_DispatchThreadID)
             if (!_d3dReady) return IntPtr.Zero;
             EnsureDnnCudaBuffer(width, height);
             return _dnnHalfBufCuda?.NativePointer ?? IntPtr.Zero;
+        }
+
+        // ── DNN超解像 段階6-3-1（入力側ゼロコピー）用 ──
+
+        /// <summary>入力BGRA原寸（デコード解像度、超解像前）のアップロード先テクスチャを
+        /// （必要な場合のみ）(再)作成する。CPUからMap/Unmapで書き込むための専用テクスチャで、
+        /// 通常再生の_uploadTex（表示用、EnsureSizeで管理）とは独立させている
+        /// （DNNモードでは通常のPresent()を呼ばないため_uploadTexが未確保の可能性があるのと、
+        /// サイズ管理のタイミングが表示用と食い違うことを避けるため）。</summary>
+        private void EnsureDnnSrcTex(int width, int height)
+        {
+            if (_d3d11Device == null) return;
+            if (_dnnSrcTex != null && _dnnSrcW == width && _dnnSrcH == height) return;
+
+            _dnnSrcSrv?.Dispose(); _dnnSrcSrv = null;
+            _dnnSrcTex?.Dispose(); _dnnSrcTex = null;
+            if (width <= 0 || height <= 0) return;
+
+            _dnnSrcTex = _d3d11Device.CreateTexture2D(new Texture2DDescription
+            {
+                Width = (uint)width,
+                Height = (uint)height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Dynamic,
+                BindFlags = BindFlags.ShaderResource,
+                CPUAccessFlags = CpuAccessFlags.Write,
+                MiscFlags = ResourceOptionFlags.None,
+            });
+            _dnnSrcSrv = _d3d11Device.CreateShaderResourceView(_dnnSrcTex);
+            _dnnSrcW = width;
+            _dnnSrcH = height;
+        }
+
+        /// <summary>段階6-3-1: DNN入力（変換後NCHW half、CUDA相互運用専用）バッファを
+        /// （必要な場合のみ）(再)作成する。出力用_dnnHalfBufCudaと対になる考え方だが、
+        /// こちらはCompute Shaderからの書き込み先になるためUnorderedAccessが必要。</summary>
+        private void EnsureDnnInputCudaBuffer(int width, int height)
+        {
+            if (_d3d11Device == null) return;
+            long neededElems = (long)width * height * 3;
+            if (_dnnInputBufCuda != null && _dnnInputCudaBufElemCount == neededElems &&
+                _dnnInputCudaBufW == width && _dnnInputCudaBufH == height)
+                return;
+
+            _uavDnnInputBufCuda?.Dispose(); _uavDnnInputBufCuda = null;
+            _dnnInputBufCuda?.Dispose(); _dnnInputBufCuda = null;
+            if (width <= 0 || height <= 0) return;
+
+            _dnnInputBufCuda = _d3d11Device.CreateBuffer(new BufferDescription
+            {
+                ByteWidth = (uint)(neededElems * sizeof(ushort)),
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.UnorderedAccess,
+                CPUAccessFlags = CpuAccessFlags.None,
+                MiscFlags = ResourceOptionFlags.None,
+                StructureByteStride = 0,
+            });
+            // NOTE: UnorderedAccessViewDescription.Bufferのフィールド名はVortice.Direct3D11の
+            // バージョンによって多少異なる場合がある（要実機ビルド確認、_srvDnnHalfBufCuda等の
+            // BufferShaderResourceViewと同じ考え方）。
+            _uavDnnInputBufCuda = _d3d11Device.CreateUnorderedAccessView(_dnnInputBufCuda, new UnorderedAccessViewDescription
+            {
+                Format = Vortice.DXGI.Format.R16_Float,
+                ViewDimension = Vortice.Direct3D11.UnorderedAccessViewDimension.Buffer,
+                Buffer = new BufferUnorderedAccessView { FirstElement = 0, NumElements = (uint)neededElems },
+            });
+
+            _dnnInputCudaBufElemCount = neededElems;
+            _dnnInputCudaBufW = width;
+            _dnnInputCudaBufH = height;
+        }
+
+        /// <summary>段階6-3-1: 指定解像度のDNN入力用CUDA相互運用専用バッファを（無ければ）確保し、
+        /// そのネイティブCOMポインタ(ID3D11Buffer*)を返す。呼び出し側(DnnSuperResolutionEngine)の
+        /// TryInferZeroCopyでcudaGraphicsD3D11RegisterResourceに登録することを想定。</summary>
+        public IntPtr EnsureDnnInputCudaBufferAndGetNativePointer(int width, int height)
+        {
+            if (!_d3dReady) return IntPtr.Zero;
+            EnsureDnnInputCudaBuffer(width, height);
+            return _dnnInputBufCuda?.NativePointer ?? IntPtr.Zero;
+        }
+
+        /// <summary>段階6-3-1: デコード直後のBGRA(CPU byte[])を、CPU側でのピクセル毎の
+        /// float/half変換を一切行わずGPU上でNCHW half平面バッファへ変換する。
+        /// 変換結果はEnsureDnnInputCudaBufferAndGetNativePointerで取得済みのバッファへ
+        /// 直接書き込まれるため、呼び出し側はこの後DnnSuperResolutionEngine.TryInferZeroCopyへ
+        /// 同じポインタを渡すだけでよい。
+        /// NOTE: Map/Unmap・Dispatch等はD3D11の直接コンテキスト(Immediate Context)を使うため、
+        /// 他のPresent系メソッドと同じスレッド（UIスレッド、Dispatcher経由）から呼び出すこと。
+        /// バックグラウンドスレッドから直接呼ぶとドライバによっては未定義動作になる。</summary>
+        public bool ConvertBgraToNchwHalfGpu(byte[] bgra, int width, int height, int stride)
+        {
+            if (!_d3dReady) return false;
+            if (_bgraToNchwCs == null) return false; // シェーダ未コンパイル環境→呼び出し側でCPU経路へフォールバック
+
+            EnsureDnnSrcTex(width, height);
+            EnsureDnnInputCudaBuffer(width, height);
+            if (_dnnSrcTex == null || _dnnSrcSrv == null || _uavDnnInputBufCuda == null || _d3d11Context == null)
+                return false;
+
+            try
+            {
+                var mapped = _d3d11Context.Map(_dnnSrcTex, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+                unsafe
+                {
+                    byte* dst = (byte*)mapped.DataPointer;
+                    int copyBytes = Math.Min(stride, (int)mapped.RowPitch);
+                    for (int y = 0; y < height; y++)
+                    {
+                        Marshal.Copy(bgra, y * stride, (IntPtr)(dst + y * mapped.RowPitch), copyBytes);
+                    }
+                }
+                _d3d11Context.Unmap(_dnnSrcTex, 0);
+
+                _d3d11Context.CSSetShader(_bgraToNchwCs);
+                _d3d11Context.CSSetShaderResources(0, new[] { _dnnSrcSrv });
+                _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnInputBufCuda });
+                _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
+                _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Trace($"GpuFramePresenter.ConvertBgraToNchwHalfGpu failed: {ex.Message}");
+                return false;
+            }
         }
 
         /// <summary>段階6-3-4: TensorRTがCUDA経由で直接書き込み済みのバッファ（
@@ -1271,6 +1440,11 @@ void CSNchwToBgra(uint3 id : SV_DispatchThreadID)
             _uavDnnUpload?.Dispose(); _uavDnnUpload = null;
             _srvDnnUpload?.Dispose(); _srvDnnUpload = null;
             _dnnUploadTex?.Dispose(); _dnnUploadTex = null;
+            _bgraToNchwCs?.Dispose(); _bgraToNchwCs = null;
+            _dnnSrcSrv?.Dispose(); _dnnSrcSrv = null;
+            _dnnSrcTex?.Dispose(); _dnnSrcTex = null;
+            _uavDnnInputBufCuda?.Dispose(); _uavDnnInputBufCuda = null;
+            _dnnInputBufCuda?.Dispose(); _dnnInputBufCuda = null;
             _cbEffects?.Dispose(); _cbEffects = null;
             _effectsCs?.Dispose(); _effectsCs = null;
             _d3d9Device?.Dispose(); _d3d9Device = null;

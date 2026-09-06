@@ -30,6 +30,18 @@
         /// CPUアップロードを一切行わずにそのままBGRAへ変換して表示する。</summary>
         void PresentDnnHalfAlreadyInBuffer(int width, int height);
 
+        /// <summary>段階6-3-1（入力側ゼロコピー化）専用。DNN入力（変換後NCHW half）用の
+        /// CUDA相互運用専用バッファを（無ければ）確保し、そのネイティブCOMポインタ
+        /// (ID3D11Buffer*)を返す。出力用のEnsureDnnCudaBufferAndGetNativePointerと対。</summary>
+        IntPtr EnsureDnnInputCudaBufferAndGetNativePointer(int width, int height);
+
+        /// <summary>段階6-3-1（入力側ゼロコピー化）専用。デコード直後のBGRA(CPU byte[])を、
+        /// CPU側でのピクセル毎の変換を一切行わずGPU上でNCHW half平面バッファへ変換し、
+        /// EnsureDnnInputCudaBufferAndGetNativePointerで取得済みのバッファへ直接書き込む。
+        /// D3D11の直接コンテキストを使うため、他のPresent系と同じスレッド（UIスレッド）から
+        /// 呼び出すこと。</summary>
+        bool ConvertBgraToNchwHalfGpu(byte[] bgra, int width, int height, int stride);
+
         /// <summary>コントラスト/彩度/ガンマ（段階2：Compute Shader版）を設定する。
         /// 値の意味・範囲は AVEngine.SetEffects と同一（-1〜1、0=無効）。</summary>
         void SetEffects(double contrast, double saturation, double gamma);
