@@ -129,6 +129,16 @@ namespace VerticalPlayer
         private int _outW, _outH; // 表示用最終サイズ（SR無効時は_w/_hと同じ）
         private bool _d3dReady;
 
+        // Immediate Context（_d3d11Context）を操作するメソッド群（EnsureSize/Present系/
+        // ConvertBgraToNchwHalfGpu）を横断して排他制御するためのロック。段階6-3-1で
+        // ConvertBgraToNchwHalfGpuを背景スレッド（DNN推論スレッド）から直接呼ぶように
+        // なったため、UIスレッド側のPresent系呼び出しと「CSSetShader→CSSetSRV/UAV→
+        // Dispatch→解除」という一連のシーケンスが割り込み合わないようにする必要がある
+        // （ID3D11Multithreadは個々のAPI呼び出し単位の保護であり、この種の複数呼び出し
+        // シーケンスの原子性までは保証しないため）。lockは同一スレッドから再入可能なので、
+        // Present→EnsureSizeのようなネスト呼び出しも問題なく動作する。
+        private readonly object _gpuLock = new();
+
         private const string EffectsShaderSource = @"
 cbuffer EffectsCB : register(b0)
 {
@@ -509,6 +519,26 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
                 null, Vortice.Direct3D.DriverType.Hardware, DeviceCreationFlags.BgraSupport,
                 levels, out _d3d11Device, out _d3d11Context).CheckError();
 
+            // 背景スレッド（DNN推論スレッド）から直接Immediate Contextを操作するようになったため
+            // （ConvertBgraToNchwHalfGpu）、ID3D11Multithreadで明示的に保護を有効化しておく。
+            // D3D11_CREATE_DEVICE_SINGLETHREADEDを指定していない限りランタイムは既定で内部
+            // クリティカルセクションによる保護を行うため本来は既定でtrueのはずだが、環境差の
+            // 保険として明示しておく。実際の排他制御の主体はこのクラス内の_gpuLockであり、
+            // ID3D11Multithreadは「個々のAPI呼び出し単位」の保護に過ぎず「CSSetShader→Dispatch
+            // までの一連の呼び出し」の原子性までは保証しないため、_gpuLockは省略できない。
+            try
+            {
+                using var mt = _d3d11Context!.QueryInterface<ID3D11Multithread>();
+                mt.SetMultithreadProtected(true);
+                Trace("GpuFramePresenter: ID3D11Multithread.SetMultithreadProtected(true) OK");
+            }
+            catch (Exception ex)
+            {
+                // 一部環境/Vorticeバージョンでインターフェース取得に失敗する可能性があるが、
+                // _gpuLockによる排他制御は別途行っているため致命的ではない。
+                Trace($"GpuFramePresenter: ID3D11Multithread unavailable ({ex.Message})、_gpuLockのみで排他制御");
+            }
+
             _d3d9 = D3D9.Direct3DCreate9Ex();
             var pp = new Vortice.Direct3D9.PresentParameters
             {
@@ -767,9 +797,12 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
         /// （_sharedTex11等の表示用リソースが未確保のままだと後段のPresentが失敗するため）。</summary>
         public IntPtr EnsureDnnCudaBufferAndGetNativePointer(int width, int height)
         {
-            if (!_d3dReady) return IntPtr.Zero;
-            EnsureDnnCudaBuffer(width, height);
-            return _dnnHalfBufCuda?.NativePointer ?? IntPtr.Zero;
+            lock (_gpuLock)
+            {
+                if (!_d3dReady) return IntPtr.Zero;
+                EnsureDnnCudaBuffer(width, height);
+                return _dnnHalfBufCuda?.NativePointer ?? IntPtr.Zero;
+            }
         }
 
         // ── DNN超解像 段階6-3-1（入力側ゼロコピー）用 ──
@@ -847,12 +880,17 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
 
         /// <summary>段階6-3-1: 指定解像度のDNN入力用CUDA相互運用専用バッファを（無ければ）確保し、
         /// そのネイティブCOMポインタ(ID3D11Buffer*)を返す。呼び出し側(DnnSuperResolutionEngine)の
-        /// TryInferZeroCopyでcudaGraphicsD3D11RegisterResourceに登録することを想定。</summary>
+        /// TryInferZeroCopyでcudaGraphicsD3D11RegisterResourceに登録することを想定。
+        /// _d3d11Device.CreateBuffer自体はデバイスレベルのAPIでスレッドセーフだが、他のContext
+        /// 操作系メソッドと一貫させるため念のため_gpuLockで保護している。</summary>
         public IntPtr EnsureDnnInputCudaBufferAndGetNativePointer(int width, int height)
         {
-            if (!_d3dReady) return IntPtr.Zero;
-            EnsureDnnInputCudaBuffer(width, height);
-            return _dnnInputBufCuda?.NativePointer ?? IntPtr.Zero;
+            lock (_gpuLock)
+            {
+                if (!_d3dReady) return IntPtr.Zero;
+                EnsureDnnInputCudaBuffer(width, height);
+                return _dnnInputBufCuda?.NativePointer ?? IntPtr.Zero;
+            }
         }
 
         /// <summary>段階6-3-1: デコード直後のBGRA(CPU byte[])を、CPU側でのピクセル毎の
@@ -860,46 +898,53 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
         /// 変換結果はEnsureDnnInputCudaBufferAndGetNativePointerで取得済みのバッファへ
         /// 直接書き込まれるため、呼び出し側はこの後DnnSuperResolutionEngine.TryInferZeroCopyへ
         /// 同じポインタを渡すだけでよい。
-        /// NOTE: Map/Unmap・Dispatch等はD3D11の直接コンテキスト(Immediate Context)を使うため、
-        /// 他のPresent系メソッドと同じスレッド（UIスレッド、Dispatcher経由）から呼び出すこと。
-        /// バックグラウンドスレッドから直接呼ぶとドライバによっては未定義動作になる。</summary>
+        /// スレッドについて: 追加最適化（UIスレッド同期待ちの排除）により、このメソッドは
+        /// DNN推論用の背景スレッドから直接呼ばれる想定に変更した。Immediate Contextへの
+        /// 複数API呼び出し（Map→Unmap→CSSetShader→CSSetSRV/UAV→Dispatch→解除）を一連の
+        /// アトミックな操作として扱うため、_gpuLockで他のPresent系メソッド（UIスレッド側）と
+        /// 排他制御している。ID3D11Multithreadの保護だけでは個々のAPI呼び出し単位までしか
+        /// 保証されず、この一連のシーケンスの途中に他スレッドのCSSetShader等が割り込むのを
+        /// 防げないため、_gpuLockは省略できない。</summary>
         public bool ConvertBgraToNchwHalfGpu(byte[] bgra, int width, int height, int stride)
         {
-            if (!_d3dReady) return false;
-            if (_bgraToNchwCs == null) return false; // シェーダ未コンパイル環境→呼び出し側でCPU経路へフォールバック
-
-            EnsureDnnSrcTex(width, height);
-            EnsureDnnInputCudaBuffer(width, height);
-            if (_dnnSrcTex == null || _dnnSrcSrv == null || _uavDnnInputBufCuda == null || _d3d11Context == null)
-                return false;
-
-            try
+            lock (_gpuLock)
             {
-                var mapped = _d3d11Context.Map(_dnnSrcTex, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
-                unsafe
+                if (!_d3dReady) return false;
+                if (_bgraToNchwCs == null) return false; // シェーダ未コンパイル環境→呼び出し側でCPU経路へフォールバック
+
+                EnsureDnnSrcTex(width, height);
+                EnsureDnnInputCudaBuffer(width, height);
+                if (_dnnSrcTex == null || _dnnSrcSrv == null || _uavDnnInputBufCuda == null || _d3d11Context == null)
+                    return false;
+
+                try
                 {
-                    byte* dst = (byte*)mapped.DataPointer;
-                    int copyBytes = Math.Min(stride, (int)mapped.RowPitch);
-                    for (int y = 0; y < height; y++)
+                    var mapped = _d3d11Context.Map(_dnnSrcTex, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+                    unsafe
                     {
-                        Marshal.Copy(bgra, y * stride, (IntPtr)(dst + y * mapped.RowPitch), copyBytes);
+                        byte* dst = (byte*)mapped.DataPointer;
+                        int copyBytes = Math.Min(stride, (int)mapped.RowPitch);
+                        for (int y = 0; y < height; y++)
+                        {
+                            Marshal.Copy(bgra, y * stride, (IntPtr)(dst + y * mapped.RowPitch), copyBytes);
+                        }
                     }
+                    _d3d11Context.Unmap(_dnnSrcTex, 0);
+
+                    _d3d11Context.CSSetShader(_bgraToNchwCs);
+                    _d3d11Context.CSSetShaderResources(0, new[] { _dnnSrcSrv });
+                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnInputBufCuda });
+                    _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
+                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+
+                    return true;
                 }
-                _d3d11Context.Unmap(_dnnSrcTex, 0);
-
-                _d3d11Context.CSSetShader(_bgraToNchwCs);
-                _d3d11Context.CSSetShaderResources(0, new[] { _dnnSrcSrv });
-                _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnInputBufCuda });
-                _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
-                _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
-                _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Trace($"GpuFramePresenter.ConvertBgraToNchwHalfGpu failed: {ex.Message}");
-                return false;
+                catch (Exception ex)
+                {
+                    Trace($"GpuFramePresenter.ConvertBgraToNchwHalfGpu failed: {ex.Message}");
+                    return false;
+                }
             }
         }
 
@@ -908,30 +953,33 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
         /// 一切行わずにそのままBGRAへ変換して表示する。PresentDnnHalfのCPUコピー省略版。</summary>
         public void PresentDnnHalfAlreadyInBuffer(int width, int height)
         {
-            if (!_d3dReady) return;
-            EnsureSize(width, height);
-            if (_sharedTex11 == null || _surface9 == null || _d3d11Context == null || _d3d11Device == null) return;
-            if (_nchw2BgraCs == null) return;
-
-            try
+            lock (_gpuLock)
             {
-                EnsureDnnBuffers(width, height); // _dnnUploadTex等の変換先は共通で使い回す
-                if (_dnnHalfBufCuda == null || _srvDnnHalfBufCuda == null || _dnnUploadTex == null ||
-                    _uavDnnUpload == null || _srvDnnUpload == null)
-                    return;
+                if (!_d3dReady) return;
+                EnsureSize(width, height);
+                if (_sharedTex11 == null || _surface9 == null || _d3d11Context == null || _d3d11Device == null) return;
+                if (_nchw2BgraCs == null) return;
 
-                _d3d11Context.CSSetShader(_nchw2BgraCs);
-                _d3d11Context.CSSetShaderResources(0, new[] { _srvDnnHalfBufCuda });
-                _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnUpload });
-                _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
-                _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
-                _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                try
+                {
+                    EnsureDnnBuffers(width, height); // _dnnUploadTex等の変換先は共通で使い回す
+                    if (_dnnHalfBufCuda == null || _srvDnnHalfBufCuda == null || _dnnUploadTex == null ||
+                        _uavDnnUpload == null || _srvDnnUpload == null)
+                        return;
 
-                RunPipelineAndComposite(width, height, _dnnUploadTex, _srvDnnUpload);
-            }
-            catch (Exception ex)
-            {
-                Trace($"GpuFramePresenter.PresentDnnHalfAlreadyInBuffer failed: {ex.Message}");
+                    _d3d11Context.CSSetShader(_nchw2BgraCs);
+                    _d3d11Context.CSSetShaderResources(0, new[] { _srvDnnHalfBufCuda });
+                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnUpload });
+                    _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
+                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+
+                    RunPipelineAndComposite(width, height, _dnnUploadTex, _srvDnnUpload);
+                }
+                catch (Exception ex)
+                {
+                    Trace($"GpuFramePresenter.PresentDnnHalfAlreadyInBuffer failed: {ex.Message}");
+                }
             }
         }
 
@@ -975,12 +1023,15 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
 
         public void EnsureSize(int width, int height)
         {
-            if (!_d3dReady) return;
-            if (width == _w && height == _h && _sharedTex11 != null && Math.Abs(_lastSrScale - _srScale) < 0.001f)
-                return;
-            _w = width; _h = height;
-            _lastSrScale = _srScale;
-            RecreateTextures();
+            lock (_gpuLock)
+            {
+                if (!_d3dReady) return;
+                if (width == _w && height == _h && _sharedTex11 != null && Math.Abs(_lastSrScale - _srScale) < 0.001f)
+                    return;
+                _w = width; _h = height;
+                _lastSrScale = _srScale;
+                RecreateTextures();
+            }
         }
 
         private bool SrActive => _srShaderReady && _srScale > 1f;
@@ -1121,29 +1172,32 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
 
         public void Present(byte[] bgra, int width, int height, int stride)
         {
-            if (!_d3dReady) return;
-            EnsureSize(width, height);
-            if (_uploadTex == null || _sharedTex11 == null || _surface9 == null || _d3d11Context == null) return;
-
-            try
+            lock (_gpuLock)
             {
-                var mapped = _d3d11Context.Map(_uploadTex, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
-                unsafe
+                if (!_d3dReady) return;
+                EnsureSize(width, height);
+                if (_uploadTex == null || _sharedTex11 == null || _surface9 == null || _d3d11Context == null) return;
+
+                try
                 {
-                    byte* dst = (byte*)mapped.DataPointer;
-                    int copyBytes = Math.Min(stride, (int)mapped.RowPitch);
-                    for (int y = 0; y < height; y++)
+                    var mapped = _d3d11Context.Map(_uploadTex, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+                    unsafe
                     {
-                        Marshal.Copy(bgra, y * stride, (IntPtr)(dst + y * mapped.RowPitch), copyBytes);
+                        byte* dst = (byte*)mapped.DataPointer;
+                        int copyBytes = Math.Min(stride, (int)mapped.RowPitch);
+                        for (int y = 0; y < height; y++)
+                        {
+                            Marshal.Copy(bgra, y * stride, (IntPtr)(dst + y * mapped.RowPitch), copyBytes);
+                        }
                     }
-                }
-                _d3d11Context.Unmap(_uploadTex, 0);
+                    _d3d11Context.Unmap(_uploadTex, 0);
 
-                RunPipelineAndComposite(width, height, _uploadTex, _srvUpload!);
-            }
-            catch (Exception ex)
-            {
-                Trace($"GpuFramePresenter.Present failed: {ex.Message}");
+                    RunPipelineAndComposite(width, height, _uploadTex, _srvUpload!);
+                }
+                catch (Exception ex)
+                {
+                    Trace($"GpuFramePresenter.Present failed: {ex.Message}");
+                }
             }
         }
 
@@ -1154,42 +1208,45 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
         /// widthHeightは推論結果（4倍後）の解像度。</summary>
         public void PresentDnnHalf(ushort[] nchwHalf, int width, int height)
         {
-            if (!_d3dReady) return;
-            EnsureSize(width, height);
-            if (_sharedTex11 == null || _surface9 == null || _d3d11Context == null || _d3d11Device == null) return;
-            if (_nchw2BgraCs == null) return; // シェーダ未コンパイル（コンパイル失敗環境）→呼び出し側でCPU経路にフォールバックすること
-
-            try
+            lock (_gpuLock)
             {
-                EnsureDnnBuffers(width, height);
-                if (_dnnHalfBuf == null || _srvDnnHalfBuf == null || _dnnUploadTex == null ||
-                    _uavDnnUpload == null || _srvDnnUpload == null)
-                    return;
+                if (!_d3dReady) return;
+                EnsureSize(width, height);
+                if (_sharedTex11 == null || _surface9 == null || _d3d11Context == null || _d3d11Device == null) return;
+                if (_nchw2BgraCs == null) return; // シェーダ未コンパイル（コンパイル失敗環境）→呼び出し側でCPU経路にフォールバックすること
 
-                var mapped = _d3d11Context.Map(_dnnHalfBuf, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
-                unsafe
+                try
                 {
-                    fixed (ushort* src = nchwHalf)
+                    EnsureDnnBuffers(width, height);
+                    if (_dnnHalfBuf == null || _srvDnnHalfBuf == null || _dnnUploadTex == null ||
+                        _uavDnnUpload == null || _srvDnnUpload == null)
+                        return;
+
+                    var mapped = _d3d11Context.Map(_dnnHalfBuf, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+                    unsafe
                     {
-                        Buffer.MemoryCopy(src, (void*)mapped.DataPointer,
-                            nchwHalf.Length * sizeof(ushort), nchwHalf.Length * sizeof(ushort));
+                        fixed (ushort* src = nchwHalf)
+                        {
+                            Buffer.MemoryCopy(src, (void*)mapped.DataPointer,
+                                nchwHalf.Length * sizeof(ushort), nchwHalf.Length * sizeof(ushort));
+                        }
                     }
+                    _d3d11Context.Unmap(_dnnHalfBuf, 0);
+
+                    // Pass: NCHW float16平面バッファ → BGRAテクスチャ（GPU上で完結、CPUループ不要）
+                    _d3d11Context.CSSetShader(_nchw2BgraCs);
+                    _d3d11Context.CSSetShaderResources(0, new[] { _srvDnnHalfBuf });
+                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnUpload });
+                    _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
+                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+
+                    RunPipelineAndComposite(width, height, _dnnUploadTex, _srvDnnUpload);
                 }
-                _d3d11Context.Unmap(_dnnHalfBuf, 0);
-
-                // Pass: NCHW float16平面バッファ → BGRAテクスチャ（GPU上で完結、CPUループ不要）
-                _d3d11Context.CSSetShader(_nchw2BgraCs);
-                _d3d11Context.CSSetShaderResources(0, new[] { _srvDnnHalfBuf });
-                _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnUpload });
-                _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
-                _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
-                _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
-
-                RunPipelineAndComposite(width, height, _dnnUploadTex, _srvDnnUpload);
-            }
-            catch (Exception ex)
-            {
-                Trace($"GpuFramePresenter.PresentDnnHalf failed: {ex.Message}");
+                catch (Exception ex)
+                {
+                    Trace($"GpuFramePresenter.PresentDnnHalf failed: {ex.Message}");
+                }
             }
         }
 

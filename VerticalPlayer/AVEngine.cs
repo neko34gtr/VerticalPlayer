@@ -793,12 +793,13 @@ namespace VerticalPlayer.Media
                                             {
                                                 try
                                                 {
-                                                    // 段階6-3-1+6-3-4: まず入力・出力ともゼロコピーを試す。
-                                                    // BGRA→NCHW half変換（GPU Compute Shader、ConvertBgraToNchwHalfGpu）は
-                                                    // D3D11の直接コンテキストを使うため、他のPresent系と同じくUIスレッドへ
-                                                    // 同期Invokeする（バックグラウンドスレッドから直接叩くとドライバに
-                                                    // よっては未定義動作になるため）。TensorRT本体の実行(RunWithBinding)は
-                                                    // このバックグラウンドスレッドのまま行い、UIスレッドはブロックしない。
+                                                    // 追加最適化: 入力ゼロコピー(段階6-3-1)＋IoBinding永続化に続き、
+                                                    // ConvertBgraToNchwHalfGpuのUIスレッド同期待ち(_ui.Invoke)を排除。
+                                                    // GpuFramePresenter側でID3D11Multithread.SetMultithreadProtected(true)
+                                                    // を有効化し、かつ_gpuLockでImmediate Context操作を排他制御するように
+                                                    // したため、この背景スレッド（DNN推論スレッド）から直接呼び出せる。
+                                                    // これによりUI描画のタイミング（フレームレンダリング中など）による
+                                                    // 推論スレッドのブロッキングが無くなる。
                                                     IntPtr outCudaBufPtr = gp.EnsureDnnCudaBufferAndGetNativePointer(upW, upH);
                                                     IntPtr inCudaBufPtr = gp.EnsureDnnInputCudaBufferAndGetNativePointer(bw, bh);
 
@@ -808,14 +809,11 @@ namespace VerticalPlayer.Media
                                                         bool convOk = false;
                                                         try
                                                         {
-                                                            _ui.Invoke(DispatcherPriority.Send, new Action(() =>
-                                                            {
-                                                                convOk = gp.ConvertBgraToNchwHalfGpu(bufCopy, bw, bh, bStride);
-                                                            }));
+                                                            convOk = gp.ConvertBgraToNchwHalfGpu(bufCopy, bw, bh, bStride);
                                                         }
                                                         catch (Exception ex)
                                                         {
-                                                            Trace($"ConvertBgraToNchwHalfGpu dispatch failed: {ex.Message}");
+                                                            Trace($"ConvertBgraToNchwHalfGpu failed: {ex.Message}");
                                                         }
 
                                                         if (convOk)

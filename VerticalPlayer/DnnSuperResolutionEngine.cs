@@ -132,6 +132,24 @@ namespace VerticalPlayer.Media
                             ["trt_profile_min_shapes"] = $"input:{shapeSpec}",
                             ["trt_profile_opt_shapes"] = $"input:{shapeSpec}",
                             ["trt_profile_max_shapes"] = $"input:{shapeSpec}",
+                            // 追加最適化1: ビルド時（キャッシュ生成時、初回のみ）のカーネル最適化強度を
+                            // 引き上げる。ランタイムコストには影響しない（ビルド結果はキャッシュされる
+                            // ため）。キー名・対応レベル範囲はONNX Runtime/TensorRTのバージョンに依存する
+                            // ため、未対応バージョンでは無視されるかエラーになる可能性がある点に注意。
+                            ["trt_builder_optimization_level"] = "3",
+                            // 追加最適化2: CUDA Graph Capture → 実機検証の結果、無効化した。
+                            // cudaGraphicsMapResources/UnmapResources（TryInferZeroCopy/
+                            // TryInferWithCudaOutputで毎フレーム呼んでいるD3D11-CUDA相互運用の
+                            // Map/Unmap）はCUDAの「キャプチャ不可能な操作」に該当し、TensorRTが
+                            // グラフキャプチャ中のストリームに対してこれを呼ぶと
+                            // 「CUDA error 900: operation not permitted when stream is
+                            // capturing」になることが実機トレースで確認された。この状態になると
+                            // ゼロコピー→CUDA IOBinding→CPU入力(half出力)の全フォールバックが
+                            // 連鎖的に失敗し続け、DNN側の表示更新が完全に止まる
+                            // （映像フリーズ・音声継続、要再起動）不具合の原因になっていた。
+                            // 現状の実装（毎フレームD3D11バッファをCUDA Map/Unmapする方式）とは
+                            // 構造的に相性が悪いため、恒久的に無効のままにする。
+                            // ["trt_cuda_graph_enable"] = "1",
                         };
                         trtOptions.UpdateOptions(trtDict);
                         so.AppendExecutionProvider_Tensorrt(trtOptions);
