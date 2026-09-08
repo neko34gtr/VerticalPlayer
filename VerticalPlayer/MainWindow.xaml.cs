@@ -53,6 +53,7 @@ namespace VerticalPlayer
         public bool IsForceVertical { get; set; }
         public double Rotation { get; set; }
         public bool HwAccel { get; set; } = true;
+        public bool PacketPrefetch { get; set; } // 新機能のため既定はOFF（動作確認が済むまでは明示的にONにしてもらう）
         public bool ShowFpsCounter { get; set; } = true;
 
         /// <summary>TensorRTキャッシュ(trtcache)の永続バックアップ先。未指定(null/空)の場合は
@@ -398,6 +399,7 @@ namespace VerticalPlayer
             PlayerRotation.Angle = _currentRotation;
             Player.DisplayRotation = _currentRotation;
             HwAccelCheck.IsChecked = s.HwAccel;
+            PrefetchCheck.IsChecked = s.PacketPrefetch;
             FpsCounterCheck.IsChecked = s.ShowFpsCounter;
             ActualFpsLabel.Visibility = s.ShowFpsCounter ? Visibility.Visible : Visibility.Collapsed;
 
@@ -498,6 +500,7 @@ namespace VerticalPlayer
                 IsForceVertical = ForceVerticalMode.IsChecked ?? false,
                 Rotation = _currentRotation,
                 HwAccel = HwAccelCheck.IsChecked ?? false,
+                PacketPrefetch = PrefetchCheck.IsChecked ?? false,
                 ShowFpsCounter = FpsCounterCheck.IsChecked ?? true,
                 TrtCacheBackupDir = string.IsNullOrWhiteSpace(TrtCacheBackupDirBox.Text)
                     ? null : TrtCacheBackupDirBox.Text.Trim(),
@@ -1415,6 +1418,29 @@ namespace VerticalPlayer
             else
             {
                 Trace($"HwAccel_Changed: requested={Player.HardwareAcceleration}（次に開くファイルから適用）");
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // パケット先読み（Stage1: Demux/Decode分離パイプライン）
+        // ─────────────────────────────────────────────────────────────────
+        private void Prefetch_Changed(object sender, RoutedEventArgs e)
+        {
+            Player.PacketPrefetch = PrefetchCheck.IsChecked ?? false;
+
+            if (Player.Source != null)
+            {
+                var pos = Player.Position;
+                bool wasPlaying = _isPlaying;
+                var src = Player.Source;
+                Trace($"Prefetch_Changed: requested={Player.PacketPrefetch} - 現在のファイルを再オープンして即時反映 pos={pos}");
+                Player.Source = src;
+                Player.Position = pos;
+                if (wasPlaying) { Player.Play(); _isPlaying = true; } else { _isPlaying = false; }
+            }
+            else
+            {
+                Trace($"Prefetch_Changed: requested={Player.PacketPrefetch}（次に開くファイルから適用）");
             }
         }
 

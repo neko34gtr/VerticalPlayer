@@ -139,6 +139,14 @@ namespace VerticalPlayer.Media
             set => _engine.HardwareAccelRequested = value;
         }
 
+        /// <summary>次に開くファイルからパケット先読み（Stage1: Demux/Decode分離パイプライン）を
+        /// 有効にするかどうか。HDD等の低速ストレージでのI/O遅延によるフレームドロップ対策。</summary>
+        public bool PacketPrefetch
+        {
+            get => _engine.PrefetchEnabled;
+            set => _engine.PrefetchEnabled = value;
+        }
+
         private double _contrast, _saturation, _gamma;
         public double Contrast
         {

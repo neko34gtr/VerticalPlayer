@@ -1006,6 +1006,10 @@
                                                Foreground="{StaticResource TextPrimary}"
                                                FontSize="16" FontWeight="Bold" FontFamily="Consolas" Margin="0,0,0,4"/>
 
+                                    <CheckBox x:Name="PrefetchCheck" Content="パケット先読み（低速ストレージ対策）"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                              Checked="Prefetch_Changed" Unchecked="Prefetch_Changed"/>
+
                                     <CheckBox x:Name="AlwaysOnTopCheck" Content="常に最前面"
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="AlwaysOnTop_Changed" Unchecked="AlwaysOnTop_Changed"/>

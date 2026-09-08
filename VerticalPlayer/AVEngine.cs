@@ -4,7 +4,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
@@ -45,6 +47,56 @@ namespace VerticalPlayer.Media
 
         /// <summary>次にOpen()する際にハードウェアデコードを試みるかどうか。</summary>
         public bool HardwareAccelRequested { get; set; }
+
+        // ── Stage1: パケット先読み（Demux/Decode分離パイプライン） ──
+        // HDD等の低速ストレージでの av_read_frame の I/O 遅延（ディスクI/Oスパイク）が
+        // そのままデコード全体・キャッチアップドロップに直結していた問題への対策。
+        // 有効時は専用スレッドが av_read_frame をバックグラウンドで回してChannelへ溜め、
+        // デコード側（既存のDecode/DNN/Presentロジックはそのまま）はChannelから取り出す
+        // だけになる。HardwareAccelRequestedと同じ設計方針で、値は次にOpenする際にのみ
+        // 反映される（再生中の動的切替はしない）。
+        public bool PrefetchEnabled { get; set; }
+
+        private const int PrefetchChannelCapacity = 80; // 60〜100パケット目安
+        private Thread? _demuxThread;
+        private Channel<DemuxedPacket>? _pktChannel;
+
+        /// <summary>Seek要求中はtrue(非0)。pin留めしたintをAVIOInterruptCB.opaqueとして
+        /// ネイティブ側へ渡し、av_read_frameが内部のI/O待ちで定期的にこれをポーリングする
+        /// ことで、遅いディスクI/Oの最中でもSeekを即座に中断・脱出できるようにする。</summary>
+        private volatile int _demuxInterruptFlag;
+        /// <summary>Demuxスレッドが_demuxInterruptFlagを検知し、av_read_frame/av_seek_frame
+        /// を同時に叩かない安全な待機状態に入ったことをメインスレッドへ知らせる確認応答。</summary>
+        private volatile int _demuxAcked;
+
+        /// <summary>Demuxスレッドが積んだ1パケット分のラッパー。AVPacket*はジェネリック型
+        /// 引数に使えないためIntPtrで保持する。</summary>
+        private readonly struct DemuxedPacket
+        {
+            public readonly IntPtr PktPtr;
+            public DemuxedPacket(IntPtr pktPtr) => PktPtr = pktPtr;
+        }
+
+        // AVIOInterruptCB.callback に渡すネイティブ呼び出し可能コールバック。
+        // 実機で入手した定義により確定: AVIOInterruptCB_callback_func は
+        // 「AVIOInterruptCB_callback」という通常のdelegate型からの暗黙変換演算子
+        // （Marshal.GetFunctionPointerForDelegateを内部で呼ぶ）を持つラッパー構造体。
+        // そのため関数ポインタ(delegate* unmanaged)ではなく、AVCodecContext.get_format
+        // と同じ「通常のdelegateインスタンスを保持し続ける」方式が正解だった。
+        // NOTE: このdelegateインスタンス（_interruptCallback）はGCに回収されると
+        // ネイティブ側が呼び出し不能なポインタを踏んでクラッシュするため、必ず
+        // staticフィールドとして参照を保持し続けること（ローカル変数化は絶対に不可）。
+        private static readonly AVIOInterruptCB_callback _interruptCallback = InterruptCheck;
+
+        private static unsafe int InterruptCheck(void* opaque)
+        {
+            if (opaque == null) return 0;
+            return *(int*)opaque != 0 ? 1 : 0;
+        }
+
+        // AVERROR_EXIT = -MKTAG('E','X','I','T')。ffmpeg.AVERROR_EXITの有無/名前が
+        // AutoGenのバージョンに依存するため、確実にビルドできるようここで直接計算する。
+        private const int AvErrorExit = -(('E') | ('X' << 8) | ('I' << 16) | ('T' << 24));
 
         // ── エフェクト（-1〜1想定。0が無効） ──
         private volatile bool _effectsActive;
@@ -343,7 +395,8 @@ namespace VerticalPlayer.Media
 
             bool wantHw = HardwareAccelRequested;
             bool wantDenoise = DenoiseRequested;
-            var t = new Thread(() => OpenAndRun(source.LocalPath, myGen, wantHw, wantDenoise))
+            bool wantPrefetch = PrefetchEnabled;
+            var t = new Thread(() => OpenAndRun(source.LocalPath, myGen, wantHw, wantDenoise, wantPrefetch))
             {
                 IsBackground = true,
                 Name = "AVEngine-VideoDecode"
@@ -420,7 +473,7 @@ namespace VerticalPlayer.Media
         // ─────────────────────────────────────────────────────────────
         // デコードスレッド本体（映像のみ）
         // ─────────────────────────────────────────────────────────────
-        private void OpenAndRun(string path, int myGen, bool wantHw, bool wantDenoise)
+        private void OpenAndRun(string path, int myGen, bool wantHw, bool wantDenoise, bool wantPrefetch)
         {
             AVFormatContext* fmt = null;
             AVCodecContext* vctx = null;
@@ -434,6 +487,14 @@ namespace VerticalPlayer.Media
             AVFrame* swFrame = null;
             AVFrame* rgbFrame = null;
             byte* rgbBuffer = null;
+
+            // ── Stage1: パケット先読み（wantPrefetch時のみ使用） ──
+            int[] interruptFlagArr = new int[1]; // pin留めしてネイティブへポインタを渡す
+            GCHandle interruptFlagHandle = default;
+            bool interruptFlagPinned = false;
+            Channel<DemuxedPacket>? pktChannel = null;
+            Thread? demuxThread = null;
+            bool demuxJoinedCleanly = true; // finallyでfmt/vctxを解放してよいか（デッドロック疑い時は解放しない）
 
             // ── ノイズリダクション用フィルタグラフ（段階3）──
             // 他のネイティブハンドルと同じく、このデコードスレッドのローカル変数として
@@ -520,7 +581,15 @@ namespace VerticalPlayer.Media
 
             try
             {
-                OpenStreamsWithHw(path, wantHw, out fmt, out vctx, out videoIdx, out hwActive, out hwDeviceCtx);
+                IntPtr interruptFlagPtr = IntPtr.Zero;
+                if (wantPrefetch)
+                {
+                    interruptFlagHandle = GCHandle.Alloc(interruptFlagArr, GCHandleType.Pinned);
+                    interruptFlagPinned = true;
+                    interruptFlagPtr = interruptFlagHandle.AddrOfPinnedObject();
+                }
+
+                OpenStreamsWithHw(path, wantHw, interruptFlagPtr, out fmt, out vctx, out videoIdx, out hwActive, out hwDeviceCtx);
 
                 int w = vctx->width, h = vctx->height;
                 double durSec = fmt->duration > 0 ? fmt->duration / (double)ffmpeg.AV_TIME_BASE : 0;
@@ -569,6 +638,32 @@ namespace VerticalPlayer.Media
 
                 byte[] managedBuf = new byte[bufSize];
 
+                // ── Stage1: パケット先読みスレッド起動（wantPrefetch時のみ） ──
+                if (wantPrefetch)
+                {
+                    pktChannel = Channel.CreateBounded<DemuxedPacket>(new BoundedChannelOptions(PrefetchChannelCapacity)
+                    {
+                        FullMode = BoundedChannelFullMode.Wait, // 満杯ならDemux側が自然に待つ（TryWriteループでポーリング）
+                        SingleReader = true,
+                        SingleWriter = true,
+                    });
+                    _pktChannel = pktChannel;
+                    _demuxInterruptFlag = 0;
+                    _demuxAcked = 0;
+
+                    var demuxFmt = fmt;
+                    var demuxChannel = pktChannel;
+                    int demuxVideoIdx = videoIdx;
+                    demuxThread = new Thread(() => DemuxPrefetchLoop(demuxFmt, demuxVideoIdx, myGen, demuxChannel))
+                    {
+                        IsBackground = true,
+                        Name = "AVEngine-Demux"
+                    };
+                    _demuxThread = demuxThread;
+                    demuxThread.Start();
+                    Trace($"DemuxPrefetch(gen={myGen}): started (capacity={PrefetchChannelCapacity})");
+                }
+
                 while (myGen == _generation)
                 {
                     lock (_seekLock)
@@ -577,21 +672,74 @@ namespace VerticalPlayer.Media
                         {
                             double target = _pendingSeekSeconds;
                             _pendingSeekSeconds = -1;
-                            long ts = (long)(target / ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base));
-                            ffmpeg.av_seek_frame(fmt, videoIdx, ts, ffmpeg.AVSEEK_FLAG_BACKWARD);
-                            ffmpeg.avcodec_flush_buffers(vctx);
-                            _catchingUpAfterSeek = true;
-                            // シーク要求から実際にここへ到達するまでの間（HW/SW切替時の
-                            // コーデック再初期化のように時間がかかるケースがある）に、
-                            // 外部から先にSetExternalClockが呼ばれてクロックが実時間で
-                            // 進んでしまっている可能性があるため、ここで確実にtarget秒へ
-                            // 巻き戻して凍結する（凍結アンカーが目標からズレたまま止まる
-                            // ＝映像が出てこなくなる不具合の対策）。
-                            _extBaseSeconds = target;
-                            _extClock.Restart();
-                            _extPlaying = false; // 最初のフレームが出るまでクロックを凍結
-                            FreeDenoiseFilter(); // シーク跨ぎで時間方向の履歴が無効になるため作り直す
-                            Trace($"Seek -> {target:F2}s");
+
+                            if (wantPrefetch && demuxThread != null)
+                            {
+                                // Demuxスレッドがfmtに対してav_read_frameを呼んでいる最中に
+                                // こちらがav_seek_frameを呼ぶとFFmpeg内部状態が競合するため、
+                                // Demuxスレッドを安全な待機状態に入らせてから操作する。
+                                // interrupt_callback経由で、たとえ低速HDDのI/O待ちの最中でも
+                                // av_read_frameを即座に脱出させられる（これがStage1の主目的）。
+                                _demuxInterruptFlag = 1;
+                                var ackSw = Stopwatch.StartNew();
+                                while (_demuxAcked == 0 &&
+                                       demuxThread.IsAlive && ackSw.ElapsedMilliseconds < 5000)
+                                {
+                                    Thread.Sleep(1);
+                                }
+                                if (_demuxAcked == 0)
+                                {
+                                    // 5秒待っても応答が無い＝Demuxスレッドが何らかの理由で
+                                    // 応答不能になっている疑い。fmtへの同時アクセスによる
+                                    // クラッシュを避けるため、このSeekはあきらめて次ループへ
+                                    // 回す（pendingSeekSecondsを戻さないため、この一度の
+                                    // Seekは失われるが、無応答状態が続く限りは何度Seekしても
+                                    // 同じなのでこれ以上粘っても実害しか無い）。
+                                    Trace($"Seek(gen={myGen}): Demuxスレッドが応答しないためSeekを断念");
+                                }
+                                else
+                                {
+                                    // 残留パケットを全て解放（Seek前の古いデータのため不要）
+                                    if (pktChannel != null)
+                                    {
+                                        while (pktChannel.Reader.TryRead(out var stale))
+                                        {
+                                            var sp = (AVPacket*)stale.PktPtr;
+                                            if (sp != null) ffmpeg.av_packet_free(&sp);
+                                        }
+                                    }
+
+                                    long tsP = (long)(target / ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base));
+                                    ffmpeg.av_seek_frame(fmt, videoIdx, tsP, ffmpeg.AVSEEK_FLAG_BACKWARD);
+                                    ffmpeg.avcodec_flush_buffers(vctx);
+                                    _catchingUpAfterSeek = true;
+                                    _extBaseSeconds = target;
+                                    _extClock.Restart();
+                                    _extPlaying = false;
+                                    FreeDenoiseFilter();
+                                    Trace($"Seek -> {target:F2}s (prefetch)");
+                                }
+
+                                _demuxInterruptFlag = 0; // Demuxスレッド再開
+                            }
+                            else
+                            {
+                                long ts = (long)(target / ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base));
+                                ffmpeg.av_seek_frame(fmt, videoIdx, ts, ffmpeg.AVSEEK_FLAG_BACKWARD);
+                                ffmpeg.avcodec_flush_buffers(vctx);
+                                _catchingUpAfterSeek = true;
+                                // シーク要求から実際にここへ到達するまでの間（HW/SW切替時の
+                                // コーデック再初期化のように時間がかかるケースがある）に、
+                                // 外部から先にSetExternalClockが呼ばれてクロックが実時間で
+                                // 進んでしまっている可能性があるため、ここで確実にtarget秒へ
+                                // 巻き戻して凍結する（凍結アンカーが目標からズレたまま止まる
+                                // ＝映像が出てこなくなる不具合の対策）。
+                                _extBaseSeconds = target;
+                                _extClock.Restart();
+                                _extPlaying = false; // 最初のフレームが出るまでクロックを凍結
+                                FreeDenoiseFilter(); // シーク跨ぎで時間方向の履歴が無効になるため作り直す
+                                Trace($"Seek -> {target:F2}s");
+                            }
                         }
                     }
 
@@ -601,12 +749,27 @@ namespace VerticalPlayer.Media
                         continue;
                     }
 
-                    int rr = ffmpeg.av_read_frame(fmt, pkt);
-                    if (rr < 0)
+                    if (wantPrefetch && pktChannel != null)
                     {
-                        _paused = true;
-                        Trace($"DecodeLoop(gen={myGen}): end of stream");
-                        continue;
+                        if (!TryDequeuePrefetchedPacket(pktChannel, myGen, pkt, out bool eof))
+                        {
+                            if (eof)
+                            {
+                                _paused = true;
+                                Trace($"DecodeLoop(gen={myGen}): end of stream (prefetch)");
+                            }
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        int rr = ffmpeg.av_read_frame(fmt, pkt);
+                        if (rr < 0)
+                        {
+                            _paused = true;
+                            Trace($"DecodeLoop(gen={myGen}): end of stream");
+                            continue;
+                        }
                     }
 
                     if (pkt->stream_index == videoIdx)
@@ -937,6 +1100,44 @@ namespace VerticalPlayer.Media
             }
             finally
             {
+                // ── Stage1: Demuxスレッドの停止・後始末 ──
+                // fmtを解放する前に、Demuxスレッドが確実にfmtへアクセスしなくなったことを
+                // 保証する必要がある（use-after-free防止）。interrupt_callback経由で
+                // 低速I/O待ち中でも即座にav_read_frameから脱出させ、myGen!=_generationの
+                // チェックで自然に終了させる。
+                if (demuxThread != null)
+                {
+                    _demuxInterruptFlag = 1;
+                    demuxJoinedCleanly = demuxThread.Join(5000);
+                    if (!demuxJoinedCleanly)
+                        Trace($"DemuxPrefetch(gen={myGen}): 5000ms待っても終了しなかった - リーク疑いあり、fmtの解放をスキップ（クラッシュ回避優先）");
+                    if (_demuxThread == demuxThread) _demuxThread = null;
+                }
+                if (pktChannel != null)
+                {
+                    pktChannel.Writer.TryComplete();
+                    while (pktChannel.Reader.TryRead(out var leftover))
+                    {
+                        var lp = (AVPacket*)leftover.PktPtr;
+                        if (lp != null) ffmpeg.av_packet_free(&lp);
+                    }
+                    if (_pktChannel == pktChannel) _pktChannel = null;
+                }
+                if (interruptFlagPinned)
+                {
+                    if (demuxJoinedCleanly)
+                    {
+                        interruptFlagHandle.Free();
+                    }
+                    else
+                    {
+                        // Demuxスレッドが未終了の場合、内部でinterrupt_callback.opaque
+                        // （このpin留め配列へのポインタ）をまだ参照している可能性があるため、
+                        // fmtと同様に解放を見送る（意図的リーク、GC破損回避優先）。
+                        Trace($"DecodeThread(gen={myGen}): Demux未終了のためinterruptFlagのpin留め解放も見送り");
+                    }
+                }
+
                 FreeDenoiseFilter();
                 if (rgbBuffer != null) ffmpeg.av_free(rgbBuffer);
                 if (frame != null) { var f2 = frame; ffmpeg.av_frame_free(&f2); }
@@ -948,19 +1149,140 @@ namespace VerticalPlayer.Media
                 // ここで自分で av_buffer_unref すると二重解放になり
                 // ExecutionEngineException（ネイティブ側のメモリ破壊）の原因になる
                 if (vctx != null) { var v = vctx; ffmpeg.avcodec_free_context(&v); }
-                if (fmt != null) { var f = fmt; ffmpeg.avformat_close_input(&f); }
+                if (demuxJoinedCleanly)
+                {
+                    if (fmt != null) { var f = fmt; ffmpeg.avformat_close_input(&f); }
+                }
+                else
+                {
+                    Trace($"DecodeThread(gen={myGen}): Demux未終了のためfmtの解放を見送り（意図的リーク、クラッシュ回避優先）");
+                }
                 Trace($"DecodeThread(gen={myGen}) fully exited");
             }
         }
 
-        private static void OpenStreamsWithHw(string path, bool wantHw,
+        // ── Stage1: パケット先読みスレッド本体 ──
+        // av_read_frameをこの専用スレッドで回し、videoIdxに一致するパケットだけを
+        // Channelへ積む。fmtへアクセスするのはこのスレッドと、メインループのSeek処理
+        // ブロック（ハンドシェイク経由でのみ）だけであることを前提にしている。
+        private void DemuxPrefetchLoop(AVFormatContext* fmt, int videoIdx, int myGen, Channel<DemuxedPacket> channel)
+        {
+            try
+            {
+                while (myGen == _generation)
+                {
+                    // メインスレッドがSeek処理中。fmtへのアクセスを完全に止めて確認応答を出し、
+                    // フラグが解除されるまで待つ（fmtへの同時アクセスを避けるための唯一の関門）。
+                    if (_demuxInterruptFlag != 0)
+                    {
+                        _demuxAcked = 1;
+                        while (myGen == _generation && _demuxInterruptFlag != 0)
+                            Thread.Sleep(1);
+                        _demuxAcked = 0;
+                        continue;
+                    }
+
+                    AVPacket* p = ffmpeg.av_packet_alloc();
+                    int rr = ffmpeg.av_read_frame(fmt, p);
+                    if (rr < 0)
+                    {
+                        ffmpeg.av_packet_free(&p);
+                        if (rr == AvErrorExit)
+                        {
+                            // interrupt_callbackによる中断（Seek要求）。次ループ先頭で
+                            // _demuxInterruptFlagを検知し待機状態に入る。
+                            continue;
+                        }
+                        // 本当のEOF、またはI/Oエラー
+                        Trace($"DemuxPrefetch(gen={myGen}): end of stream/error rr={rr}");
+                        channel.Writer.TryComplete();
+                        return;
+                    }
+
+                    if (p->stream_index != videoIdx)
+                    {
+                        ffmpeg.av_packet_free(&p);
+                        continue;
+                    }
+
+                    var item = new DemuxedPacket((IntPtr)p);
+                    bool droppedForSeek = false;
+                    while (!channel.Writer.TryWrite(item))
+                    {
+                        if (myGen != _generation)
+                        {
+                            ffmpeg.av_packet_free(&p);
+                            return;
+                        }
+                        if (_demuxInterruptFlag != 0)
+                        {
+                            // Channel満杯のままSeekが来た。このパケットは古くなるので破棄し、
+                            // 次ループ先頭のフラグ待機ブロックへ入る。
+                            ffmpeg.av_packet_free(&p);
+                            droppedForSeek = true;
+                            break;
+                        }
+                        Thread.Sleep(1);
+                    }
+                    if (droppedForSeek) continue;
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace($"DemuxPrefetch(gen={myGen}) error: {ex}");
+                try { channel.Writer.TryComplete(ex); } catch { }
+            }
+            finally
+            {
+                Trace($"DemuxPrefetch(gen={myGen}) exited");
+            }
+        }
+
+        /// <summary>Channelから1パケット取り出し、再利用中のpktへav_packet_move_refで
+        /// 移し替える。取り出せた場合true。Channelが完了(EOF/エラー)している場合はeof=trueで
+        /// false、世代交代で打ち切られた場合はeof=falseでfalseを返す。</summary>
+        private bool TryDequeuePrefetchedPacket(Channel<DemuxedPacket> channel, int myGen, AVPacket* pkt, out bool eof)
+        {
+            eof = false;
+            while (myGen == _generation)
+            {
+                if (channel.Reader.TryRead(out var item))
+                {
+                    AVPacket* src = (AVPacket*)item.PktPtr;
+                    ffmpeg.av_packet_move_ref(pkt, src);
+                    ffmpeg.av_packet_free(&src);
+                    return true;
+                }
+                if (channel.Reader.Completion.IsCompleted)
+                {
+                    eof = true;
+                    return false;
+                }
+                Thread.Sleep(2);
+            }
+            return false;
+        }
+
+        private static void OpenStreamsWithHw(string path, bool wantHw, IntPtr interruptFlagPtr,
             out AVFormatContext* fmt, out AVCodecContext* vctx, out int videoIdx,
             out bool hwActive, out AVBufferRef* hwDeviceCtx)
         {
             hwActive = false;
             hwDeviceCtx = null;
 
-            AVFormatContext* f = null;
+            // interruptFlagPtr != IntPtr.Zero（＝Stage1先読み有効）の場合のみ、
+            // avformat_open_inputより先にinterrupt_callbackを仕込む必要があるため、
+            // avformat_alloc_contextで先にコンテキストを確保してから開く。
+            AVFormatContext* f = ffmpeg.avformat_alloc_context();
+            if (f == null)
+                throw new InvalidOperationException("avformat_alloc_context failed");
+
+            if (interruptFlagPtr != IntPtr.Zero)
+            {
+                f->interrupt_callback.callback = _interruptCallback;
+                f->interrupt_callback.opaque = (void*)interruptFlagPtr;
+            }
+
             if (ffmpeg.avformat_open_input(&f, path, null, null) != 0)
                 throw new InvalidOperationException($"avformat_open_input failed: {path}");
             fmt = f;
