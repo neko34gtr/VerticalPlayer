@@ -96,7 +96,7 @@ namespace VerticalPlayer
         // ── 対応動画拡張子（一箇所にまとめて定義。増減はここだけ変更すればOK）──
         private static readonly string[] SupportedVideoExtensions =
         {
-            "mp4", "mkv", "avi", "wmv", "mov", "webm", "m4v", "mpg", "ts", "flv", "ogv", "divx", "asf", "bc!"
+            "mp4", "mkv", "avi", "wmv", "mov", "webm", "m4v", "mpg", "mpeg", "ts", "flv", "ogv", "divx", "asf", "bc!"
         };
 
         /// <summary>Directory.GetFiles用の "*.ext" 形式パターン一覧</summary>
@@ -933,12 +933,12 @@ namespace VerticalPlayer
         {
             if (Player.DnnSuperResolutionEnabled && Player.IsDnnReadyForCurrentResolution)
             {
-                StatusText.Text = "TensorRTエンジンで再生中";
+                StatusText.Text = "TensorRT Enable";
                 StatusText.Foreground = new SolidColorBrush(Color.FromRgb(0xFB, 0xBF, 0x24));
             }
             else
             {
-                StatusText.Text = "";
+                StatusText.Text = "Normal Playing";
                 StatusText.Foreground = (Brush)FindResource("TextFaint");
             }
         }

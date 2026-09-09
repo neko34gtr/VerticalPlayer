@@ -946,8 +946,17 @@ namespace VerticalPlayer.Media
                                         if (!_dnnInferenceBusy)
                                         {
                                             _dnnInferenceBusy = true;
+                                            // 【16の倍数アライメント対応】
+                                            // upW/upH: 実際に表示する最終サイズ（元解像度×Scale、パディング分を
+                                            //   除いたクロップ後のサイズ）。EnsureSize/PresentDnnHalf*系にはこちらを渡す。
+                                            // alignedUpW/alignedUpH: TensorRTが実際に読み書きするパディング込みの
+                                            //   サイズ（AlignedWidth/AlignedHeight×Scale）。CUDA相互運用バッファの
+                                            //   確保・登録、およびTryInferZeroCopy/TryInferWithCudaOutputの引数には
+                                            //   こちらを渡す（DnnSuperResolutionEngine側のドキュメント参照）。
                                             int upW = w * DnnScale, upH = h * DnnScale;
                                             var dnnLocal = _dnnSr;
+                                            int alignedW = dnnLocal.AlignedWidth, alignedH = dnnLocal.AlignedHeight;
+                                            int alignedUpW = alignedW * dnnLocal.Scale, alignedUpH = alignedH * dnnLocal.Scale;
                                             var gp = GpuPresenter;
                                             var bufCopy = (byte[])managedBuf.Clone(); // 次フレームで上書きされるため複製必須
                                             int bw = w, bh = h;
@@ -963,8 +972,11 @@ namespace VerticalPlayer.Media
                                                     // したため、この背景スレッド（DNN推論スレッド）から直接呼び出せる。
                                                     // これによりUI描画のタイミング（フレームレンダリング中など）による
                                                     // 推論スレッドのブロッキングが無くなる。
-                                                    IntPtr outCudaBufPtr = gp.EnsureDnnCudaBufferAndGetNativePointer(upW, upH);
-                                                    IntPtr inCudaBufPtr = gp.EnsureDnnInputCudaBufferAndGetNativePointer(bw, bh);
+                                                    //
+                                                    // CUDA相互運用バッファは、TensorRTが実際に読み書きするパディング込み
+                                                    // サイズ（アライメント後）で確保・登録する。
+                                                    IntPtr outCudaBufPtr = gp.EnsureDnnCudaBufferAndGetNativePointer(alignedUpW, alignedUpH);
+                                                    IntPtr inCudaBufPtr = gp.EnsureDnnInputCudaBufferAndGetNativePointer(alignedW, alignedH);
 
                                                     bool zeroCopyOk = false;
                                                     if (outCudaBufPtr != IntPtr.Zero && inCudaBufPtr != IntPtr.Zero)
@@ -972,6 +984,9 @@ namespace VerticalPlayer.Media
                                                         bool convOk = false;
                                                         try
                                                         {
+                                                            // アップロード自体は元解像度(bw,bh)のまま。GPU側のCSBgraToNchwが
+                                                            // 書き込み先(アライメント後サイズ)の行幅を別途知っているため、
+                                                            // ここで渡すのは元解像度でよい（パディング領域は変換しない）。
                                                             convOk = gp.ConvertBgraToNchwHalfGpu(bufCopy, bw, bh, bStride);
                                                         }
                                                         catch (Exception ex)
@@ -981,8 +996,10 @@ namespace VerticalPlayer.Media
 
                                                         if (convOk)
                                                         {
+                                                            // TryInferZeroCopyの引数はアライメント後サイズで統一する契約
+                                                            // （DnnSuperResolutionEngine.TryInferZeroCopyのdocコメント参照）。
                                                             zeroCopyOk = dnnLocal.TryInferZeroCopy(
-                                                                inCudaBufPtr, bw, bh, outCudaBufPtr, upW, upH);
+                                                                inCudaBufPtr, alignedW, alignedH, outCudaBufPtr, alignedUpW, alignedUpH);
                                                         }
                                                     }
 
@@ -993,6 +1010,9 @@ namespace VerticalPlayer.Media
                                                             if (myGen != _generation) return;
                                                             try
                                                             {
+                                                                // 表示・EnsureSizeにはクロップ後の最終サイズ(upW/upH)を渡す。
+                                                                // GpuFramePresenter側がパディング込みバッファ(alignedUpW/H)
+                                                                // から自動的にこのサイズへ切り出して表示する。
                                                                 gp.EnsureSize(upW, upH);
                                                                 gp.PresentDnnHalfAlreadyInBuffer(upW, upH);
                                                                 FrameDisplayed?.Invoke(shownPts);
@@ -1002,8 +1022,9 @@ namespace VerticalPlayer.Media
                                                     }
                                                     // 入力ゼロコピーが使えない環境（シェーダ未コンパイル等）向けフォールバック：
                                                     // 入力はCPU変換のまま、出力のみゼロコピー（段階6-3-4、従来どおり）。
+                                                    // 出力バッファ・TryInferWithCudaOutputへの引数もアライメント後サイズで統一する。
                                                     else if (outCudaBufPtr != IntPtr.Zero &&
-                                                        dnnLocal.TryInferWithCudaOutput(bufCopy, bw, bh, outCudaBufPtr, upW, upH))
+                                                        dnnLocal.TryInferWithCudaOutput(bufCopy, bw, bh, outCudaBufPtr, alignedUpW, alignedUpH))
                                                     {
                                                         _ui.BeginInvoke(DispatcherPriority.Render, new Action(() =>
                                                         {
@@ -1017,6 +1038,9 @@ namespace VerticalPlayer.Media
                                                             catch (Exception ex) { Trace($"PresentDnnHalfAlreadyInBuffer skipped: {ex.Message}"); }
                                                         }));
                                                     }
+                                                    // CPUフォールバック（TryInferToNchwHalf）はDnnSuperResolutionEngine側で
+                                                    // 既にパディング分をクロップ済みの配列(uw x uh = w*Scale x h*Scale)を
+                                                    // 返すため、ここは元々の呼び方のままでよい（変更不要）。
                                                     else if (dnnLocal.TryInferToNchwHalf(bufCopy, bw, bh, out var half, out var uw, out var uh))
                                                     {
                                                         _ui.BeginInvoke(DispatcherPriority.Render, new Action(() =>

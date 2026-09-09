@@ -103,6 +103,7 @@ namespace VerticalPlayer
 
         // ── DNN超解像（段階6-3-2）：NCHW float16平面バッファ→BGRAテクスチャ変換 ──
         private ID3D11ComputeShader? _nchw2BgraCs;
+        private ID3D11Buffer? _cbNchw2Bgra; // CSNchwToBgra用（SrcW/SrcH、アライメント差分の吸収用）
         private ID3D11Buffer? _dnnHalfBuf;              // CPUからMap/Unmapで書き込む生half平面バッファ（Dynamic）
         private ID3D11ShaderResourceView? _srvDnnHalfBuf; // R16_Floatビュー
         private ID3D11Buffer? _dnnHalfBufCuda;          // CUDA相互運用専用（段階6-3-4、Default usage）
@@ -117,6 +118,7 @@ namespace VerticalPlayer
 
         // ── DNN超解像 段階6-3-1（入力側ゼロコピー）：BGRA→NCHW half変換をGPU上で完結させる ──
         private ID3D11ComputeShader? _bgraToNchwCs;
+        private ID3D11Buffer? _cbBgraToNchw; // CSBgraToNchw用（DstW/DstH、アライメント差分の吸収用）
         private ID3D11Texture2D? _dnnSrcTex;             // 入力BGRA原寸のアップロード先（Dynamic、DNN専用）
         private ID3D11ShaderResourceView? _dnnSrcSrv;
         private int _dnnSrcW, _dnnSrcH;
@@ -640,7 +642,24 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
         }
 
         // ── DNN超解像（段階6-3-2）：ONNX Runtime出力のNCHW float16平面バッファ→BGRAテクスチャ ──
+        //
+        // 【16の倍数アライメント対応】TryInferZeroCopy/TryInferWithCudaOutput（CUDA直結パス）の
+        // 出力は、DnnSuperResolutionEngine側で右・下に黒パディングした状態（AlignedWidth/Height×Scale）
+        // のまま_dnnHalfBufCudaへ書き込まれる（このシェーダ呼び出し側ではクロップしない）。
+        // DstTex（表示用、クロップ後の最終サイズ）とSrcNchw（パディング込みの生バッファ）で
+        // 平面のストライドが異なりうるため、Src側の実際の行幅(SrcW)・高さ(SrcH)を
+        // 定数バッファで明示的に受け取り、それを使ってプレーンオフセットを計算する
+        // （DstTex.GetDimensions()はループの打ち切り境界＝クロップ範囲としてのみ使う）。
+        // パディングが無い場合（PresentDnnHalf、CPU側で既にクロップ済み）はSrcW/SrcH=DstTexの
+        // 幅高さをそのまま渡せば従来と同じ挙動になる。
         private const string Nchw2BgraShaderSource = @"
+cbuffer NchwSrcCB : register(b0)
+{
+    float SrcWf;
+    float SrcHf;
+    float2 _padNS;
+};
+
 Buffer<float> SrcNchw : register(t0); // bound as R16_Float view, read as float in HLSL
 RWTexture2D<float4> DstTex : register(u0);
 
@@ -651,8 +670,10 @@ void CSNchwToBgra(uint3 id : SV_DispatchThreadID)
     DstTex.GetDimensions(dstW, dstH);
     if (id.x >= dstW || id.y >= dstH) return;
 
-    uint planeSize = dstW * dstH;
-    uint idx = id.y * dstW + id.x;
+    uint srcW = (uint)round(SrcWf);
+    uint srcH = (uint)round(SrcHf);
+    uint planeSize = srcW * srcH;
+    uint idx = id.y * srcW + id.x;
 
     float r = SrcNchw[idx];
     float g = SrcNchw[planeSize + idx];
@@ -666,6 +687,25 @@ void CSNchwToBgra(uint3 id : SV_DispatchThreadID)
             if (_d3d11Device == null) return;
             _nchw2BgraCs = CompileCs(_d3d11Device, Nchw2BgraShaderSource, "CSNchwToBgra", "GpuNchw2Bgra");
             _bgraToNchwCs = CompileCs(_d3d11Device, BgraToNchwShaderSource, "CSBgraToNchw", "GpuBgraToNchw");
+            _cbNchw2Bgra = CreateConstBuffer(_d3d11Device, 16);
+            _cbBgraToNchw = CreateConstBuffer(_d3d11Device, 16);
+        }
+
+        /// <summary>CSNchwToBgra用の定数バッファ(SrcW/SrcH)を更新する。srcW/srcHは
+        /// 実際にSrcNchwバッファがレイアウトされている幅・高さ（パディング込みの場合は
+        /// アライメント後の値、パディング無し/CPU側で既にクロップ済みの場合はDstTexと同じ値）。</summary>
+        private void UpdateNchw2BgraConstantBuffer(int srcW, int srcH)
+        {
+            if (_d3d11Context == null || _cbNchw2Bgra == null) return;
+            var mapped = _d3d11Context.Map(_cbNchw2Bgra, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+            unsafe
+            {
+                float* p = (float*)mapped.DataPointer;
+                p[0] = srcW;
+                p[1] = srcH;
+                p[2] = p[3] = 0f;
+            }
+            _d3d11Context.Unmap(_cbNchw2Bgra, 0);
         }
 
         // ── DNN超解像 段階6-3-1（入力側ゼロコピー）：BGRAテクスチャ→NCHW float16平面バッファ ──
@@ -674,7 +714,20 @@ void CSNchwToBgra(uint3 id : SV_DispatchThreadID)
         // シェーダ側では追加の正規化計算が不要。DXGIのスウィズルにより.r/.g/.bは常に論理的な
         // R/G/B成分を指す（メモリ上の格納順はB,G,R,Aだが、シェーダから見た成分の意味は
         // フォーマット非依存で一定）。
+        //
+        // 【16の倍数アライメント対応】SrcBgra（デコード直後、元解像度そのまま）はループの
+        // 打ち切り境界としてのみ使い、書き込み先DstNchw（AlignedWidth×AlignedHeightで確保済み）
+        // の行幅・平面サイズは定数バッファで渡されるDstW/DstHを使う。元解像度分だけが
+        // 書き込まれ、右・下のパディング領域（Aligned - 元解像度の差分）はバッファ確保時に
+        // 一度だけゼロクリアしたままにする（EnsureDnnInputCudaBuffer参照）。
         private const string BgraToNchwShaderSource = @"
+cbuffer BgraToNchwCB : register(b0)
+{
+    float DstWf;
+    float DstHf;
+    float2 _padBN;
+};
+
 Texture2D<float4> SrcBgra : register(t0);
 RWBuffer<float> DstNchw : register(u0); // bound as R16_Float UAV view, write as float (HW packs to fp16)
 
@@ -686,14 +739,32 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
     if (id.x >= w || id.y >= h) return;
 
     float4 px = SrcBgra.Load(int3(id.xy, 0));
-    uint planeSize = w * h;
-    uint idx = id.y * w + id.x;
+    uint dstW = (uint)round(DstWf);
+    uint dstH = (uint)round(DstHf);
+    uint planeSize = dstW * dstH;
+    uint idx = id.y * dstW + id.x;
 
     DstNchw[idx] = px.r;
     DstNchw[planeSize + idx] = px.g;
     DstNchw[2 * planeSize + idx] = px.b;
 }
 ";
+
+        /// <summary>CSBgraToNchw用の定数バッファ(DstW/DstH)を更新する。dstW/dstHは
+        /// 書き込み先DstNchwバッファの実際の行幅・高さ（アライメント後のサイズ）。</summary>
+        private void UpdateBgraToNchwConstantBuffer(int dstW, int dstH)
+        {
+            if (_d3d11Context == null || _cbBgraToNchw == null) return;
+            var mapped = _d3d11Context.Map(_cbBgraToNchw, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+            unsafe
+            {
+                float* p = (float*)mapped.DataPointer;
+                p[0] = dstW;
+                p[1] = dstH;
+                p[2] = p[3] = 0f;
+            }
+            _d3d11Context.Unmap(_cbBgraToNchw, 0);
+        }
 
         /// <summary>DNN超解像用の中間バッファ（NCHW half平面バッファ、BGRA変換先テクスチャ）を
         /// 指定解像度に合わせて（必要な場合のみ）(再)作成する。</summary>
@@ -873,6 +944,18 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
                 Buffer = new BufferUnorderedAccessView { FirstElement = 0, NumElements = (uint)neededElems },
             });
 
+            // 16の倍数アライメント対応: このバッファはAlignedWidth×AlignedHeightで確保されるが、
+            // CSBgraToNchwは毎フレーム元解像度(width×height)分しか書き込まない。右・下の
+            // パディング領域（Aligned - 元解像度の差分）はDefault usageバッファのため
+            // 初期値が不定（ゼロ保証が無い）ので、確保直後に一度だけ全体をゼロクリアしておく
+            // （以降は同じ左上サブ矩形だけが毎フレーム上書きされ、パディング部分は黒のまま
+            // 変化しないため、このクリアは解像度変更時のバッファ再確保時のみでよい）。
+            // NOTE: Vortice.Direct3D11では、ネイティブD3D11のClearUnorderedAccessViewFloatに
+            // 対応するラッパーは「ClearUnorderedAccessView(uav, Color4)」というオーバーロード名
+            // （Float版とUint版が同名でオーバーロードされている）。ClearUnorderedAccessViewFloat
+            // という名前のメソッドは存在しないため注意。
+            _d3d11Context?.ClearUnorderedAccessView(_uavDnnInputBufCuda, new Vortice.Mathematics.Color4(0f, 0f, 0f, 0f));
+
             _dnnInputCudaBufElemCount = neededElems;
             _dnnInputCudaBufW = width;
             _dnnInputCudaBufH = height;
@@ -898,6 +981,14 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
         /// 変換結果はEnsureDnnInputCudaBufferAndGetNativePointerで取得済みのバッファへ
         /// 直接書き込まれるため、呼び出し側はこの後DnnSuperResolutionEngine.TryInferZeroCopyへ
         /// 同じポインタを渡すだけでよい。
+        ///
+        /// 【16の倍数アライメント対応】widthとheightはSrcBgra（元解像度そのまま、パディング無し）
+        /// のアップロードサイズであり、書き込み先の_dnnInputBufCudaのサイズ（AlignedWidth×
+        /// AlignedHeight）とは異なる。呼び出し側は本メソッドを呼ぶ前に必ず
+        /// EnsureDnnInputCudaBufferAndGetNativePointer(AlignedWidth, AlignedHeight)を呼んで
+        /// おくこと（本メソッド内では改めてEnsureDnnInputCudaBufferを呼ばない＝誤って
+        /// 元解像度サイズへ縮小再作成してしまわないようにするため）。
+        ///
         /// スレッドについて: 追加最適化（UIスレッド同期待ちの排除）により、このメソッドは
         /// DNN推論用の背景スレッドから直接呼ばれる想定に変更した。Immediate Contextへの
         /// 複数API呼び出し（Map→Unmap→CSSetShader→CSSetSRV/UAV→Dispatch→解除）を一連の
@@ -913,7 +1004,11 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
                 if (_bgraToNchwCs == null) return false; // シェーダ未コンパイル環境→呼び出し側でCPU経路へフォールバック
 
                 EnsureDnnSrcTex(width, height);
-                EnsureDnnInputCudaBuffer(width, height);
+                // NOTE: ここでEnsureDnnInputCudaBuffer(width, height)は呼ばない。呼び出し側が
+                // 事前にEnsureDnnInputCudaBufferAndGetNativePointer(AlignedWidth, AlignedHeight)で
+                // アライメント後サイズで確保済みのバッファをそのまま使う（元解像度サイズで
+                // 呼ぶと、せっかくアライメント後サイズで確保したバッファを誤って縮小・
+                // 再作成してしまい、TryInferZeroCopy側が期待するバッファサイズと不一致になる）。
                 if (_dnnSrcTex == null || _dnnSrcSrv == null || _uavDnnInputBufCuda == null || _d3d11Context == null)
                     return false;
 
@@ -931,9 +1026,14 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
                     }
                     _d3d11Context.Unmap(_dnnSrcTex, 0);
 
+                    // 書き込み先バッファの実際の行幅・高さ（アライメント後サイズ）を
+                    // 定数バッファでシェーダへ伝える（元解像度=ループ境界とは別物）。
+                    UpdateBgraToNchwConstantBuffer(_dnnInputCudaBufW, _dnnInputCudaBufH);
+
                     _d3d11Context.CSSetShader(_bgraToNchwCs);
                     _d3d11Context.CSSetShaderResources(0, new[] { _dnnSrcSrv });
                     _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnInputBufCuda });
+                    _d3d11Context.CSSetConstantBuffers(0, new[] { _cbBgraToNchw! });
                     _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
                     _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
                     _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
@@ -950,7 +1050,16 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
 
         /// <summary>段階6-3-4: TensorRTがCUDA経由で直接書き込み済みのバッファ（
         /// EnsureDnnCudaBufferAndGetNativePointerで取得したもの）を、CPUアップロードを
-        /// 一切行わずにそのままBGRAへ変換して表示する。PresentDnnHalfのCPUコピー省略版。</summary>
+        /// 一切行わずにそのままBGRAへ変換して表示する。PresentDnnHalfのCPUコピー省略版。
+        ///
+        /// 【16の倍数アライメント対応】widthとheightは「表示する最終サイズ」（元解像度×Scale、
+        /// パディング分を除いたクロップ後のサイズ）を渡すこと。_dnnHalfBufCuda自体は
+        /// EnsureDnnCudaBufferAndGetNativePointer呼び出し時のサイズ（AlignedWidth×AlignedHeight
+        /// ×Scale、パディング込み）のままで構わない――このメソッド内部で_dnnCudaBufW/Hを
+        /// シェーダの読み出しストライドとして使い、DstTex（width×height、クロップ後）の
+        /// 範囲だけを書き出すことで、パディング分は自然に切り捨てられる（左上原点基準の
+        /// クロップなので、右・下だけにパディングを追加したDnnSuperResolutionEngine側の
+        /// 前提と一致する）。</summary>
         public void PresentDnnHalfAlreadyInBuffer(int width, int height)
         {
             lock (_gpuLock)
@@ -962,14 +1071,20 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
 
                 try
                 {
-                    EnsureDnnBuffers(width, height); // _dnnUploadTex等の変換先は共通で使い回す
+                    EnsureDnnBuffers(width, height); // _dnnUploadTex等の変換先は表示サイズ(クロップ後)で確保
                     if (_dnnHalfBufCuda == null || _srvDnnHalfBufCuda == null || _dnnUploadTex == null ||
                         _uavDnnUpload == null || _srvDnnUpload == null)
                         return;
 
+                    // SrcNchw(_dnnHalfBufCuda)の実際の行幅・高さ（パディング込みのアライメント後
+                    // サイズ）を伝える。DstTex(_dnnUploadTex)はwidth×height（クロップ後）で
+                    // 確保済みなので、Dispatchのループ境界はクロップ後サイズのまま。
+                    UpdateNchw2BgraConstantBuffer(_dnnCudaBufW, _dnnCudaBufH);
+
                     _d3d11Context.CSSetShader(_nchw2BgraCs);
                     _d3d11Context.CSSetShaderResources(0, new[] { _srvDnnHalfBufCuda });
                     _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnUpload });
+                    _d3d11Context.CSSetConstantBuffers(0, new[] { _cbNchw2Bgra! });
                     _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
                     _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
                     _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
@@ -1233,10 +1348,16 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
                     }
                     _d3d11Context.Unmap(_dnnHalfBuf, 0);
 
+                    // このパスはDnnSuperResolutionEngine.TryInferToNchwHalf側で既にクロップ済み
+                    // （パディング無し）のNCHW配列を渡してくるため、Src側の行幅・高さは
+                    // DstTexと同じwidth/heightでよい。
+                    UpdateNchw2BgraConstantBuffer(width, height);
+
                     // Pass: NCHW float16平面バッファ → BGRAテクスチャ（GPU上で完結、CPUループ不要）
                     _d3d11Context.CSSetShader(_nchw2BgraCs);
                     _d3d11Context.CSSetShaderResources(0, new[] { _srvDnnHalfBuf });
                     _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnUpload });
+                    _d3d11Context.CSSetConstantBuffers(0, new[] { _cbNchw2Bgra! });
                     _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
                     _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
                     _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
@@ -1490,6 +1611,7 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
             _cbCompare?.Dispose(); _cbCompare = null;
             _compareCs?.Dispose(); _compareCs = null;
             _nchw2BgraCs?.Dispose(); _nchw2BgraCs = null;
+            _cbNchw2Bgra?.Dispose(); _cbNchw2Bgra = null;
             _srvDnnHalfBuf?.Dispose(); _srvDnnHalfBuf = null;
             _dnnHalfBuf?.Dispose(); _dnnHalfBuf = null;
             _srvDnnHalfBufCuda?.Dispose(); _srvDnnHalfBufCuda = null;
@@ -1498,6 +1620,7 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
             _srvDnnUpload?.Dispose(); _srvDnnUpload = null;
             _dnnUploadTex?.Dispose(); _dnnUploadTex = null;
             _bgraToNchwCs?.Dispose(); _bgraToNchwCs = null;
+            _cbBgraToNchw?.Dispose(); _cbBgraToNchw = null;
             _dnnSrcSrv?.Dispose(); _dnnSrcSrv = null;
             _dnnSrcTex?.Dispose(); _dnnSrcTex = null;
             _uavDnnInputBufCuda?.Dispose(); _uavDnnInputBufCuda = null;
