@@ -141,6 +141,69 @@ namespace VerticalPlayer
         // Present→EnsureSizeのようなネスト呼び出しも問題なく動作する。
         private readonly object _gpuLock = new();
 
+        // ── Compute Shaderバインド用の使い回し配列 ──
+        // CSSetShaderResources/CSSetUnorderedAccessViews/CSSetConstantBuffersはAPI上
+        // 配列（またはReadOnlySpan）を要求するため、呼び出しの都度 new[] { ... } すると
+        // 毎フレーム・毎パスで小さなヒープ確保が発生する（このクラス内だけで1フレームあたり
+        // 数十回）。すべてのDispatchシーケンス（Set→Dispatch→Clear）は_gpuLock配下で
+        // 直列に実行され、同時に2つ以上のシーケンスが進行することは無いため、要素数ごとに
+        // 1つずつ使い回し配列を持ち、呼び出し毎に中身だけ書き換えれば安全に確保を無くせる。
+        private readonly ID3D11ShaderResourceView[] _srvSlot1 = new ID3D11ShaderResourceView[1];
+        private readonly ID3D11ShaderResourceView[] _srvSlot2 = new ID3D11ShaderResourceView[2];
+        private readonly ID3D11UnorderedAccessView[] _uavSlot1 = new ID3D11UnorderedAccessView[1];
+        private readonly ID3D11Buffer[] _cbSlot1 = new ID3D11Buffer[1];
+
+        /// <summary>_srvSlot1を使ってCSSetShaderResources(0)を呼ぶ（配列確保無し）。</summary>
+        private void SetSrv(ID3D11ShaderResourceView? srv)
+        {
+            _srvSlot1[0] = srv!;
+            _d3d11Context!.CSSetShaderResources(0, _srvSlot1);
+        }
+
+        /// <summary>_srvSlot2を使ってCSSetShaderResources(0)を呼ぶ（配列確保無し）。</summary>
+        private void SetSrv2(ID3D11ShaderResourceView? srv0, ID3D11ShaderResourceView? srv1)
+        {
+            _srvSlot2[0] = srv0!;
+            _srvSlot2[1] = srv1!;
+            _d3d11Context!.CSSetShaderResources(0, _srvSlot2);
+        }
+
+        /// <summary>t0（1スロット）をnullにクリアする（配列確保無し）。</summary>
+        private void ClearSrv()
+        {
+            _srvSlot1[0] = null!;
+            _d3d11Context!.CSSetShaderResources(0, _srvSlot1);
+        }
+
+        /// <summary>t0/t1（2スロット）をnullにクリアする（配列確保無し）。</summary>
+        private void ClearSrv2()
+        {
+            _srvSlot2[0] = null!;
+            _srvSlot2[1] = null!;
+            _d3d11Context!.CSSetShaderResources(0, _srvSlot2);
+        }
+
+        /// <summary>_uavSlot1を使ってCSSetUnorderedAccessViews(0)を呼ぶ（配列確保無し）。</summary>
+        private void SetUav(ID3D11UnorderedAccessView? uav)
+        {
+            _uavSlot1[0] = uav!;
+            _d3d11Context!.CSSetUnorderedAccessViews(0, _uavSlot1);
+        }
+
+        /// <summary>u0（1スロット）をnullにクリアする（配列確保無し）。</summary>
+        private void ClearUav()
+        {
+            _uavSlot1[0] = null!;
+            _d3d11Context!.CSSetUnorderedAccessViews(0, _uavSlot1);
+        }
+
+        /// <summary>_cbSlot1を使ってCSSetConstantBuffers(0)を呼ぶ（配列確保無し）。</summary>
+        private void SetCb(ID3D11Buffer? cb)
+        {
+            _cbSlot1[0] = cb!;
+            _d3d11Context!.CSSetConstantBuffers(0, _cbSlot1);
+        }
+
         private const string EffectsShaderSource = @"
 cbuffer EffectsCB : register(b0)
 {
@@ -1031,12 +1094,12 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
                     UpdateBgraToNchwConstantBuffer(_dnnInputCudaBufW, _dnnInputCudaBufH);
 
                     _d3d11Context.CSSetShader(_bgraToNchwCs);
-                    _d3d11Context.CSSetShaderResources(0, new[] { _dnnSrcSrv });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnInputBufCuda });
-                    _d3d11Context.CSSetConstantBuffers(0, new[] { _cbBgraToNchw! });
+                    SetSrv(_dnnSrcSrv);
+                    SetUav(_uavDnnInputBufCuda);
+                    SetCb(_cbBgraToNchw!);
                     _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
-                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                    ClearSrv();
+                    ClearUav();
 
                     return true;
                 }
@@ -1082,12 +1145,12 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
                     UpdateNchw2BgraConstantBuffer(_dnnCudaBufW, _dnnCudaBufH);
 
                     _d3d11Context.CSSetShader(_nchw2BgraCs);
-                    _d3d11Context.CSSetShaderResources(0, new[] { _srvDnnHalfBufCuda });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnUpload });
-                    _d3d11Context.CSSetConstantBuffers(0, new[] { _cbNchw2Bgra! });
+                    SetSrv(_srvDnnHalfBufCuda);
+                    SetUav(_uavDnnUpload);
+                    SetCb(_cbNchw2Bgra!);
                     _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
-                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                    ClearSrv();
+                    ClearUav();
 
                     RunPipelineAndComposite(width, height, _dnnUploadTex, _srvDnnUpload);
                 }
@@ -1355,12 +1418,12 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
 
                     // Pass: NCHW float16平面バッファ → BGRAテクスチャ（GPU上で完結、CPUループ不要）
                     _d3d11Context.CSSetShader(_nchw2BgraCs);
-                    _d3d11Context.CSSetShaderResources(0, new[] { _srvDnnHalfBuf });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavDnnUpload });
-                    _d3d11Context.CSSetConstantBuffers(0, new[] { _cbNchw2Bgra! });
+                    SetSrv(_srvDnnHalfBuf);
+                    SetUav(_uavDnnUpload);
+                    SetCb(_cbNchw2Bgra!);
                     _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
-                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                    ClearSrv();
+                    ClearUav();
 
                     RunPipelineAndComposite(width, height, _dnnUploadTex, _srvDnnUpload);
                 }
@@ -1394,35 +1457,35 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
                     _avgLumaUav != null && _cbReduce != null)
                 {
                     _d3d11Context.CSSetShader(_lumaDownCs);
-                    _d3d11Context.CSSetShaderResources(0, new[] { srcSrv });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _lumaDownUav });
+                    SetSrv(srcSrv);
+                    SetUav(_lumaDownUav);
                     _d3d11Context.Dispatch((uint)((LumaDownSize + 7) / 8), (uint)((LumaDownSize + 7) / 8), 1);
-                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                    ClearSrv();
+                    ClearUav();
 
                     UpdateReduceConstantBuffer();
                     _d3d11Context.CSSetShader(_lumaReduceCs);
-                    _d3d11Context.CSSetShaderResources(0, new[] { _lumaDownSrv });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _avgLumaUav });
-                    _d3d11Context.CSSetConstantBuffers(0, new[] { _cbReduce });
+                    SetSrv(_lumaDownSrv);
+                    SetUav(_avgLumaUav);
+                    SetCb(_cbReduce);
                     _d3d11Context.Dispatch(1, 1, 1);
-                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                    ClearSrv();
+                    ClearUav();
                 }
 
                 // Pass C: コントラスト/彩度/ガンマ＋ダイナミックコントラスト（常に原寸=width x height）
                 UpdateEffectsConstantBuffer();
                 var effectsTarget = (srActive ? _uavNativeProcessed : lastStageTarget)!;
                 _d3d11Context.CSSetShader(_effectsCs);
-                var srvs = (_dynamicContrastShaderReady && _avgLumaSrv != null)
-                    ? new[] { srcSrv, _avgLumaSrv }
-                    : new[] { srcSrv };
-                _d3d11Context.CSSetShaderResources(0, srvs);
-                _d3d11Context.CSSetUnorderedAccessViews(0, new[] { effectsTarget });
-                _d3d11Context.CSSetConstantBuffers(0, new[] { _cbEffects });
+                if (_dynamicContrastShaderReady && _avgLumaSrv != null)
+                    SetSrv2(srcSrv, _avgLumaSrv);
+                else
+                    SetSrv2(srcSrv, null);
+                SetUav(effectsTarget);
+                SetCb(_cbEffects);
                 _d3d11Context.Dispatch((uint)((width + 7) / 8), (uint)((height + 7) / 8), 1);
-                _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null!, null! });
-                _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                ClearSrv2();
+                ClearUav();
 
                 if (srActive && _srHorizCs != null && _srVertCs != null && _srUnsharpCs != null &&
                     _srvNativeProcessed != null && _srHorizSrv != null && _srVertSrv != null && _cbScale != null && _cbSharp != null)
@@ -1431,31 +1494,31 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
 
                     // Pass D: 水平Lanczos（原寸高さのまま、幅だけ拡大）
                     _d3d11Context.CSSetShader(_srHorizCs);
-                    _d3d11Context.CSSetShaderResources(0, new[] { _srvNativeProcessed });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _srHorizUav! });
-                    _d3d11Context.CSSetConstantBuffers(0, new[] { _cbScale });
+                    SetSrv(_srvNativeProcessed);
+                    SetUav(_srHorizUav!);
+                    SetCb(_cbScale);
                     _d3d11Context.Dispatch((uint)((_outW + 7) / 8), (uint)((height + 7) / 8), 1);
-                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                    ClearSrv();
+                    ClearUav();
 
                     // Pass E: 垂直Lanczos（拡大後サイズ）
                     _d3d11Context.CSSetShader(_srVertCs);
-                    _d3d11Context.CSSetShaderResources(0, new[] { _srHorizSrv });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _srVertUav! });
-                    _d3d11Context.CSSetConstantBuffers(0, new[] { _cbScale });
+                    SetSrv(_srHorizSrv);
+                    SetUav(_srVertUav!);
+                    SetCb(_cbScale);
                     _d3d11Context.Dispatch((uint)((_outW + 7) / 8), (uint)((_outH + 7) / 8), 1);
-                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                    ClearSrv();
+                    ClearUav();
 
                     // Pass F: アンシャープ→最終段（比較モード時は一時テクスチャ、通常時は共有テクスチャ）
                     UpdateSharpConstantBuffer();
                     _d3d11Context.CSSetShader(_srUnsharpCs);
-                    _d3d11Context.CSSetShaderResources(0, new[] { _srVertSrv });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { lastStageTarget });
-                    _d3d11Context.CSSetConstantBuffers(0, new[] { _cbSharp });
+                    SetSrv(_srVertSrv);
+                    SetUav(lastStageTarget);
+                    SetCb(_cbSharp);
                     _d3d11Context.Dispatch((uint)((_outW + 7) / 8), (uint)((_outH + 7) / 8), 1);
-                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                    ClearSrv();
+                    ClearUav();
                 }
 
                 // Pass G: compare view (mode 1: single-frame wipe / mode 2: dual full-frame side-by-side)
@@ -1463,12 +1526,12 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
                 {
                     UpdateCompareConstantBuffer();
                     _d3d11Context.CSSetShader(_compareCs);
-                    _d3d11Context.CSSetShaderResources(0, new[] { _srvProcessedFinal!, srcSrv });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new[] { _uavShared });
-                    _d3d11Context.CSSetConstantBuffers(0, new[] { _cbCompare! });
+                    SetSrv2(_srvProcessedFinal!, srcSrv);
+                    SetUav(_uavShared);
+                    SetCb(_cbCompare!);
                     _d3d11Context.Dispatch((uint)((_outW + 7) / 8), (uint)((_outH + 7) / 8), 1);
-                    _d3d11Context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null!, null! });
-                    _d3d11Context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
+                    ClearSrv2();
+                    ClearUav();
                 }
             }
             else

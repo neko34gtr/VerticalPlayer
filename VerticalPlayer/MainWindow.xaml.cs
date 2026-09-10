@@ -40,6 +40,7 @@ namespace VerticalPlayer
         public double WindowHeight { get; set; } = 860;
         public bool AlwaysOnTop { get; set; }
         public bool AutoPlayNext { get; set; } = true;
+        public bool FitWindowToVideo { get; set; } = true;
 
         // ── 再生 ──
         public double Volume { get; set; } = 0.7;
@@ -395,6 +396,7 @@ namespace VerticalPlayer
             AlwaysOnTopCheck.IsChecked = s.AlwaysOnTop;
             this.Topmost = s.AlwaysOnTop;
             AutoPlayNextCheck.IsChecked = s.AutoPlayNext;
+            FitWindowToVideoCheck.IsChecked = s.FitWindowToVideo;
             _currentRotation = s.Rotation;
             PlayerRotation.Angle = _currentRotation;
             Player.DisplayRotation = _currentRotation;
@@ -487,6 +489,7 @@ namespace VerticalPlayer
                 WindowHeight = this.Height,
                 AlwaysOnTop = this.Topmost,
                 AutoPlayNext = AutoPlayNextCheck.IsChecked ?? true,
+                FitWindowToVideo = FitWindowToVideoCheck.IsChecked ?? true,
 
                 // 再生
                 Volume = VolumeSlider.Value,
@@ -1150,6 +1153,7 @@ namespace VerticalPlayer
             if (_resizingProgrammatically) return;
             if (Player == null || Player.NaturalVideoWidth <= 0) return;
             if (this.WindowState != WindowState.Normal) return;
+            if (!(FitWindowToVideoCheck.IsChecked ?? true)) return; // OFF時は自由な比率でリサイズさせる
 
             double dispRatio = (_currentRotation == 90 || _currentRotation == 270)
                 ? (double)Player.NaturalVideoHeight / Player.NaturalVideoWidth
@@ -1177,6 +1181,7 @@ namespace VerticalPlayer
         private void ResizeToVideo()
         {
             if (Player.NaturalVideoWidth == 0 || Player.NaturalVideoHeight == 0) return;
+            if (!(FitWindowToVideoCheck.IsChecked ?? true)) return; // OFF時はウィンドウサイズを自動変更しない
 
             double vw = Player.NaturalVideoWidth;
             double vh = Player.NaturalVideoHeight;
@@ -1555,6 +1560,21 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         private void AlwaysOnTop_Changed(object sender, RoutedEventArgs e)
             => this.Topmost = AlwaysOnTopCheck.IsChecked ?? false;
+
+        // ─────────────────────────────────────────────────────────────────
+        // ウィンドウを動画表示部にフィット
+        // ─────────────────────────────────────────────────────────────────
+        // OFFの間はWindow_SizeChanged/ResizeToVideoによる自動リサイズ（アスペクト比の
+        // 強制・回転時やファイルを開いた時の自動サイズ調整）を一切行わない。ユーザーが
+        // ウィンドウを自由な比率にドラッグリサイズでき、動画は現状のPlayerのStretch設定
+        // （Uniform、黒帯あり）でそのまま表示される。
+        // ONにした瞬間は、現在再生中の動画に合わせて即座にフィットさせる（OFFにした瞬間は
+        // 単に以降の自動リサイズを止めるだけなので、ウィンドウを動かす必要はない）。
+        private void FitWindowToVideo_Changed(object sender, RoutedEventArgs e)
+        {
+            if (FitWindowToVideoCheck.IsChecked ?? true)
+                ResizeToVideo();
+        }
 
         private void AutoPlayNext_Changed(object sender, RoutedEventArgs e) { /* Player_MediaEndedで都度参照するのみ */ }
 

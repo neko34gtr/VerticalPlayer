@@ -65,6 +65,29 @@ namespace VerticalPlayer.Media
         public int Scale => _scale;
 
         private bool _lastInitFailed;
+
+        // CPU入力パス（TryInfer/TryInferToNchwHalf/TryInferWithCudaOutput）共通の入力テンソル
+        // 使い回しバッファ。3メソッドとも_buildLock内でのみ使い、テンソルはメソッド呼び出しの
+        // 範囲を超えて外部（呼び出し側スレッド等）へ漏れないため、毎フレーム新規確保する
+        // 必要がない（右・下のパディング領域は初回確保時に0初期化されたまま変化しないので、
+        // 使い回しても黒パディングの前提は崩れない）。
+        private DenseTensor<OrtFloat16>? _cachedInputTensor;
+        private int _cachedInputTensorW, _cachedInputTensorH;
+
+        /// <summary>_alignedWidth/_alignedHeightサイズの入力テンソルを取得する。サイズが
+        /// 変わった場合（解像度変更でEnsureEngineが再ビルドされた場合）のみ再確保する。
+        /// 呼び出し元は必ず_buildLock内から呼ぶこと（スレッドセーフではない）。</summary>
+        private DenseTensor<OrtFloat16> GetOrCreateInputTensor()
+        {
+            if (_cachedInputTensor == null ||
+                _cachedInputTensorW != _alignedWidth || _cachedInputTensorH != _alignedHeight)
+            {
+                _cachedInputTensor = new DenseTensor<OrtFloat16>(new[] { 1, 3, _alignedHeight, _alignedWidth });
+                _cachedInputTensorW = _alignedWidth;
+                _cachedInputTensorH = _alignedHeight;
+            }
+            return _cachedInputTensor;
+        }
         private bool _loggedInferError;
         private bool _loggedCudaError;
         private bool _loggedZeroCopyError;
@@ -104,6 +127,12 @@ namespace VerticalPlayer.Media
             _cacheDir = cacheDir;
             _scale = scale;
         }
+
+        /// <summary>trtcache（RAMディスク等の揮発ストレージ）に対応する永続バックアップ先。
+        /// 設定されている場合、BuildSessionOnceが解像度専用サブフォルダをビルドする直前に、
+        /// このサブフォルダに対応するバックアップからの復元を試みる（無ければ何もしない）。
+        /// 未設定(null)なら復元は行わない。</summary>
+        public string? BackupDir { get; set; }
 
         /// <summary>
         /// 指定解像度用のセッションを確保する。解像度が前回と同じでセッションが
@@ -222,6 +251,20 @@ namespace VerticalPlayer.Media
             // 解像度ごとに専用サブフォルダへキャッシュを分離する（他解像度・backupには
             // 影響しない。ClearTrtCacheFilesのコメントも参照）。
             string cacheSubDir = Path.Combine(_cacheDir, $"{alignedWidth}x{alignedHeight}");
+
+            // このサブフォルダがまだ無い（＝このプロセスでこの解像度を初めて使う）場合、
+            // ビルドする前に永続バックアップの対応サブフォルダから復元を試みる。
+            // 重要: 以前はルートのcacheDirの有無だけで復元要否を判定していたため、
+            // 最初に使った解像度でルートフォルダが作られた瞬間、以降どの解像度を
+            // 使ってもここに到達する前に「復元済み」と誤判定され、2つ目以降の解像度が
+            // 一切復元されない不具合があった（他解像度は毎回フルリビルドになっていた）。
+            // 解像度専用サブフォルダ単位で判定・復元することでこれを解消する。
+            if (!string.IsNullOrEmpty(BackupDir))
+            {
+                string backupSubDir = Path.Combine(BackupDir, $"{alignedWidth}x{alignedHeight}");
+                RestoreCacheIfNeeded(cacheSubDir, backupSubDir);
+            }
+
             Directory.CreateDirectory(cacheSubDir);
             _alignedWidth = alignedWidth;
             _alignedHeight = alignedHeight;
@@ -332,10 +375,10 @@ namespace VerticalPlayer.Media
                 // NOTE: DenseTensorの多次元インデクサ([0,c,y,x])はアクセス毎にストライド計算＋
                 // 境界チェックが走り非常に遅い（480pでも約100万回/フレーム）。Buffer.Spanへ
                 // フラットオフセットで直書き/直読みすることで同じNCHWレイアウトのまま高速化する。
-                // 入力側: アライメント後サイズ(_alignedWidth/_alignedHeight)でテンソルを確保し、
-                // 元解像度(width/height)分だけ書き込む。右・下側の余白はDenseTensor初期化時点で
-                // 0（＝正規化後の黒）のままなので、明示的なパディング処理は不要。
-                var inputTensor = new DenseTensor<OrtFloat16>(new[] { 1, 3, _alignedHeight, _alignedWidth });
+                // 入力側: アライメント後サイズ(_alignedWidth/_alignedHeight)のテンソルを使い回す
+                // （GetOrCreateInputTensor参照）。元解像度(width/height)分だけ書き込み、右・下側の
+                // 余白は初回確保時に0（＝正規化後の黒）初期化されたまま変化しない。
+                var inputTensor = GetOrCreateInputTensor();
                 var inSpan = inputTensor.Buffer.Span;
                 int inPlane = _alignedWidth * _alignedHeight;
                 for (int y = 0; y < height; y++)
@@ -462,9 +505,9 @@ namespace VerticalPlayer.Media
                 {
                     // NOTE: DenseTensorの多次元インデクサはアクセス毎にストライド計算＋境界
                     // チェックが走り非常に遅いため、Buffer.Spanへフラットオフセットで直書きする。
-                    // 入力側パディング: TryInferと同じくアライメント後サイズで確保し、
-                    // 右・下側の余白は0（黒）のまま推論へ渡す。
-                    var inputTensor = new DenseTensor<OrtFloat16>(new[] { 1, 3, _alignedHeight, _alignedWidth });
+                    // 入力側パディング: TryInferと同じくアライメント後サイズのテンソルを
+                    // 使い回す（GetOrCreateInputTensor）。右・下側の余白は0（黒）のまま。
+                    var inputTensor = GetOrCreateInputTensor();
                     var inSpan = inputTensor.Buffer.Span;
                     int inPlane = _alignedWidth * _alignedHeight;
                     for (int y = 0; y < height; y++)
@@ -591,9 +634,10 @@ namespace VerticalPlayer.Media
                     // 入力は引き続きCPUで変換（段階6-3-1未着手）。DenseTensorの多次元インデクサは
                     // アクセス毎にストライド計算＋境界チェックが走り非常に遅いため、
                     // Buffer.Spanへフラットオフセットで直書きする。
-                    // 16の倍数アライメント対応: アライメント後サイズで確保し、元解像度分だけ
-                    // 書き込む（右・下側は0初期化のまま＝黒パディング）。
-                    var inputTensor = new DenseTensor<OrtFloat16>(new[] { 1, 3, _alignedHeight, _alignedWidth });
+                    // 16の倍数アライメント対応: アライメント後サイズのテンソルを使い回す
+                    // （GetOrCreateInputTensor）。元解像度分だけ書き込み、右・下側は
+                    // 初回確保時の0初期化のまま＝黒パディング。
+                    var inputTensor = GetOrCreateInputTensor();
                     var inSpan = inputTensor.Buffer.Span;
                     int inPlane = _alignedWidth * _alignedHeight;
                     for (int y = 0; y < height; y++)
@@ -762,6 +806,9 @@ namespace VerticalPlayer.Media
                 _alignedWidth = 0;
                 _alignedHeight = 0;
                 _currentCacheSubDir = null;
+                _cachedInputTensor = null;
+                _cachedInputTensorW = 0;
+                _cachedInputTensorH = 0;
                 _loggedInferError = false;
                 _loggedCudaError = false;
                 _loggedZeroCopyError = false;
@@ -793,7 +840,13 @@ namespace VerticalPlayer.Media
 
         /// <summary>cacheDirが存在しない場合のみ、backupDirの内容をcacheDirへ丸ごと復元する。
         /// cacheDirが既に存在する場合、backupDirが存在しない場合は何もしない
-        /// （復元に失敗・不要でもエンジンが初回ビルドし直すだけなので致命的ではない）。</summary>
+        /// （復元に失敗・不要でもエンジンが初回ビルドし直すだけなので致命的ではない）。
+        ///
+        /// 呼び出し側は解像度専用サブフォルダ単位（例: trtcache\864x480 ⇔
+        /// trtcache_backup\864x480）で渡すこと。ルートのtrtcache/trtcache_backup
+        /// フォルダ単位で呼ぶと、最初に使った解像度でルートのcacheDirが作られた
+        /// 時点で以降すべての解像度がこの関数の入り口で「復元済み」と誤判定されてしまう
+        /// （BuildSessionOnceが解像度専用サブフォルダ単位で自動的に呼び出す）。</summary>
         public static void RestoreCacheIfNeeded(string cacheDir, string backupDir)
         {
             try
@@ -806,6 +859,37 @@ namespace VerticalPlayer.Media
             catch (Exception ex)
             {
                 Trace($"trtcache復元失敗（次回エンジン初回ビルドに任せます）: {ex.Message}");
+            }
+        }
+
+        /// <summary>backupDir配下にある解像度サブフォルダすべてについて、対応するcacheDir側の
+        /// サブフォルダが存在しなければ丸ごと復元する（存在するものは上書きしない）。
+        ///
+        /// 「存在するものは上書きしない」のが重要: 今回のセッション中にキャッシュ破損等で
+        /// 該当解像度のキャッシュを削除→再ビルドして直した後、ここを再度呼んでも
+        /// （新しいファイルを開くたびに呼んでも）既に存在するサブフォルダは上書きされない。
+        /// もし無条件にbackup側で毎回上書きしてしまうと、backupはアプリ終了時にしか
+        /// 更新されない＝直したはずのキャッシュに古い（壊れた）backupを再度被せてしまい、
+        /// 同じ初期化失敗を繰り返すことになる。
+        ///
+        /// DNN機能を有効化するタイミング等で呼ぶことを想定。既に全解像度が復元済みの
+        /// 2回目以降の呼び出しはフォルダ存在チェックのみで即座に終わるため、
+        /// 呼び出し場所を厳密に1回に絞る必要はない。</summary>
+        public static void RestoreAllCachesIfNeeded(string cacheDir, string backupDir)
+        {
+            try
+            {
+                if (!Directory.Exists(backupDir)) return;
+                Directory.CreateDirectory(cacheDir);
+                foreach (var subBackupDir in Directory.GetDirectories(backupDir))
+                {
+                    string resName = Path.GetFileName(subBackupDir);
+                    RestoreCacheIfNeeded(Path.Combine(cacheDir, resName), subBackupDir);
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace($"trtcache一括復元処理自体が失敗: {ex.Message}");
             }
         }
 

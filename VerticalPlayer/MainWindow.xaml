@@ -1013,6 +1013,9 @@
                                     <CheckBox x:Name="AlwaysOnTopCheck" Content="常に最前面"
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="AlwaysOnTop_Changed" Unchecked="AlwaysOnTop_Changed"/>
+                                    <CheckBox x:Name="FitWindowToVideoCheck" Content="ウィンドウを動画表示部にフィット"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
+                                              Checked="FitWindowToVideo_Changed" Unchecked="FitWindowToVideo_Changed"/>
                                     <CheckBox x:Name="AutoPlayNextCheck" Content="次ファイル自動再生"
                                               Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
                                               Checked="AutoPlayNext_Changed" Unchecked="AutoPlayNext_Changed"/>

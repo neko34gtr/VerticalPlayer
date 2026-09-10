@@ -124,6 +124,10 @@ namespace VerticalPlayer.Media
         private volatile bool _dnnSrEnabled;
         private Task? _dnnBuildTask;
         private int _dnnBuildW, _dnnBuildH;
+        // DNN推論用のフレームコピー先バッファ（使い回し）。_dnnInferenceBusyにより、次回ここへ
+        // 書き込むのは前回のTask.Runが完了（_dnnInferenceBusy=falseへ復帰）した後のみと保証
+        // されているため、毎フレームClone()で新規配列を確保する必要がない（GC負荷削減）。
+        private byte[]? _dnnFrameBuf;
         private volatile bool _dnnInferenceBusy; // 前フレームの推論(Task)がまだ完了していない
 
         /// <summary>DNN超解像エンジンのバックグラウンドビルド中/完了が変化した時に発火
@@ -204,8 +208,13 @@ namespace VerticalPlayer.Media
 
             if (_dnnSrEnabled)
             {
-                DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, TrtCacheBackupDir);
-                _dnnSr = new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
+                // 全解像度分をまとめて復元しておく（存在するものは上書きしない）。
+                // 個別解像度単位の復元はBuildSessionOnce内でも安全網として行われる。
+                DnnSuperResolutionEngine.RestoreAllCachesIfNeeded(DnnTrtCacheDir, TrtCacheBackupDir);
+                _dnnSr = new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir)
+                {
+                    BackupDir = TrtCacheBackupDir
+                };
             }
         }
 
@@ -234,11 +243,12 @@ namespace VerticalPlayer.Media
             _dnnSrEnabled = enabled;
             if (enabled)
             {
-                // trtcacheはRAMディスク等の揮発ストレージ運用のため、無ければ
-                // exe直下の永続バックアップから復元してからエンジンを読む
-                DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, TrtCacheBackupDir);
+                // trtcacheはRAMディスク等の揮発ストレージ運用のため、全解像度分を
+                // まとめて復元しておく（存在するものは上書きしない）。
+                DnnSuperResolutionEngine.RestoreAllCachesIfNeeded(DnnTrtCacheDir, TrtCacheBackupDir);
                 _dnnSr ??= new DnnSuperResolutionEngine(
                     Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
+                _dnnSr.BackupDir = TrtCacheBackupDir;
                 // DNN側で拡大するため、GPU側のLanczos超解像は二重適用を避けるため無効化する
                 GpuPresenter?.SetSuperResolution(1f);
             }
@@ -254,8 +264,10 @@ namespace VerticalPlayer.Media
         /// UIスレッド上で直接呼ばないこと）。</summary>
         public bool PrebuildDnnEngine(int width, int height)
         {
-            DnnSuperResolutionEngine.RestoreCacheIfNeeded(DnnTrtCacheDir, TrtCacheBackupDir);
+            // 解像度専用サブフォルダ単位の復元はBuildSessionOnce（EnsureEngine経由）内で
+            // 自動的に行われるため、ここではBackupDirを設定するだけでよい。
             _dnnSr ??= new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
+            _dnnSr.BackupDir = TrtCacheBackupDir;
             GpuPresenter?.SetSuperResolution(1f);
             return _dnnSr.EnsureEngine(width, height);
         }
@@ -958,7 +970,14 @@ namespace VerticalPlayer.Media
                                             int alignedW = dnnLocal.AlignedWidth, alignedH = dnnLocal.AlignedHeight;
                                             int alignedUpW = alignedW * dnnLocal.Scale, alignedUpH = alignedH * dnnLocal.Scale;
                                             var gp = GpuPresenter;
-                                            var bufCopy = (byte[])managedBuf.Clone(); // 次フレームで上書きされるため複製必須
+                                            // 次にこのバッファへ書き込むのは前回のTask.Runが
+                                            // 完了した後だけ（_dnnInferenceBusyで保証）なので、
+                                            // フレーム毎の新規配列確保(Clone)を避け、使い回しの
+                                            // 単一バッファへBlockCopyするだけにする。
+                                            if (_dnnFrameBuf == null || _dnnFrameBuf.Length != bufSize)
+                                                _dnnFrameBuf = new byte[bufSize];
+                                            Buffer.BlockCopy(managedBuf, 0, _dnnFrameBuf, 0, bufSize);
+                                            var bufCopy = _dnnFrameBuf;
                                             int bw = w, bh = h;
                                             int bStride = frameStride;
                                             Task.Run(() =>
