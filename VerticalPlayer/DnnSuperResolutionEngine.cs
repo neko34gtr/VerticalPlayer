@@ -893,22 +893,126 @@ namespace VerticalPlayer.Media
             }
         }
 
-        /// <summary>cacheDirの内容をbackupDirへ丸ごとバックアップする（既存のbackupDirは削除して置き換え）。
-        /// cacheDirが存在しない（DNNが一度も使われていない）場合は何もしない。
-        /// アプリ終了時に呼ぶことを想定（失敗しても握りつぶす）。</summary>
+        /// <summary>cacheDirの内容をbackupDirへ安全にマージ同期する（アプリ終了時に呼ぶ想定）。
+        ///
+        /// 【重要】以前は「backupDirを丸ごと削除してからcacheDirを丸ごとコピー」という
+        /// 破壊的な方式だった。これだと、何らかの理由（設定パスの取り違え、RAMDISKが
+        /// まだ一部の解像度しか使われていない状態でのアプリ終了等）でcacheDir側が
+        /// 本来より少ない/乏しい状態だった場合、その内容でbackup全体を上書きしてしまい、
+        /// 過去に苦労してビルドした他解像度の正常なキャッシュを一瞬で失ってしまう
+        /// （実際にこの事故が発生したため変更）。
+        ///
+        /// 対策として、cacheDir→backupDirは「backup側に無い、またはサイズ・CRC32が
+        /// 異なるファイルだけを追加・更新する」一方向マージのみを行い、backup側にしか
+        /// 無いファイル・フォルダ（cacheDir側で欠けているもの）は一切削除しない。
+        /// これにより、cacheDir側が何らかの理由で不完全でも、backupは既知の最良状態を
+        /// 保ち続ける（不要になったキャッシュの整理はユーザーが手動で行うこと）。</summary>
         public static void BackupCache(string cacheDir, string backupDir)
         {
             try
             {
                 if (!Directory.Exists(cacheDir)) return;
-                Trace($"trtcacheをバックアップ: {cacheDir} → {backupDir}");
-                if (Directory.Exists(backupDir))
-                    Directory.Delete(backupDir, recursive: true);
-                CopyDirectoryRecursive(cacheDir, backupDir);
+                Directory.CreateDirectory(backupDir);
+                int copied = 0, skipped = 0, failed = 0;
+                MergeDirectorySafely(cacheDir, backupDir, ref copied, ref skipped, ref failed);
+                Trace($"trtcacheをバックアップへマージ: {cacheDir} → {backupDir}" +
+                      $"（更新{copied}件・変更無し{skipped}件・失敗{failed}件、backup側の既存ファイルは削除していません）");
             }
             catch (Exception ex)
             {
                 Trace($"trtcacheバックアップ失敗: {ex.Message}");
+            }
+        }
+
+        /// <summary>sourceDir→destDirへ、内容が異なる（またはdest側に存在しない）ファイルだけを
+        /// 一方向でコピーする。destDir側にしか存在しないファイル・フォルダは一切削除しない
+        /// （BackupCacheのdocコメント参照）。1ファイルのコピー失敗は握りつぶして続行する
+        /// （他の正常なファイルのバックアップまで巻き込んで失敗させないため）。</summary>
+        private static void MergeDirectorySafely(string sourceDir, string destDir, ref int copied, ref int skipped, ref int failed)
+        {
+            Directory.CreateDirectory(destDir);
+
+            foreach (var srcFile in Directory.GetFiles(sourceDir))
+            {
+                string destFile = Path.Combine(destDir, Path.GetFileName(srcFile));
+                try
+                {
+                    if (FilesAreIdentical(srcFile, destFile))
+                    {
+                        skipped++;
+                        continue;
+                    }
+                    File.Copy(srcFile, destFile, overwrite: true);
+                    copied++;
+                }
+                catch (Exception ex)
+                {
+                    failed++;
+                    Trace($"trtcacheバックアップ: ファイルコピー失敗（スキップして続行）: {srcFile}: {ex.Message}");
+                }
+            }
+
+            foreach (var srcSubDir in Directory.GetDirectories(sourceDir))
+            {
+                MergeDirectorySafely(srcSubDir, Path.Combine(destDir, Path.GetFileName(srcSubDir)), ref copied, ref skipped, ref failed);
+            }
+        }
+
+        /// <summary>2つのファイルが「同一」とみなせるかを判定する。サイズが異なれば即座に
+        /// 別物と判定する（コストの高いCRC32計算を避けるための足切り）。サイズが同じ場合のみ
+        /// CRC32で内容そのものを比較する（更新日時はコピー方式によって意味を持たない場合が
+        /// あるため判定には使わない＝日時だけ見て「同じ」と誤判定してコピーをスキップする
+        /// 事故を避ける）。比較自体が失敗した場合は安全側に倒し「別物」＝上書き対象とする。</summary>
+        private static bool FilesAreIdentical(string srcFile, string destFile)
+        {
+            if (!File.Exists(destFile)) return false;
+            try
+            {
+                var srcInfo = new FileInfo(srcFile);
+                var destInfo = new FileInfo(destFile);
+                if (srcInfo.Length != destInfo.Length) return false;
+                return Crc32.Compute(srcFile) == Crc32.Compute(destFile);
+            }
+            catch (Exception ex)
+            {
+                Trace($"trtcacheバックアップ: ファイル比較失敗（安全側に倒して上書き対象とする）: {srcFile}: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>依存パッケージを増やさないための自前CRC32実装（IEEE 802.3多項式、
+        /// System.IO.Hashing等の追加パッケージ参照を避けるため標準ライブラリのみで完結させる）。
+        /// trtcacheのファイルは数MB〜数十MBあり得るため、Stream経由でチャンク読み込みしながら
+        /// 計算し、ファイル全体をメモリに載せない。</summary>
+        private static class Crc32
+        {
+            private static readonly uint[] Table = BuildTable();
+
+            private static uint[] BuildTable()
+            {
+                var table = new uint[256];
+                for (uint i = 0; i < 256; i++)
+                {
+                    uint c = i;
+                    for (int k = 0; k < 8; k++)
+                        c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
+                    table[i] = c;
+                }
+                return table;
+            }
+
+            public static uint Compute(string path)
+            {
+                uint crc = 0xFFFFFFFF;
+                using var fs = File.OpenRead(path);
+                var buf = new byte[81920];
+                int read;
+                while ((read = fs.Read(buf, 0, buf.Length)) > 0)
+                {
+                    for (int i = 0; i < read; i++)
+                        crc = Table[(crc ^ buf[i]) & 0xFF] ^ (crc >> 8);
+                }
+                return crc ^ 0xFFFFFFFF;
             }
         }
 
