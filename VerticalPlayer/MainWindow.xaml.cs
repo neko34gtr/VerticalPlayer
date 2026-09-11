@@ -41,6 +41,7 @@ namespace VerticalPlayer
         public bool AlwaysOnTop { get; set; }
         public bool AutoPlayNext { get; set; } = true;
         public bool FitWindowToVideo { get; set; } = true;
+        public bool DnnFastBuild { get; set; } = false;
 
         // ── 再生 ──
         public double Volume { get; set; } = 0.7;
@@ -397,6 +398,8 @@ namespace VerticalPlayer
             this.Topmost = s.AlwaysOnTop;
             AutoPlayNextCheck.IsChecked = s.AutoPlayNext;
             FitWindowToVideoCheck.IsChecked = s.FitWindowToVideo;
+            DnnFastBuildCheck.IsChecked = s.DnnFastBuild;
+            Player.DnnFastBuild = s.DnnFastBuild;
             _currentRotation = s.Rotation;
             PlayerRotation.Angle = _currentRotation;
             Player.DisplayRotation = _currentRotation;
@@ -490,6 +493,7 @@ namespace VerticalPlayer
                 AlwaysOnTop = this.Topmost,
                 AutoPlayNext = AutoPlayNextCheck.IsChecked ?? true,
                 FitWindowToVideo = FitWindowToVideoCheck.IsChecked ?? true,
+                DnnFastBuild = DnnFastBuildCheck.IsChecked ?? false,
 
                 // 再生
                 Volume = VolumeSlider.Value,
@@ -1577,6 +1581,12 @@ namespace VerticalPlayer
         }
 
         private void AutoPlayNext_Changed(object sender, RoutedEventArgs e) { /* Player_MediaEndedで都度参照するのみ */ }
+
+        // 切替時点で既にビルド済みのエンジンには影響しない（次回、解像度が変わって
+        // 再ビルドが走る時から新しい設定が使われる）。ビルド速度優先(FastBuild)か
+        // 実行時性能優先かのトレードオフ設定。
+        private void DnnFastBuild_Changed(object sender, RoutedEventArgs e)
+            => Player.DnnFastBuild = DnnFastBuildCheck.IsChecked ?? false;
 
         // ─────────────────────────────────────────────────────────────────
         // 動画情報タブ更新

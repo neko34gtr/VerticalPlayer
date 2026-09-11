@@ -147,6 +147,15 @@ namespace VerticalPlayer.Media
         /// （trt_timing_cache_enable自体は常に有効なため、共有しないだけで機能自体は動く）。</summary>
         public string? TimingCacheDir { get; set; }
 
+        /// <summary>trueの場合、ビルド時間を優先する設定でTensorRTエンジンをビルドする
+        /// （trt_build_heuristics_enable=1、trt_builder_optimization_levelを2へ引き下げ）。
+        /// カーネル選定を実測ベンチマークではなくヒューリスティックで決めるため、ビルドは
+        /// 大幅に速くなるが、選ばれるカーネルが必ずしも最速とは限らず推論速度がわずかに
+        /// 落ちる可能性がある（トレードオフ）。falseなら従来通りの設定
+        /// （trt_builder_optimization_level=3、ヒューリスティック無効＝実測ベンチマークで
+        /// 厳密に選定、ビルドは遅いが実行時性能を優先）。既定値はfalse（従来動作）。</summary>
+        public bool FastBuild { get; set; }
+
         /// <summary>
         /// 指定解像度用のセッションを確保する。解像度が前回と同じでセッションが
         /// 既に存在する場合は何もしない（高速パス）。初回、または解像度変更時のみ
@@ -313,11 +322,12 @@ namespace VerticalPlayer.Media
                     ["trt_profile_min_shapes"] = $"input:{shapeSpec}",
                     ["trt_profile_opt_shapes"] = $"input:{shapeSpec}",
                     ["trt_profile_max_shapes"] = $"input:{shapeSpec}",
-                    // 追加最適化1: ビルド時（キャッシュ生成時、初回のみ）のカーネル最適化強度を
-                    // 引き上げる。ランタイムコストには影響しない（ビルド結果はキャッシュされる
-                    // ため）。キー名・対応レベル範囲はONNX Runtime/TensorRTのバージョンに依存する
-                    // ため、未対応バージョンでは無視されるかエラーになる可能性がある点に注意。
-                    ["trt_builder_optimization_level"] = "3",
+                    // 追加最適化1: ビルド時（キャッシュ生成時、初回のみ）のカーネル最適化強度。
+                    // ランタイムコストには影響しない（ビルド結果はキャッシュされるため）。
+                    // キー名・対応レベル範囲はONNX Runtime/TensorRTのバージョンに依存するため、
+                    // 未対応バージョンでは無視されるかエラーになる可能性がある点に注意。
+                    // FastBuild設定でビルド速度優先(2)⇔実行時性能優先(3)を切り替える。
+                    ["trt_builder_optimization_level"] = FastBuild ? "2" : "3",
                     // ビルド失敗の原因調査用。有効にしてもランタイム性能への影響は無い
                     // （ネイティブ側のTensorRTビルダーログがより詳細になるだけ）。出力先は
                     // trace.logではなくVisual Studioの出力ウィンドウ/デバッグコンソール側。
@@ -336,6 +346,15 @@ namespace VerticalPlayer.Media
                     // 構造的に相性が悪いため、恒久的に無効のままにする。
                     // ["trt_cuda_graph_enable"] = "1",
                 };
+
+                if (FastBuild)
+                {
+                    // ヒューリスティックによるカーネル選定（実測ベンチマークを行わない）。
+                    // ビルドが大幅に速くなる代わりに、選ばれるカーネルが必ずしも最速とは
+                    // 限らない（推論速度がわずかに落ちる可能性がある）。falseの場合はこの
+                    // キー自体を渡さず、TensorRT既定の実測ベンチマークベースの選定に任せる。
+                    trtDict["trt_build_heuristics_enable"] = "1";
+                }
 
                 if (!string.IsNullOrEmpty(TimingCacheDir))
                 {

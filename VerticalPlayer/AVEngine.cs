@@ -161,6 +161,10 @@ namespace VerticalPlayer.Media
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "VerticalPlayer", "trt_timing_cache");
 
+        /// <summary>DnnSuperResolutionEngine.FastBuild参照。設定パネルのトグルから
+        /// 設定される。既定false（従来の実行時性能優先ビルド）。</summary>
+        public bool DnnFastBuild { get; set; }
+
         private string _dnnModelFileName = "4x-UltraSharpV2_Lite_fp16_op17.onnx"; // 既定値（後方互換）
         private int _dnnScale = 4;
 
@@ -223,7 +227,8 @@ namespace VerticalPlayer.Media
                 _dnnSr = new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir)
                 {
                     BackupDir = TrtCacheBackupDir,
-                    TimingCacheDir = TrtTimingCacheDir
+                    TimingCacheDir = TrtTimingCacheDir,
+                    FastBuild = DnnFastBuild
                 };
             }
         }
@@ -260,6 +265,7 @@ namespace VerticalPlayer.Media
                     Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
                 _dnnSr.BackupDir = TrtCacheBackupDir;
                 _dnnSr.TimingCacheDir = TrtTimingCacheDir;
+                _dnnSr.FastBuild = DnnFastBuild;
                 // DNN側で拡大するため、GPU側のLanczos超解像は二重適用を避けるため無効化する
                 GpuPresenter?.SetSuperResolution(1f);
             }
@@ -280,6 +286,7 @@ namespace VerticalPlayer.Media
             _dnnSr ??= new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
             _dnnSr.BackupDir = TrtCacheBackupDir;
             _dnnSr.TimingCacheDir = TrtTimingCacheDir;
+            _dnnSr.FastBuild = DnnFastBuild;
             GpuPresenter?.SetSuperResolution(1f);
             return _dnnSr.EnsureEngine(width, height);
         }

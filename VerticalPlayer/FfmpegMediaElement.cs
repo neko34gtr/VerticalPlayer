@@ -187,6 +187,15 @@ namespace VerticalPlayer.Media
         /// <summary>TrtCacheBackupDirの既定値（%LOCALAPPDATA%\VerticalPlayer\trtcache_backup）。</summary>
         public static string GetDefaultTrtCacheBackupDir() => AVEngine.GetDefaultTrtCacheBackupDir();
 
+        /// <summary>DNN超解像のTensorRTエンジンビルドを高速化するか（trueで
+        /// trt_build_heuristics_enable有効＋trt_builder_optimization_level引き下げ）。
+        /// ビルドは速くなるが推論速度がわずかに落ちる可能性があるトレードオフ設定。</summary>
+        public bool DnnFastBuild
+        {
+            get => _engine.DnnFastBuild;
+            set => _engine.DnnFastBuild = value;
+        }
+
         private bool _dynamicContrast;
         /// <summary>ダイナミックコントラスト（段階4、シーン平均輝度ベースの簡易オートレベル）。
         /// GPU描画パス(UseGpuPresenter)が有効な時のみ実際に効果がある。

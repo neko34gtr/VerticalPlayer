@@ -1052,6 +1052,9 @@
                                         <Button Content="既定に戻す" Style="{StaticResource SecondaryBtn}"
                                                 Click="ResetTrtCacheBackupDir_Click"/>
                                     </StackPanel>
+                                    <CheckBox x:Name="DnnFastBuildCheck" Content="DNNビルドを高速化（推論速度は僅かに低下）"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                              Checked="DnnFastBuild_Changed" Unchecked="DnnFastBuild_Changed"/>
 
                                     <TextBlock Text="比較ビュー（TrueTheater風）" Foreground="{StaticResource TextMuted}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
