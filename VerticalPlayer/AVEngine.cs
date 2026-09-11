@@ -152,6 +152,15 @@ namespace VerticalPlayer.Media
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "VerticalPlayer", "trtcache_backup");
 
+        /// <summary>TensorRTタイミングキャッシュ（DnnSuperResolutionEngine.TimingCacheDir
+        /// 参照）の保存先。GPU/ドライバに依存する小さな共有キャッシュのため、trtcache_backup
+        /// と同様に永続領域(LocalApplicationData)に置き、再起動をまたいで使い回す。
+        /// trtcache_backupと違いユーザーが変更する必要は薄いため、設定パネルには出さず
+        /// 固定パスとする。</summary>
+        public static string TrtTimingCacheDir => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "VerticalPlayer", "trt_timing_cache");
+
         private string _dnnModelFileName = "4x-UltraSharpV2_Lite_fp16_op17.onnx"; // 既定値（後方互換）
         private int _dnnScale = 4;
 
@@ -213,7 +222,8 @@ namespace VerticalPlayer.Media
                 DnnSuperResolutionEngine.RestoreAllCachesIfNeeded(DnnTrtCacheDir, TrtCacheBackupDir);
                 _dnnSr = new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir)
                 {
-                    BackupDir = TrtCacheBackupDir
+                    BackupDir = TrtCacheBackupDir,
+                    TimingCacheDir = TrtTimingCacheDir
                 };
             }
         }
@@ -249,6 +259,7 @@ namespace VerticalPlayer.Media
                 _dnnSr ??= new DnnSuperResolutionEngine(
                     Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
                 _dnnSr.BackupDir = TrtCacheBackupDir;
+                _dnnSr.TimingCacheDir = TrtTimingCacheDir;
                 // DNN側で拡大するため、GPU側のLanczos超解像は二重適用を避けるため無効化する
                 GpuPresenter?.SetSuperResolution(1f);
             }
@@ -268,6 +279,7 @@ namespace VerticalPlayer.Media
             // 自動的に行われるため、ここではBackupDirを設定するだけでよい。
             _dnnSr ??= new DnnSuperResolutionEngine(Path.Combine(DnnModelsDir, _dnnModelFileName), DnnTrtCacheDir);
             _dnnSr.BackupDir = TrtCacheBackupDir;
+            _dnnSr.TimingCacheDir = TrtTimingCacheDir;
             GpuPresenter?.SetSuperResolution(1f);
             return _dnnSr.EnsureEngine(width, height);
         }

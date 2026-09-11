@@ -134,6 +134,19 @@ namespace VerticalPlayer.Media
         /// 未設定(null)なら復元は行わない。</summary>
         public string? BackupDir { get; set; }
 
+        /// <summary>TensorRTのタイミングキャッシュ（カーネル実装ごとのベンチマーク結果）の
+        /// 保存先ディレクトリ。trt_engine_cache_path（解像度ごとの完成品エンジン）とは別物で、
+        /// 「このGPUではどのカーネル実装が速いか」という情報だけを持つ小さいファイル1個
+        /// （TensorRT側が計算能力(Compute Capability)ごとに自動的にファイル名を付けて
+        /// このディレクトリ内に作成・更新する）を全解像度で共有する。これがあると、
+        /// 新しい解像度のエンジンを初めてビルドする際もカーネル選定のベンチマークを
+        /// 一からやり直さずに済み、ビルド時間が大幅に短縮される。ビルド結果の推論精度・
+        /// 速度そのものには影響しない（あくまでビルド時間の短縮のみ）。GPU/ドライバに
+        /// 依存する情報のため、RAMDISK（trtcache）ではなく永続領域に置いて再起動をまたいで
+        /// 使い回すことを想定。未設定(null)なら共有せず、engine_cache_path配下に作られる
+        /// （trt_timing_cache_enable自体は常に有効なため、共有しないだけで機能自体は動く）。</summary>
+        public string? TimingCacheDir { get; set; }
+
         /// <summary>
         /// 指定解像度用のセッションを確保する。解像度が前回と同じでセッションが
         /// 既に存在する場合は何もしない（高速パス）。初回、または解像度変更時のみ
@@ -289,6 +302,12 @@ namespace VerticalPlayer.Media
                     ["trt_fp16_enable"] = "1",
                     ["trt_engine_cache_enable"] = "1",
                     ["trt_engine_cache_path"] = cacheSubDir,
+                    // 追加最適化3: タイミングキャッシュ（カーネル実装ごとのベンチマーク結果）を
+                    // 全解像度で共有する。trt_timing_cache_pathを明示しないと
+                    // trt_engine_cache_path（解像度ごとのサブフォルダ）配下に作られてしまい、
+                    // 解像度をまたいで共有されず効果が出ない（以前はこの状態だった）。
+                    // TimingCacheDirが未設定(null)の場合は共有を諦め、従来通り
+                    // engine_cache_path配下に作らせる（trt_timing_cache_enable自体は有効なまま）。
                     ["trt_timing_cache_enable"] = "1",
                     // min=opt=max固定にすることで解像度ごとの専用エンジンとしてビルドさせる
                     ["trt_profile_min_shapes"] = $"input:{shapeSpec}",
@@ -317,6 +336,20 @@ namespace VerticalPlayer.Media
                     // 構造的に相性が悪いため、恒久的に無効のままにする。
                     // ["trt_cuda_graph_enable"] = "1",
                 };
+
+                if (!string.IsNullOrEmpty(TimingCacheDir))
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(TimingCacheDir);
+                        trtDict["trt_timing_cache_path"] = TimingCacheDir;
+                    }
+                    catch (Exception ex)
+                    {
+                        Trace($"タイミングキャッシュ用フォルダ作成失敗（共有無しで続行）: {ex.Message}");
+                    }
+                }
+
                 trtOptions.UpdateOptions(trtDict);
                 so.AppendExecutionProvider_Tensorrt(trtOptions);
                 Trace($"TensorRT EP追加: {width}x{height} (aligned {alignedWidth}x{alignedHeight}), cache={cacheSubDir}");
