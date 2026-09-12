@@ -60,7 +60,7 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="220"/>
                 <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="200"/>
+                <ColumnDefinition Width="260"/>
             </Grid.ColumnDefinitions>
 
             <!-- 左サイドバー: フロント/リアの動画リスト -->
@@ -109,9 +109,17 @@
                 </Border>
             </Grid>
 
-            <!-- 右サイドバー: センサー情報（日時・速度・加速度）。映像へのOSD重ねではなく
-                 Front/Rearリストと同じ「サイドウィンドウ」形式で常時表示する。 -->
-            <dash:DashcamHudOverlay x:Name="Hud" Grid.Column="2"/>
+            <!-- 右サイドバー: 上段=センサー情報（日時・速度・加速度）、下段=走行軌跡マップ。
+                 センサー情報は映像へのOSD重ねではなく常時表示のサイドウィンドウ形式。
+                 マップはその下に独立した領域として配置する。 -->
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <dash:DashcamHudOverlay x:Name="Hud" Grid.Row="0"/>
+                <dash:DashcamMapControl x:Name="MapView" Grid.Row="1"/>
+            </Grid>
         </Grid>
 
         <!-- ========== コントロールバー ========== -->

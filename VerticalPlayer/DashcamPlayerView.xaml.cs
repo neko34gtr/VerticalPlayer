@@ -208,6 +208,8 @@ namespace VerticalPlayer.Dashcam
                 ? NmeaSensorParser.Parse(nmeaPath, _currentFrontGroup?.Timestamp, duration)
                 : new List<DashcamSensorFrame>();
 
+            MapView.SetRoute(DashcamMapPointBuilder.BuildSegments(_sensorFrames));
+
             if (_wantsPlaying)
             {
                 PlayerFront.Play();
@@ -482,6 +484,8 @@ namespace VerticalPlayer.Dashcam
 
             var frame = DashcamSensorLookup.FindNearest(_sensorFrames, pos);
             Hud.UpdateFrame(frame);
+            if (frame != null)
+                MapView.SetCarPosition(frame.Latitude, frame.Longitude, frame.HasGpsFix);
 
             if (!_isDragging)
             {

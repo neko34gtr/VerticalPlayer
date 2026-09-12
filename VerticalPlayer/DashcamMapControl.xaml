@@ -1,0 +1,39 @@
+<UserControl x:Class="VerticalPlayer.Dashcam.DashcamMapControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+             Loaded="DashcamMapControl_Loaded">
+    <!-- NuGetパッケージ Microsoft.Web.WebView2 の追加参照が必要（.csproj未確認のため
+         プロジェクト側での追加をお願いします）。ランタイム自体はWindows10/11なら
+         Edgeの一部として大抵プリインストール済みだが、無い環境では別途Evergreen
+         Runtimeのインストールが必要。 -->
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="DashcamTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
+    <Grid Background="{StaticResource BgPanel}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Grid Grid.Row="0" Margin="12,10,12,6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="走行軌跡" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            <CheckBox x:Name="FollowCheck" Grid.Column="1" Content="追従" IsChecked="True" Style="{StaticResource ModernCheck}"
+                      Foreground="{StaticResource TextPrimary}" FontSize="11"
+                      Checked="FollowCheck_Changed" Unchecked="FollowCheck_Changed"/>
+        </Grid>
+
+        <Border Grid.Row="1" Margin="8,0,8,8" Background="Black" CornerRadius="4" ClipToBounds="True">
+            <wv2:WebView2 x:Name="Map"/>
+        </Border>
+    </Grid>
+</UserControl>
