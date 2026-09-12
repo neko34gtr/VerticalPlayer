@@ -31,7 +31,7 @@
         <Border Grid.Row="0" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
             <StackPanel Orientation="Horizontal" Margin="8,6">
                 <TextBlock Text="ドライブ" Foreground="{StaticResource TextMuted}" VerticalAlignment="Center" Margin="4,0,6,0"/>
-                <ComboBox x:Name="DriveCombo" Width="160" Margin="0,0,4,0" Background="{StaticResource BgCard}" Foreground="{StaticResource TextPrimary}"/>
+                <ComboBox x:Name="DriveCombo" Width="160" Margin="0,0,4,0" Style="{StaticResource ModernCombo}"/>
                 <Button x:Name="RefreshDrivesButton" Content="⟳" Width="28" Style="{StaticResource IconBtn}"
                         Click="RefreshDrivesButton_Click" ToolTip="ドライブ一覧を更新" Margin="0,0,6,0"/>
                 <Button x:Name="LoadButton" Content="読み込む" Style="{StaticResource SecondaryBtn}" Click="LoadButton_Click" Margin="0,0,16,0"/>
@@ -42,7 +42,7 @@
 
                 <TextBlock Text="表示倍率" Foreground="{StaticResource TextMuted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <ComboBox x:Name="ZoomCombo" Width="70" SelectionChanged="ZoomCombo_SelectionChanged" Margin="0,0,16,0"
-                          Background="{StaticResource BgCard}" Foreground="{StaticResource TextPrimary}">
+                          Style="{StaticResource ModernCombo}">
                     <ComboBoxItem Content="1.5x" Tag="1.5"/>
                     <ComboBoxItem Content="2x" Tag="2" IsSelected="True"/>
                     <ComboBoxItem Content="3x" Tag="3"/>
@@ -74,13 +74,13 @@
                     </Grid.RowDefinitions>
 
                     <TextBlock Grid.Row="0" Text="フロント" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" Margin="12,10,12,6"/>
-                    <ListBox x:Name="FrontList" Grid.Row="1" Background="Transparent" Foreground="{StaticResource TextPrimary}"
-                             BorderThickness="0" DisplayMemberPath="DisplayLabel"
+                    <ListBox x:Name="FrontList" Grid.Row="1" Style="{StaticResource ModernList}"
+                             DisplayMemberPath="DisplayLabel"
                              SelectionChanged="FrontList_SelectionChanged"/>
 
                     <TextBlock Grid.Row="2" Text="リア" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" Margin="12,10,12,6"/>
-                    <ListBox x:Name="RearList" Grid.Row="3" Background="Transparent" Foreground="{StaticResource TextPrimary}"
-                             BorderThickness="0" DisplayMemberPath="DisplayLabel" IsEnabled="False"
+                    <ListBox x:Name="RearList" Grid.Row="3" Style="{StaticResource ModernList}"
+                             DisplayMemberPath="DisplayLabel" IsEnabled="False"
                              SelectionChanged="RearList_SelectionChanged"/>
                 </Grid>
             </Border>

@@ -36,6 +36,14 @@ namespace VerticalPlayer.Dashcam
         private bool _suppressSelectionEvent;
         private bool _isPlaying;
 
+        // Front/RearのMediaOpenedは非同期でタイミングがずれるため、「再生する意図」を
+        // 独立フラグとして保持し、どちらのMediaOpenedが先に来ても正しく再生開始できるようにする
+        // （このフラグが無いと、Frontの方が先に開いた瞬間だけRearをPlay()してしまい、Rearの
+        // オープンがまだ終わっていない時はPlay()が無視されて「次ファイルでリアだけ固まる」
+        // 不具合になる。一度固まるとその後は何もPlay()を呼び直さないため、リア表示のON/OFFでも
+        // 復帰せず再起動待ちになっていた）
+        private bool _wantsPlaying;
+
         // ---- シーク（MainWindowのSeekBarと同じ「ドラッグ中は間引きプレビュー、確定時に正確着地」方式） ----
         private bool _isDragging;
         private bool _dragCompleting;
@@ -73,6 +81,13 @@ namespace VerticalPlayer.Dashcam
         public DashcamPlayerView()
         {
             InitializeComponent();
+
+            // ドラレコは1ファイルあたり約2分間隔で次々切り替わり、かつSDカード等の低速
+            // ストレージ運用が前提のため、既存の「パケット先読み（低速ストレージ対策）」
+            // パイプラインをこの画面のFront/Rear両方で既定ONにする（MainWindow本体は
+            // 既定OFFだが、ここは切替頻度・ストレージ特性が明確に異なるため独立して有効化）。
+            PlayerFront.PacketPrefetch = true;
+            PlayerRear.PacketPrefetch = true;
 
             PlayerFront.FrameDisplayed += OnFrontFrameDisplayed;
 
@@ -143,6 +158,7 @@ namespace VerticalPlayer.Dashcam
         {
             _currentFrontGroup = group;
             _sensorFrames = new List<DashcamSensorFrame>(); // Frontの動画長が判明してからParseし直す（MediaOpened側）
+            _wantsPlaying = true; // Front/RearどちらのMediaOpenedが先に来ても再生開始させる意図フラグ
 
             if (group.FrontVideoPath != null)
                 PlayerFront.Source = new Uri(group.FrontVideoPath);
@@ -162,6 +178,7 @@ namespace VerticalPlayer.Dashcam
         private void PlayRearGroup(DashcamMediaGroup group, bool keepListSelectionOnly = false)
         {
             _currentRearGroup = group;
+            _wantsPlaying = true; // 独立選択(リア追従OFF時)から呼ばれた場合もここで意図をセットする
             if (group.RearVideoPath != null)
                 PlayerRear.Source = new Uri(group.RearVideoPath);
 
@@ -191,11 +208,12 @@ namespace VerticalPlayer.Dashcam
                 ? NmeaSensorParser.Parse(nmeaPath, _currentFrontGroup?.Timestamp, duration)
                 : new List<DashcamSensorFrame>();
 
-            PlayerFront.Play();
-            if (_currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null))
-                PlayerRear.Play();
-            _isPlaying = true;
-            PlayPauseButton.Content = "⏸";
+            if (_wantsPlaying)
+            {
+                PlayerFront.Play();
+                _isPlaying = true;
+                PlayPauseButton.Content = "⏸";
+            }
 
             if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
                 RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
@@ -204,6 +222,13 @@ namespace VerticalPlayer.Dashcam
         private void PlayerRear_MediaOpened(object sender, RoutedEventArgs e)
         {
             PlayerRear.ResetDnnEngineForNewFile();
+
+            // Frontの方が先に開いてPlay()済みでも、Rearのオープンはこの時点で初めて完了するため、
+            // ここで改めてPlay()を呼ぶ（Front側からの直接Play()呼び出しに依存すると、Rearが
+            // まだ開き切っていないタイミングでPlay()が無視され、以後何もPlay()を呼ばなくなり
+            // 「次ファイルでリアだけ固まる／リア表示のON/OFFでも復帰しない」不具合になっていた）。
+            if (_wantsPlaying)
+                PlayerRear.Play();
         }
 
         // Front連続再生: リスト内の次のグループへ自動的に進む
@@ -244,12 +269,14 @@ namespace VerticalPlayer.Dashcam
                 PlayerFront.Pause();
                 PlayerRear.Pause();
                 PlayPauseButton.Content = "▶";
+                _wantsPlaying = false;
             }
             else
             {
                 PlayerFront.Play();
                 if (_currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null)) PlayerRear.Play();
                 PlayPauseButton.Content = "⏸";
+                _wantsPlaying = true;
             }
             _isPlaying = !_isPlaying;
         }
@@ -296,6 +323,7 @@ namespace VerticalPlayer.Dashcam
             PlayerFront.Stop();
             PlayerRear.Stop();
             _isPlaying = false;
+            _wantsPlaying = false;
             PlayPauseButton.Content = "▶";
         }
 
@@ -308,6 +336,11 @@ namespace VerticalPlayer.Dashcam
                 return;
             }
             RearPipBorder.Visibility = RearVisibleCheck.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+
+            // 表示ONにした際、何らかの理由でRearが再生開始できていなければここで念のため再試行する
+            // （本来は_wantsPlayingベースのMediaOpened処理で解決済みのはずだが、保険として残す）
+            if (RearVisibleCheck.IsChecked == true && _wantsPlaying)
+                PlayerRear.Play();
         }
 
         private void RearLinkedCheck_Changed(object sender, RoutedEventArgs e)

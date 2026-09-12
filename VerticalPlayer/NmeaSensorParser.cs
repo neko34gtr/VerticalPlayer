@@ -10,26 +10,26 @@ namespace VerticalPlayer.Dashcam
     /// バイナリレコードが連続する独自フォーマットだった（実機ダンプの解析により判明）。
     /// レコードレイアウト（BE=ビッグエンディアン）:
     ///
-    ///   [0x00-0x03] uint32 BE  Header      — 0x00000001=GPS/レコード有効, 0x00000000=無効(FFプレースホルダ状態)
-    ///   [0x04]      byte        PacketId   — 0x01固定（無効時は0xFF）
-    ///   [0x05-0x07] uint24 BE  RawTicks    — 単調増加カウンタ。単位不明（無効時は0xFFFFFF）
-    ///   [0x08-0x0B] int32 BE   MainValue   — 緩やかに変化する値。意味未確定（座標/高度/カウンタ等の候補、無効時は0xFFFFFFFF）
+    ///   [0x00-0x03] uint32 BE  Header      — 0x00000001=GPS測位成功, 0x00000000=GPS未測位/トンネル内
+    ///   [0x04-0x07] int32  BE  Latitude    — 緯度の生値（1/256秒単位）。度への変換: raw / (3600.0 * 256.0)
+    ///   [0x08-0x0B] int32  BE  Longitude   — 経度の生値（1/256秒単位）。度への変換: raw / (3600.0 * 256.0)
     ///   [0x0C-0x0F] 4byte      Status      — ステータスフラグ群。意味未確定（無効時は0xFFFFFFFF）
-    ///   [0x10-0x11] int16 BE   Field1      — 小さい正の値で緩やかに増加。GPS速度の可能性（無効時は0xFFFF＝プレースホルダ、GPS非測位中は常にこれ）
-    ///   [0x12-0x17] int16 BE ×3  Field2-4  — 3軸加速度の生値。/1000 した合成ベクトルの大きさが静止時に約1.0となることを実データで確認済み
+    ///   [0x10-0x11] int16  BE  Field1      — 車速（1km/h単位、無効時は0xFFFF＝プレースホルダ、GPS非測位中は常にこれ）
+    ///   [0x12-0x17] int16  BE ×3  Field2-4 — 3軸加速度の生値。/1000 した合成ベクトルの大きさが静止時に約1.0となることを実データで確認済み
     ///                                        （GPS無効時でもこの3値だけは有効な値が入る＝IMU単体で常時サンプリングされている）
     ///
-    /// 【未確定事項・要再確認】
-    /// - MainValueの物理的な意味（緯度/経度のどちらか一方だけを含むには値域が合わない。
-    ///   単独では両座標を表せないため、座標そのものではない可能性が高い）。
-    /// - Field1(速度候補)のスケール: 実機確認により生値=km/h（換算係数1.0）と判明（従来の/10.0では
-    ///   実速度約40km/hが「4」と表示される1桁ズレの不具合があったため修正）。
-    /// - Field2-4の軸割り当て（どれがX/Y/Z＝左右/前後/上下に対応するかは未確認。暫定でField2=X, Field3=Y, Field4=Zとしている）。
-    /// - RawTicksの単位（一定間隔でないため、そのままミリ秒として使わず、動画長が分かっている場合は
-    ///   レコード数で均等按分してVideoOffsetを算出する方式をデフォルトにしている）。
+    /// 【確定事項（実機ダンプ解析により確定）】
+    /// - 緯度・経度は0x04-0x0Bに1/256秒単位のint32(BE)で格納されている。度への変換は
+    ///   raw / (3600.0 * 256.0)。
+    /// - 速度(Field1)は生値=km/h（換算係数1.0）。
     ///
-    /// これらは実データからの逆解析による「もっとも合理的な暫定解釈」であり、正式なフォーマット仕様書
-    /// による裏付けではない。速度・軸割り当てだけは実際の走行区間で実測値と突き合わせて校正することを推奨する。
+    /// 【未確定事項・要再確認】
+    /// - 0x0C-0x0Fのステータス4byteの意味。
+    /// - Field2-4の軸割り当て（どれがX/Y/Z＝左右/前後/上下に対応するかは未確認。暫定でField2=X, Field3=Y, Field4=Zとしている）。
+    /// - レコード間の時間間隔（各レコードに明示的なタイムスタンプが無いため、動画長が分かっている
+    ///   場合はレコード数で均等按分し、分からない場合は10Hzサンプリングを仮定して1レコード=100msとして扱う）。
+    ///
+    /// 軸割り当てだけは実際の走行区間で実測値と突き合わせて校正することを推奨する。
     /// </summary>
     public static class NmeaSensorParser
     {
@@ -48,8 +48,9 @@ namespace VerticalPlayer.Dashcam
         /// <param name="nmeaFilePath">対象ファイル</param>
         /// <param name="startTimeHint">動画開始時刻（絶対Timestampの算出に使用、無ければUnixEpoch基準）</param>
         /// <param name="videoDurationHint">動画の総再生時間。指定するとVideoOffsetを
-        /// 「有効レコード数で均等按分」して算出する（RawTicksの単位が不明なため、こちらを優先）。
-        /// 未指定の場合はRawTicksをミリ秒とみなして算出する（精度は低い）。</param>
+        /// 「有効レコード数で均等按分」して算出する（レコード自体には明示的なタイムスタンプが
+        /// 無いため、こちらを優先する）。未指定の場合は10Hzサンプリング（1レコード=100ms）を
+        /// 仮定して算出する（精度は低い）。</param>
         public static List<DashcamSensorFrame> Parse(string nmeaFilePath, DateTime? startTimeHint = null, TimeSpan? videoDurationHint = null)
         {
             var frames = new List<DashcamSensorFrame>();
@@ -57,7 +58,7 @@ namespace VerticalPlayer.Dashcam
                 return frames;
 
             byte[] data = File.ReadAllBytes(nmeaFilePath);
-            var raw = new List<(bool hasFix, uint rawTicks, int mainValue, short field1, short ax, short ay, short az)>();
+            var raw = new List<(bool hasFix, int latRaw, int lonRaw, short field1, short ax, short ay, short az)>();
 
             for (int off = 0; off + RecordSize <= data.Length; off += RecordSize)
             {
@@ -70,14 +71,14 @@ namespace VerticalPlayer.Dashcam
 
                 bool hasFix = header == 1;
 
-                uint rawTicks = ((uint)span[5] << 16) | ((uint)span[6] << 8) | span[7];
-                int mainValue = BinaryPrimitives.ReadInt32BigEndian(span[8..12]);
+                int latRaw = BinaryPrimitives.ReadInt32BigEndian(span[4..8]);
+                int lonRaw = BinaryPrimitives.ReadInt32BigEndian(span[8..12]);
                 short field1 = BinaryPrimitives.ReadInt16BigEndian(span[16..18]);
                 short ax = BinaryPrimitives.ReadInt16BigEndian(span[18..20]);
                 short ay = BinaryPrimitives.ReadInt16BigEndian(span[20..22]);
                 short az = BinaryPrimitives.ReadInt16BigEndian(span[22..24]);
 
-                raw.Add((hasFix, rawTicks, mainValue, field1, ax, ay, az));
+                raw.Add((hasFix, latRaw, lonRaw, field1, ax, ay, az));
             }
 
             if (raw.Count == 0)
@@ -92,13 +93,16 @@ namespace VerticalPlayer.Dashcam
                 TimeSpan offset;
                 if (videoDurationHint.HasValue && raw.Count > 1)
                 {
-                    // RawTicksの単位が不明なため、動画長が分かっていればレコード順で均等按分する
+                    // レコード自体には明示的なタイムスタンプが無いため、動画長が分かっていれば
+                    // レコード順で均等按分する
                     offset = TimeSpan.FromTicks(videoDurationHint.Value.Ticks * i / (raw.Count - 1));
                 }
                 else
                 {
-                    // フォールバック: RawTicksをミリ秒とみなす（暫定・要校正）
-                    offset = TimeSpan.FromMilliseconds(r.rawTicks - raw[0].rawTicks);
+                    // フォールバック: レコードに明示的なタイムスタンプが無いため、10Hzサンプリング
+                    // （1レコード=100ms）を仮定する。videoDurationHintが取得できる経路では
+                    // 上のブロックが優先されるため、通常はこちらに来ない想定。
+                    offset = TimeSpan.FromMilliseconds(i * 100);
                 }
 
                 double speedKmh = r.hasFix ? r.field1 * SpeedRawToKmh : 0;
@@ -106,11 +110,16 @@ namespace VerticalPlayer.Dashcam
                 double ay = r.ay * AccelRawToG;
                 double az = r.az * AccelRawToG;
 
+                const double GpsCoordScale = 1.0 / (3600.0 * 256.0);
+
+                double lat = r.latRaw * GpsCoordScale;
+                double lon = r.lonRaw * GpsCoordScale;
+
                 frames.Add(new DashcamSensorFrame(
                     VideoOffset: offset,
                     Timestamp: baseTime + offset,
-                    Latitude: 0,   // MainValueの意味が未確定のため算出しない（要フォーマット再確認）
-                    Longitude: 0,
+                    Latitude: lat,
+                    Longitude: lon,
                     SpeedKmh: speedKmh,
                     AccelX: ax,
                     AccelY: ay,
