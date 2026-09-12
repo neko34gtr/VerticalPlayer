@@ -1,0 +1,51 @@
+<UserControl x:Class="VerticalPlayer.Dashcam.DashcamHudOverlay"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="DashcamTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </UserControl.Resources>
+    <!-- 映像への重ね表示(OSD)ではなく、Front/Rearリストと同じ「サイドパネル」として
+         再生コントロール領域の右側に常時表示する（メイン画面のダークテーマに合わせる）。 -->
+    <Border Background="{StaticResource BgPanel}" BorderBrush="{StaticResource Border}" BorderThickness="1,0,0,0">
+        <StackPanel Margin="12,10">
+            <TextBlock Text="センサー情報" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,10"/>
+
+            <TextBlock Text="{Binding TimestampText}" Foreground="{StaticResource TextPrimary}" FontSize="13"
+                       HorizontalAlignment="Center" Margin="0,0,0,16" TextWrapping="Wrap"/>
+
+            <TextBlock Text="車速 (km/h)" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,0,0,4"/>
+            <Border Background="{StaticResource BgCard}" CornerRadius="8" Padding="0,10" Margin="0,0,0,18">
+                <TextBlock Text="{Binding SpeedText}" Foreground="{StaticResource TextPrimary}" FontSize="26"
+                           FontWeight="Bold" HorizontalAlignment="Center"/>
+            </Border>
+
+            <TextBlock Text="加速度 (G)" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,0,0,4"/>
+            <Border Background="{StaticResource BgCard}" CornerRadius="8" Padding="10">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition/>
+                        <RowDefinition/>
+                        <RowDefinition/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="前後" Foreground="{StaticResource TextMuted}" FontSize="12" Margin="0,3,10,3"/>
+                    <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding AccelYText}" Foreground="{StaticResource TextPrimary}" FontSize="12" HorizontalAlignment="Right" Margin="0,3"/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="左右" Foreground="{StaticResource TextMuted}" FontSize="12" Margin="0,3,10,3"/>
+                    <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding AccelXText}" Foreground="{StaticResource TextPrimary}" FontSize="12" HorizontalAlignment="Right" Margin="0,3"/>
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="上下" Foreground="{StaticResource TextMuted}" FontSize="12" Margin="0,3,10,3"/>
+                    <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding AccelZText}" Foreground="{StaticResource TextPrimary}" FontSize="12" HorizontalAlignment="Right" Margin="0,3"/>
+                </Grid>
+            </Border>
+        </StackPanel>
+    </Border>
+</UserControl>

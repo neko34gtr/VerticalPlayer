@@ -1,0 +1,151 @@
+<UserControl x:Class="VerticalPlayer.Dashcam.DashcamPlayerView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:media="clr-namespace:VerticalPlayer.Media"
+             xmlns:dash="clr-namespace:VerticalPlayer.Dashcam"
+             Loaded="DashcamPlayerView_Loaded">
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="DashcamTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </UserControl.Resources>
+    <!-- 配色・ボタンスタイル(IconBtn/SecondaryBtn/PrimaryBtn/ModernSlider/ModernCheck)は
+         DashcamTheme.xaml（MainWindow.xamlの配色トークン・共通スタイルの複製）を
+         UserControl.ResourcesにMergedDictionariesで取り込んで使っている。
+         UserControlはStaticResourceを自分自身の読み込み時点のリソーススコープでしか
+         解決できず、実行時にMainWindowの子として配置されてもWindow.Resourcesは
+         参照できないため（"'BgDeep' という名前のリソースが見つかりません"エラーの原因）。 -->
+    <Grid Background="{StaticResource BgDeep}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <!-- ドライブ選択・オプション -->
+            <RowDefinition Height="*"/>
+            <!-- リスト + 映像 + センサー情報 -->
+            <RowDefinition Height="Auto"/>
+            <!-- 再生コントロール -->
+        </Grid.RowDefinitions>
+
+        <!-- ========== ドライブ選択・オプションバー ========== -->
+        <Border Grid.Row="0" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
+            <StackPanel Orientation="Horizontal" Margin="8,6">
+                <TextBlock Text="ドライブ" Foreground="{StaticResource TextMuted}" VerticalAlignment="Center" Margin="4,0,6,0"/>
+                <ComboBox x:Name="DriveCombo" Width="160" Margin="0,0,4,0" Background="{StaticResource BgCard}" Foreground="{StaticResource TextPrimary}"/>
+                <Button x:Name="RefreshDrivesButton" Content="⟳" Width="28" Style="{StaticResource IconBtn}"
+                        Click="RefreshDrivesButton_Click" ToolTip="ドライブ一覧を更新" Margin="0,0,6,0"/>
+                <Button x:Name="LoadButton" Content="読み込む" Style="{StaticResource SecondaryBtn}" Click="LoadButton_Click" Margin="0,0,16,0"/>
+
+                <CheckBox x:Name="RearLinkedCheck" Content="リア追従" IsChecked="True" Style="{StaticResource ModernCheck}"
+                          Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
+                          Checked="RearLinkedCheck_Changed" Unchecked="RearLinkedCheck_Changed" Margin="0,0,16,0"/>
+
+                <TextBlock Text="表示倍率" Foreground="{StaticResource TextMuted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox x:Name="ZoomCombo" Width="70" SelectionChanged="ZoomCombo_SelectionChanged" Margin="0,0,16,0"
+                          Background="{StaticResource BgCard}" Foreground="{StaticResource TextPrimary}">
+                    <ComboBoxItem Content="1.5x" Tag="1.5"/>
+                    <ComboBoxItem Content="2x" Tag="2" IsSelected="True"/>
+                    <ComboBoxItem Content="3x" Tag="3"/>
+                    <ComboBoxItem Content="4x" Tag="4"/>
+                </ComboBox>
+
+                <CheckBox x:Name="DnnEnabledCheck" Content="AI推論(超解像)" Style="{StaticResource ModernCheck}"
+                          Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
+                          Checked="DnnEnabledCheck_Changed" Unchecked="DnnEnabledCheck_Changed"/>
+            </StackPanel>
+        </Border>
+
+        <!-- ========== リスト + 映像 + センサー情報 ========== -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="220"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="200"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 左サイドバー: フロント/リアの動画リスト -->
+            <Border Grid.Column="0" Background="{StaticResource BgPanel}" BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Text="フロント" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" Margin="12,10,12,6"/>
+                    <ListBox x:Name="FrontList" Grid.Row="1" Background="Transparent" Foreground="{StaticResource TextPrimary}"
+                             BorderThickness="0" DisplayMemberPath="DisplayLabel"
+                             SelectionChanged="FrontList_SelectionChanged"/>
+
+                    <TextBlock Grid.Row="2" Text="リア" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" Margin="12,10,12,6"/>
+                    <ListBox x:Name="RearList" Grid.Row="3" Background="Transparent" Foreground="{StaticResource TextPrimary}"
+                             BorderThickness="0" DisplayMemberPath="DisplayLabel" IsEnabled="False"
+                             SelectionChanged="RearList_SelectionChanged"/>
+                </Grid>
+            </Border>
+
+            <!-- 映像エリア -->
+            <Grid Grid.Column="1" Background="Black">
+                <!-- フロント（メイン） -->
+                <media:FfmpegMediaElement x:Name="PlayerFront"
+                                          UseGpuPresenter="True"
+                                          MediaOpened="PlayerFront_MediaOpened"
+                                          MediaEnded="PlayerFront_MediaEnded"/>
+                <!-- FrameDisplayedはAction&lt;double&gt;型のCLRイベントでXAML属性からは配線できないため、
+                     コードビハインドのコンストラクタで += 購読する（MainWindowのFPS集計と同じ作法）。 -->
+
+                <!-- リア（PiP） -->
+                <Border x:Name="RearPipBorder"
+                        Width="220" Height="124"
+                        HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                        Margin="12" BorderBrush="{StaticResource Border}" BorderThickness="1"
+                        Visibility="Collapsed">
+                    <media:FfmpegMediaElement x:Name="PlayerRear"
+                                              UseGpuPresenter="True"
+                                              Volume="0"
+                                              MediaOpened="PlayerRear_MediaOpened"
+                                              MediaEnded="PlayerRear_MediaEnded"/>
+                </Border>
+            </Grid>
+
+            <!-- 右サイドバー: センサー情報（日時・速度・加速度）。映像へのOSD重ねではなく
+                 Front/Rearリストと同じ「サイドウィンドウ」形式で常時表示する。 -->
+            <dash:DashcamHudOverlay x:Name="Hud" Grid.Column="2"/>
+        </Grid>
+
+        <!-- ========== コントロールバー ========== -->
+        <Border Grid.Row="2" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Orientation="Horizontal" Grid.Column="0" Margin="8">
+                    <Button x:Name="PlayPauseButton" Content="▶" Width="32" Style="{StaticResource IconBtn}" Click="PlayPauseButton_Click" Margin="0,0,4,0"/>
+                    <Button x:Name="StopButton" Content="■" Width="32" Style="{StaticResource IconBtn}" Click="StopButton_Click" Margin="0,0,10,0"/>
+                    <Button x:Name="NextSceneButton" Content="次のシーン ▶▶" Style="{StaticResource SecondaryBtn}" Click="NextSceneButton_Click" Margin="0,0,6,0"
+                            ToolTip="Frontリストの次のグループへ進む"/>
+                    <Button x:Name="ScreenshotButton" Content="📷" Width="32" Style="{StaticResource IconBtn}" Click="ScreenshotButton_Click" Margin="0,0,10,0"
+                            ToolTip="現在のフロント映像を静止画で保存"/>
+                    <CheckBox x:Name="RearVisibleCheck" Content="リア表示" Style="{StaticResource ModernCheck}"
+                              Foreground="{StaticResource TextPrimary}"
+                              Checked="RearVisibleCheck_Changed" Unchecked="RearVisibleCheck_Changed"
+                              VerticalAlignment="Center" Margin="6,0,0,0"/>
+                </StackPanel>
+
+                <Slider x:Name="SeekSlider" Grid.Column="1" VerticalAlignment="Center" Margin="8,0"
+                        Style="{StaticResource ModernSlider}"
+                        Minimum="0" Maximum="1"
+                        Thumb.DragStarted="SeekSlider_DragStarted"
+                        Thumb.DragCompleted="SeekSlider_DragCompleted"
+                        ValueChanged="SeekSlider_ValueChanged"/>
+
+                <TextBlock x:Name="PositionText" Grid.Column="2" Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center" Margin="0,0,12,0"
+                           Text="00:00:00 / 00:00:00"/>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

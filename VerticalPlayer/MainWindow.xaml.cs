@@ -43,6 +43,12 @@ namespace VerticalPlayer
         public bool FitWindowToVideo { get; set; } = true;
         public bool DnnFastBuild { get; set; } = false;
 
+        // ── ドラレコモード ──
+        public bool DashcamRearLinked { get; set; } = true;
+        public double DashcamZoomScale { get; set; } = 2.0;
+        public double DashcamWindowWidth { get; set; }
+        public double DashcamWindowHeight { get; set; }
+
         // ── 再生 ──
         public double Volume { get; set; } = 0.7;
         public bool IsMuted { get; set; }
@@ -200,6 +206,13 @@ namespace VerticalPlayer
         private bool _isPlaying = false;
         private double _currentRotation = 0;
 
+        // ── ドラレコモード ──
+        private bool _isDashcamMode;
+        private double _preDashcamWidth;
+        private double _preDashcamHeight;
+        private double _dashcamWindowWidth;
+        private double _dashcamWindowHeight;
+
         // ── タイマー ──
         private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(100) };
         private readonly DispatcherTimer _osdTimer = new() { Interval = TimeSpan.FromSeconds(3) };
@@ -253,6 +266,9 @@ namespace VerticalPlayer
             Trace("=== MainWindow() start ===");
             InitializeComponent();
             Trace("InitializeComponent done");
+
+            // ドラレコモード: 動画オープン/ズーム変更時にウィンドウをフィットさせる
+            DashcamView.RequestWindowFit += DashcamView_RequestWindowFit;
 
             // GPU描画パス（D3DImage経由）を有効化。コントラスト/ダイナミックコントラスト/
             // 超解像/比較ビューはこれがtrueでないと一切効果が出ない（デノイズはCPU/avfilter側
@@ -459,6 +475,12 @@ namespace VerticalPlayer
 
             UpdateEffectLabels();
 
+            // ── ドラレコモード ──
+            DashcamView.RearLinked = s.DashcamRearLinked;
+            DashcamView.ZoomScale = s.DashcamZoomScale;
+            _dashcamWindowWidth = s.DashcamWindowWidth;
+            _dashcamWindowHeight = s.DashcamWindowHeight;
+
             // ── プリセット ──
             _presets.Clear();
             foreach (var p in s.Presets) _presets.Add(p);
@@ -485,15 +507,21 @@ namespace VerticalPlayer
 
             var s = new AppSettings
             {
-                // ウィンドウ
+                // ウィンドウ（ドラレコモード中に閉じた場合は、退避しておいた通常モードのサイズを保存する）
                 WindowLeft = this.Left,
                 WindowTop = this.Top,
-                WindowWidth = this.Width,
-                WindowHeight = this.Height,
+                WindowWidth = _isDashcamMode ? _preDashcamWidth : this.Width,
+                WindowHeight = _isDashcamMode ? _preDashcamHeight : this.Height,
                 AlwaysOnTop = this.Topmost,
                 AutoPlayNext = AutoPlayNextCheck.IsChecked ?? true,
                 FitWindowToVideo = FitWindowToVideoCheck.IsChecked ?? true,
                 DnnFastBuild = DnnFastBuildCheck.IsChecked ?? false,
+
+                // ドラレコモード
+                DashcamRearLinked = DashcamView.RearLinked,
+                DashcamZoomScale = DashcamView.ZoomScale,
+                DashcamWindowWidth = _isDashcamMode ? this.Width : _dashcamWindowWidth,
+                DashcamWindowHeight = _isDashcamMode ? this.Height : _dashcamWindowHeight,
 
                 // 再生
                 Volume = VolumeSlider.Value,
@@ -1067,6 +1095,11 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         private void Window_Drop(object sender, DragEventArgs e)
         {
+            // メインモードとドラレコモードは完全に別UIのため、ドラレコモード中は
+            // ウィンドウ全体に配線されているこのDropハンドラ（this.Drop += Window_Drop）
+            // からの再生開始を無効化する。
+            if (_isDashcamMode) return;
+
             DragGlow.Visibility = Visibility.Collapsed;
             if (e.Data.GetDataPresent(DataFormats.FileDrop))
             {
@@ -1077,6 +1110,13 @@ namespace VerticalPlayer
 
         private void Window_DragOver(object sender, DragEventArgs e)
         {
+            if (_isDashcamMode)
+            {
+                e.Effects = DragDropEffects.None;
+                e.Handled = true;
+                return;
+            }
+
             e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop)
                 ? DragDropEffects.Copy : DragDropEffects.None;
             DragGlow.Visibility = Visibility.Visible;
@@ -1691,6 +1731,75 @@ namespace VerticalPlayer
             bool open = SidePanel.Visibility != Visibility.Visible;
             SidePanel.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
             PanelOverlay.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // ドラレコ再生モード切替
+        // ─────────────────────────────────────────────────────────────────
+        private void DashcamModeToggle_Click(object sender, RoutedEventArgs e)
+        {
+            bool enterDashcamMode = !_isDashcamMode;
+            _isDashcamMode = enterDashcamMode;
+
+            if (enterDashcamMode)
+            {
+                // 通常再生を止めてからドラレコモードのオーバーレイを表示する
+                if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdatePlayIcon(); _timer.Stop(); }
+                Player.Stop();
+
+                if (SidePanel.Visibility == Visibility.Visible)
+                    TogglePanel();
+
+                VideoAreaBorder.Visibility = Visibility.Collapsed;
+                ControlPanel.Visibility = Visibility.Collapsed;
+                DashcamView.Visibility = Visibility.Visible;
+
+                // ドラレコモード専用のウィンドウサイズへ（前回終了時のサイズを記憶している場合はそれを復元。
+                // 動画を開いた時点でRequestWindowFitにより倍率どおりへ再フィットされる）
+                _preDashcamWidth = this.Width;
+                _preDashcamHeight = this.Height;
+                if (_dashcamWindowWidth > 0 && _dashcamWindowHeight > 0)
+                {
+                    this.Width = _dashcamWindowWidth;
+                    this.Height = _dashcamWindowHeight;
+                    EnsureOnScreen();
+                }
+            }
+            else
+            {
+                DashcamView.StopPlayback();
+                DashcamView.Visibility = Visibility.Collapsed;
+
+                VideoAreaBorder.Visibility = Visibility.Visible;
+                ControlPanel.Visibility = Visibility.Visible;
+
+                // ドラレコモードのウィンドウサイズを記憶してから通常モードのサイズへ戻す
+                _dashcamWindowWidth = this.Width;
+                _dashcamWindowHeight = this.Height;
+                this.Width = _preDashcamWidth;
+                this.Height = _preDashcamHeight;
+                EnsureOnScreen();
+            }
+        }
+
+        // DashcamPlayerView.RequestWindowFit: 動画のネイティブ解像度×選択倍率(px)でウィンドウをフィットさせる。
+        // サイドバー(220px)・タイトルバー・コントロールバー分のクロムを加算した上で画面内に収める。
+        private void DashcamView_RequestWindowFit(double videoWidthPx, double videoHeightPx)
+        {
+            if (!_isDashcamMode) return;
+
+            const double sidebarWidth = 220;
+            const double titleBarHeight = 48;
+            const double controlBarHeight = 56;
+
+            double targetWidth = sidebarWidth + videoWidthPx;
+            double targetHeight = titleBarHeight + videoHeightPx + controlBarHeight;
+
+            double sw = SystemParameters.WorkArea.Width;
+            double sh = SystemParameters.WorkArea.Height;
+            this.Width = Math.Clamp(targetWidth, this.MinWidth, sw);
+            this.Height = Math.Clamp(targetHeight, this.MinHeight, sh);
+            EnsureOnScreen();
         }
 
         // ─────────────────────────────────────────────────────────────────

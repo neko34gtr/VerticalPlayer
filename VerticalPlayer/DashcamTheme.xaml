@@ -1,0 +1,220 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!--
+      MainWindow.xamlのWindow.Resourcesで定義されているカラートークン・共通スタイルの複製。
+      DashcamPlayerView/DashcamHudOverlayはUserControlであり、StaticResourceの解決は
+      「自分自身のXAMLが読み込まれる時点」でのリソーススコープ（自分のResources→
+      マージ済み辞書→Application.Resources）でしか行われず、実行時にどのWindowへ
+      追加されるかには依存しない。そのため、実行時にMainWindowの子として配置されても
+      MainWindow.xaml側のWindow.Resourcesは参照できず、
+      "'BgDeep' という名前のリソースが見つかりません" のようなXamlParseExceptionになる。
+      これを避けるため、必要なキーをこのファイルに複製し、Dashcam側の各XAMLから
+      MergedDictionariesで読み込む方式にしている。
+
+      注意: MainWindow.xaml側の値を変更した場合、こちらも手動で同期が必要（現状は複製）。
+      将来的にはApp.xamlのApplication.Resourcesへ一本化し、MainWindow.xaml側も
+      そこからMergeする形にまとめるのが望ましい。
+    -->
+
+    <!-- ========== カラートークン ========== -->
+    <SolidColorBrush x:Key="BgDeep"       Color="#080C14"/>
+    <SolidColorBrush x:Key="BgSurface"    Color="#0F1623"/>
+    <SolidColorBrush x:Key="BgPanel"      Color="#141C2E"/>
+    <SolidColorBrush x:Key="BgCard"       Color="#1A2438"/>
+    <SolidColorBrush x:Key="BgHover"      Color="#1E2B42"/>
+    <SolidColorBrush x:Key="AccentBlue"   Color="#3B82F6"/>
+    <SolidColorBrush x:Key="AccentCyan"   Color="#06B6D4"/>
+    <SolidColorBrush x:Key="AccentViolet" Color="#8B5CF6"/>
+    <SolidColorBrush x:Key="TextPrimary"  Color="#F1F5F9"/>
+    <SolidColorBrush x:Key="TextMuted"    Color="#64748B"/>
+    <SolidColorBrush x:Key="TextFaint"    Color="#334155"/>
+    <SolidColorBrush x:Key="Border"       Color="#1E2D45"/>
+
+    <!-- ========== アイコンボタン ========== -->
+    <Style x:Key="IconBtn" TargetType="Button">
+        <Setter Property="Background"   Value="Transparent"/>
+        <Setter Property="Foreground"   Value="{StaticResource TextPrimary}"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Cursor"       Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                            CornerRadius="10" Padding="10">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="#1E2B42"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="#263347"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ========== プライマリボタン ========== -->
+    <Style x:Key="PrimaryBtn" TargetType="Button">
+        <Setter Property="Foreground"      Value="White"/>
+        <Setter Property="FontSize"        Value="11"/>
+        <Setter Property="FontWeight"      Value="SemiBold"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Cursor"          Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd" CornerRadius="8" Padding="10,6">
+                        <Border.Background>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                <GradientStop Color="#3B82F6" Offset="0"/>
+                                <GradientStop Color="#6366F1" Offset="1"/>
+                            </LinearGradientBrush>
+                        </Border.Background>
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Opacity" Value="0.85"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Bd" Property="Opacity" Value="0.7"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ========== セカンダリボタン ========== -->
+    <Style x:Key="SecondaryBtn" TargetType="Button">
+        <Setter Property="Foreground"      Value="{StaticResource TextPrimary}"/>
+        <Setter Property="FontSize"        Value="11"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="BorderBrush"     Value="{StaticResource Border}"/>
+        <Setter Property="Cursor"          Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd" Background="#1A2438" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="10,6">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="#1E2B42"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ========== 危険ボタン ========== -->
+    <Style x:Key="DangerBtn" TargetType="Button" BasedOn="{StaticResource SecondaryBtn}">
+        <Setter Property="Foreground" Value="#F87171"/>
+        <Setter Property="BorderBrush" Value="#3B1A1A"/>
+    </Style>
+
+    <!-- ========== スライダー共通 ========== -->
+    <Style x:Key="ModernSlider" TargetType="Slider">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Slider">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto" MinHeight="{TemplateBinding MinHeight}"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Track x:Name="PART_Track" Grid.Row="1">
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton Command="Slider.DecreaseLarge">
+                                    <RepeatButton.Template>
+                                        <ControlTemplate TargetType="RepeatButton">
+                                            <Border Height="4" CornerRadius="2">
+                                                <Border.Background>
+                                                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                        <GradientStop Color="#3B82F6" Offset="0"/>
+                                                        <GradientStop Color="#6366F1" Offset="1"/>
+                                                    </LinearGradientBrush>
+                                                </Border.Background>
+                                            </Border>
+                                        </ControlTemplate>
+                                    </RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.DecreaseRepeatButton>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton Command="Slider.IncreaseLarge">
+                                    <RepeatButton.Template>
+                                        <ControlTemplate TargetType="RepeatButton">
+                                            <Border Height="4" Background="#1E2D45" CornerRadius="2"/>
+                                        </ControlTemplate>
+                                    </RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.IncreaseRepeatButton>
+                            <Track.Thumb>
+                                <Thumb>
+                                    <Thumb.Template>
+                                        <ControlTemplate TargetType="Thumb">
+                                            <!-- 透明な大きいヒット領域 + 見た目の小さい玉 -->
+                                            <Grid Width="28" Height="28">
+                                                <Ellipse Fill="Transparent" Width="28" Height="28"/>
+                                                <Ellipse Width="14" Height="14" Fill="White"
+                                                         HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                    <Ellipse.Effect>
+                                                        <DropShadowEffect Color="#3B82F6" BlurRadius="8" ShadowDepth="0" Opacity="0.8"/>
+                                                    </Ellipse.Effect>
+                                                </Ellipse>
+                                            </Grid>
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Track.Thumb>
+                        </Track>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ========== トグルスイッチ風チェックボックス ========== -->
+    <Style x:Key="ModernCheck" TargetType="CheckBox">
+        <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+        <Setter Property="FontSize"   Value="12"/>
+        <Setter Property="Cursor"     Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="CheckBox">
+                    <DockPanel LastChildFill="True">
+                        <Border x:Name="Track" DockPanel.Dock="Left" Width="34" Height="18"
+                                CornerRadius="9" Background="#334155" Margin="0,0,8,0"
+                                VerticalAlignment="Center">
+                            <Border x:Name="Knob" Width="14" Height="14" CornerRadius="7"
+                                    Background="White" HorizontalAlignment="Left" Margin="2,0,2,0"/>
+                        </Border>
+                        <ContentPresenter VerticalAlignment="Center"/>
+                    </DockPanel>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Track" Property="Background">
+                                <Setter.Value>
+                                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                        <GradientStop Color="#3B82F6" Offset="0"/>
+                                        <GradientStop Color="#6366F1" Offset="1"/>
+                                    </LinearGradientBrush>
+                                </Setter.Value>
+                            </Setter>
+                            <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right"/>
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Track" Property="Opacity" Value="0.85"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+</ResourceDictionary>
