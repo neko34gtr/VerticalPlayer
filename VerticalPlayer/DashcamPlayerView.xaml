@@ -41,8 +41,9 @@
                           Checked="RearLinkedCheck_Changed" Unchecked="RearLinkedCheck_Changed" Margin="0,0,16,0"/>
 
                 <TextBlock Text="表示倍率" Foreground="{StaticResource TextMuted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <ComboBox x:Name="ZoomCombo" Width="70" SelectionChanged="ZoomCombo_SelectionChanged" Margin="0,0,16,0"
+                <ComboBox x:Name="ZoomCombo" Width="90" SelectionChanged="ZoomCombo_SelectionChanged" Margin="0,0,16,0"
                           Style="{StaticResource ModernCombo}">
+                    <ComboBoxItem Content="オリジナル" Tag="1"/>
                     <ComboBoxItem Content="1.5x" Tag="1.5"/>
                     <ComboBoxItem Content="2x" Tag="2" IsSelected="True"/>
                     <ComboBoxItem Content="3x" Tag="3"/>
