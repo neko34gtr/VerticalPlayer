@@ -114,6 +114,12 @@ namespace VerticalPlayer.Dashcam
             _ = Map.CoreWebView2.ExecuteScriptAsync($"window.dashcam.setFollow({(FollowEnabled ? "true" : "false")})");
         }
 
+        private void FitAllButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (!_isReady) return;
+            _ = Map.CoreWebView2.ExecuteScriptAsync("window.dashcam.fitAll()");
+        }
+
         // cdnjsからの安定配信ライブラリ + 国土地理院淡色タイルのHTML
         private const string MapHtml = @"
 <!DOCTYPE html>
@@ -143,6 +149,7 @@ namespace VerticalPlayer.Dashcam
   }).addTo(map);
   var followEnabled = true;
   var hasRoute = false;
+  var lastAllPoints = [];
 
   map.on('dragstart', function () {
     if (window.chrome && window.chrome.webview) {
@@ -164,10 +171,15 @@ namespace VerticalPlayer.Dashcam
         }).addTo(routeLayer);
         seg.points.forEach(function (p) { allPoints.push(p); });
       });
-      if (allPoints.length > 0) {
+      // 軌跡が伸びるたびに毎回fitBoundsするとズーム率がどんどん変わってしまい、
+      // 自車位置が豆粒のように見えてしまう。初回の描画時だけ全体を表示し、
+      // 以降はsetCarのpanTo（ズームは変えず追従だけ）に任せる。
+      // 全体を見たくなった場合はfitAll()を呼べば手動でいつでも合わせ直せる。
+      if (allPoints.length > 0 && !hasRoute) {
         hasRoute = true;
         map.fitBounds(L.latLngBounds(allPoints), { padding: [20, 20] });
       }
+      lastAllPoints = allPoints;
     },
     setCar: function (lat, lng, valid) {
       car.setLatLng([lat, lng]);
@@ -178,6 +190,11 @@ namespace VerticalPlayer.Dashcam
     },
     setFollow: function (enabled) {
       followEnabled = enabled;
+    },
+    fitAll: function () {
+      if (lastAllPoints && lastAllPoints.length > 0) {
+        map.fitBounds(L.latLngBounds(lastAllPoints), { padding: [20, 20] });
+      }
     }
   };
 </script>

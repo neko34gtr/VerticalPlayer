@@ -22,6 +22,8 @@
             <!-- リスト(ホバーで展開) + 映像 + センサー情報/マップ -->
             <RowDefinition Height="Auto"/>
             <!-- 再生コントロール -->
+            <RowDefinition Height="Auto"/>
+            <!-- 加速度ストリップチャート（再生コントロールバーの下） -->
         </Grid.RowDefinitions>
 
         <!-- ========== 録画フォルダ種別・ドライブ選択・オプションバー ========== -->
@@ -51,6 +53,8 @@
                 <TextBlock Text="表示倍率" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <ComboBox x:Name="ZoomCombo" Width="90" SelectionChanged="ZoomCombo_SelectionChanged" Margin="0,0,16,0"
                           Style="{StaticResource ModernCombo}">
+                    <ComboBoxItem Content="0.25x" Tag="0.25"/>
+                    <ComboBoxItem Content="0.5x" Tag="0.5"/>
                     <ComboBoxItem Content="オリジナル" Tag="1"/>
                     <ComboBoxItem Content="1.5x" Tag="1.5"/>
                     <ComboBoxItem Content="2x" Tag="2" IsSelected="True"/>
@@ -78,7 +82,8 @@
             <!-- 左サイドバー: 通常は幅16pxの細いバーだけ表示し、マウスオーバーで展開する
                  （常時220px確保すると画面を圧迫するため。展開中は映像エリアが一時的に
                  狭くなるが、離れれば自動で戻る）。 -->
-            <Border x:Name="LeftSidebarHost" Grid.Column="0" Background="{StaticResource BgPanel}"
+            <Border x:Name="LeftSidebarHost" Grid.Column="0" HorizontalAlignment="Left" Width="16" Panel.ZIndex="20"
+                    Background="{StaticResource BgPanel}"
                     BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0"
                     MouseEnter="LeftSidebarHost_MouseEnter" MouseLeave="LeftSidebarHost_MouseLeave">
                 <Grid>
@@ -95,12 +100,12 @@
 
                         <TextBlock Grid.Row="0" Text="フロント" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" Margin="12,10,12,6"/>
                         <ListBox x:Name="FrontList" Grid.Row="1" Style="{StaticResource ModernList}"
-                                 DisplayMemberPath="DisplayLabel"
+                                 ItemTemplate="{StaticResource DashcamListItemTemplate}"
                                  SelectionChanged="FrontList_SelectionChanged"/>
 
                         <TextBlock Grid.Row="2" Text="リア（手動選択可・選ぶと追従は自動解除）" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" Margin="12,10,12,6"/>
                         <ListBox x:Name="RearList" Grid.Row="3" Style="{StaticResource ModernList}"
-                                 DisplayMemberPath="DisplayLabel"
+                                 ItemTemplate="{StaticResource DashcamListItemTemplate}"
                                  SelectionChanged="RearList_SelectionChanged"/>
                     </Grid>
                 </Grid>
@@ -192,5 +197,16 @@
                            Text="00:00:00 / 00:00:00"/>
             </Grid>
         </Border>
+
+        <dash:DashcamAccelChart x:Name="AccelChart" Grid.Row="3"/>
+
+        <!-- サムネイル生成専用の非表示プレイヤー。画面外（Canvas.Left/Top=-2000）に配置することで
+             通常のスクリーンショット機能と全く同じ描画経路（RenderTargetBitmap）を使えるようにする
+             （Visibility=Hiddenだと内部的にOnRenderが呼ばれずキャプチャが空になる懸念があるため、
+             見た目上は画面外に追いやるだけでVisible/Opacity=1のまま維持している）。 -->
+        <Canvas ClipToBounds="False" IsHitTestVisible="False">
+            <media:FfmpegMediaElement x:Name="ThumbCapturePlayer" Canvas.Left="-2000" Canvas.Top="-2000"
+                                      Width="320" Height="180" UseGpuPresenter="False"/>
+        </Canvas>
     </Grid>
 </UserControl>

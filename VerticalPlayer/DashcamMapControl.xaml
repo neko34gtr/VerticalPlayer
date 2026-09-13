@@ -25,9 +25,12 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" Text="走行軌跡" Foreground="{StaticResource TextAccentCyan}" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
-            <CheckBox x:Name="FollowCheck" Grid.Column="1" Content="追従" IsChecked="True" Style="{StaticResource ModernCheck}"
+            <Button x:Name="FitAllButton" Grid.Column="1" Content="全体表示" Style="{StaticResource SecondaryBtn}" FontSize="10"
+                    Padding="6,2" Margin="0,0,8,0" Click="FitAllButton_Click" ToolTip="今表示している軌跡全体が入るようにズームし直す"/>
+            <CheckBox x:Name="FollowCheck" Grid.Column="2" Content="追従" IsChecked="True" Style="{StaticResource ModernCheck}"
                       Foreground="{StaticResource TextPrimary}" FontSize="11"
                       Checked="FollowCheck_Changed" Unchecked="FollowCheck_Changed"/>
         </Grid>

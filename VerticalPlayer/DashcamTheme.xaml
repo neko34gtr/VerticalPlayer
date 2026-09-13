@@ -356,5 +356,17 @@
             </Trigger>
         </Style.Triggers>
     </Style>
+    <!-- ========== ドラレコ動画リストの項目テンプレート（中サイズサムネイル＋ラベル） ========== -->
+    <!-- Thumbnailは生成完了までnullのため、その間は背景色だけのプレースホルダーになる。
+         DashcamMediaGroup.ThumbnailはINotifyPropertyChanged経由でバインディングに反映される。 -->
+    <DataTemplate x:Key="DashcamListItemTemplate">
+        <StackPanel Margin="2,4">
+            <Border Width="196" Height="110" Background="#0A0F1A" CornerRadius="4" ClipToBounds="True">
+                <Image Source="{Binding Thumbnail}" Stretch="UniformToFill"/>
+            </Border>
+            <TextBlock Text="{Binding DisplayLabel}" Foreground="{StaticResource TextPrimary}" FontSize="11"
+                       Margin="2,4,2,0" TextTrimming="CharacterEllipsis"/>
+        </StackPanel>
+    </DataTemplate>
 
 </ResourceDictionary>

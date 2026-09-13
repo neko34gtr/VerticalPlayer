@@ -34,9 +34,13 @@ namespace VerticalPlayer.Dashcam
 
     /// <summary>
     /// Front/Rear動画とNMEAをタイムスタンプキーでペアリングした1トリップ分のセット。
+    /// サムネイル(Thumbnail)はバックグラウンドで後から埋まるため、リストUIで表示更新を
+    /// 反映できるようINotifyPropertyChangedを実装している。
     /// </summary>
-    public sealed class DashcamMediaGroup
+    public sealed class DashcamMediaGroup : System.ComponentModel.INotifyPropertyChanged
     {
+        public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+
         public string TimestampKey { get; init; } = string.Empty;
         public DateTime? Timestamp { get; init; }
 
@@ -47,6 +51,19 @@ namespace VerticalPlayer.Dashcam
 
         public bool HasFront => FrontVideoPath != null;
         public bool HasRear => RearVideoPath != null;
+
+        private System.Windows.Media.ImageSource? _thumbnail;
+        /// <summary>サムネイル画像（未生成の間はnull）。生成完了時にセットしてUIへ通知する。</summary>
+        public System.Windows.Media.ImageSource? Thumbnail
+        {
+            get => _thumbnail;
+            set
+            {
+                if (ReferenceEquals(_thumbnail, value)) return;
+                _thumbnail = value;
+                PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(Thumbnail)));
+            }
+        }
 
         /// <summary>リスト表示用のラベル（日時が読み取れればそれを、無理ならキーそのものを表示）。</summary>
         public string DisplayLabel => Timestamp?.ToString("yyyy/MM/dd HH:mm:ss") ?? TimestampKey;

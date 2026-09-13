@@ -11,6 +11,8 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using VerticalPlayer.Media;
+// AppMessageBox は親名前空間 VerticalPlayer 側にあるため using が必要
+using VerticalPlayer;
 
 namespace VerticalPlayer.Dashcam
 {
@@ -46,11 +48,24 @@ namespace VerticalPlayer.Dashcam
         // 壊れた/読めないファイルが連続した場合に無限ループでスキップし続けないための保険
         private int _consecutiveFrontFailures;
 
+        // リア表示スイッチ(RearVisibleCheck)とは独立して管理する「今リアが実際に再生可能か」の状態。
+        // スイッチ自体はユーザー操作でのみ変化させ、このフラグとの組み合わせで実際の表示可否を決める。
+        private bool _rearAvailable;
+
         // 起動時レジューム用: MediaOpened後にシークすべき秒数（該当なければnull）
         private double? _pendingResumeSeconds;
 
+        // レジューム処理中フラグ: 目的のドライブへ切り替わる前の一瞬だけ発生する空振りスキャンで
+        // 「見つかりませんでした」警告を出さないようにするためのガード
+        private bool _isResuming;
+
         // 次ファイルの先読み（OSファイルキャッシュ温め）: 同じパスを何度も読み直さないための記録
         private readonly HashSet<string> _prefetchedPaths = new();
+
+        // サムネイル生成キュー（1件ずつ順番に処理。ThumbCapturePlayerという専用の非表示
+        // プレイヤーを使い回すため並列実行はしない）
+        private readonly Queue<(DashcamMediaGroup group, string path)> _thumbnailQueue = new();
+        private bool _thumbnailWorkerRunning;
 
         // ---- シーク（MainWindowのSeekBarと同等の機能: ドラッグ間引きプレビュー、
         //      クリックで即シーク、ホバーで時刻プレビュー表示） ----
@@ -133,14 +148,19 @@ namespace VerticalPlayer.Dashcam
 
         private void LeftSidebarHost_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
         {
-            LeftSidebarColumn.Width = new GridLength(220);
+            // 列幅(LeftSidebarColumn)は常に16pxで固定のまま変更しない。展開はLeftSidebarHost自身の
+            // Widthだけを広げ、Panel.ZIndexで映像の上にオーバーレイ表示する方式にしている。
+            // 以前は列幅そのものを16→220pxへ変更していたため、動画エリア(Grid.Column="1"の*列)の
+            // 実際のレンダリングサイズが毎回変わってしまい、「ホバーしただけなのに動画が
+            // 一瞬リサイズされる」という違和感の原因になっていた。
+            LeftSidebarHost.Width = 220;
             CollapsedHint.Visibility = Visibility.Collapsed;
             SidebarContent.Visibility = Visibility.Visible;
         }
 
         private void LeftSidebarHost_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
         {
-            LeftSidebarColumn.Width = new GridLength(16);
+            LeftSidebarHost.Width = 16;
             SidebarContent.Visibility = Visibility.Collapsed;
             CollapsedHint.Visibility = Visibility.Visible;
         }
@@ -219,10 +239,15 @@ namespace VerticalPlayer.Dashcam
 
             ScanDrive(option.RootPath, CurrentEventFolder);
 
-            if (_frontGroups.Count == 0 && _rearGroups.Count == 0)
+            // レジューム再生の内部処理中は、目的のドライブへ切り替わる前の一瞬だけ発生する
+            // 「（まだ違う）先頭ドライブが自動選択された状態」での空振りスキャンでも
+            // このメッセージが出てしまっていた（実際には直後に正しいドライブへ切り替わり成功する）。
+            // レジューム処理中はこの警告を出さないようにする。
+            if (!_isResuming && _frontGroups.Count == 0 && _rearGroups.Count == 0)
             {
-                MessageBox.Show($"対応する動画が見つかりませんでした（{CurrentEventFolder}フォルダ等を確認してください）。",
-                    "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Warning);
+                AppMessageBox.Show(Window.GetWindow(this),
+                    $"対応する動画が見つかりませんでした（{CurrentEventFolder}フォルダ等を確認してください）。",
+                    "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Warning, isDarkMode: true);
             }
         }
 
@@ -234,6 +259,145 @@ namespace VerticalPlayer.Dashcam
 
             FrontList.ItemsSource = _frontGroups;
             RearList.ItemsSource = _rearGroups;
+
+            _thumbnailQueue.Clear(); // 別ドライブ/別フォルダへ切り替えたら古いキューは破棄する
+            EnqueueThumbnails(_groups);
+        }
+
+        // ---- サムネイル生成（中サイズ・SQLiteキャッシュ） ----
+        // ファイルパス＋更新日時をキーにSQLiteへキャッシュし、次回以降は再生成せず即表示する。
+        // 未キャッシュの場合のみ、非表示のThumbCapturePlayerで対象動画を開き2秒付近の1フレームを
+        // RenderTargetBitmapで撮影する（既存のスクリーンショット機能と同じ描画経路を流用）。
+        // 1件ずつ順番に処理するため、大量のファイルがあってもUIスレッドや他のデコーダを
+        // 圧迫しない（ただし全件そろうまでは後ろの方の項目ほど時間がかかる）。
+
+        private void EnqueueThumbnails(IEnumerable<DashcamMediaGroup> groups)
+        {
+            foreach (var g in groups)
+            {
+                if (g.Thumbnail != null) continue;
+                string? path = g.FrontVideoPath ?? g.RearVideoPath;
+                if (path == null) continue;
+                _thumbnailQueue.Enqueue((g, path));
+            }
+
+            if (!_thumbnailWorkerRunning)
+                _ = RunThumbnailWorkerAsync();
+        }
+
+        private async Task RunThumbnailWorkerAsync()
+        {
+            _thumbnailWorkerRunning = true;
+            try
+            {
+                while (_thumbnailQueue.Count > 0)
+                {
+                    var (group, path) = _thumbnailQueue.Dequeue();
+                    if (group.Thumbnail != null) continue; // 別経路で既に生成済み
+
+                    byte[]? cached = await Task.Run(() => DashcamThumbnailCache.TryGet(path));
+                    byte[]? pngBytes = cached;
+
+                    if (pngBytes == null)
+                        pngBytes = await GenerateThumbnailAsync(path);
+
+                    if (pngBytes == null)
+                        continue; // 生成失敗（壊れたファイル等）はスキップし、他の項目の処理は継続する
+
+                    if (cached == null)
+                        await Task.Run(() => DashcamThumbnailCache.Save(path, pngBytes));
+
+                    var imageSource = BytesToImageSource(pngBytes);
+                    // PropertyChanged通知を確実にUIスレッドへ送るためDispatcherを経由する
+                    Dispatcher.Invoke(() => group.Thumbnail = imageSource);
+                }
+            }
+            finally
+            {
+                _thumbnailWorkerRunning = false;
+            }
+        }
+
+        private static ImageSource BytesToImageSource(byte[] pngBytes)
+        {
+            var bmp = new BitmapImage();
+            using var ms = new MemoryStream(pngBytes);
+            bmp.BeginInit();
+            bmp.CacheOption = BitmapCacheOption.OnLoad;
+            bmp.StreamSource = ms;
+            bmp.EndInit();
+            bmp.Freeze(); // UIスレッド以外からでも安全に参照できるようにする
+            return bmp;
+        }
+
+        private async Task<byte[]?> GenerateThumbnailAsync(string videoPath)
+        {
+            // UI要素の操作およびキャプチャは確実にUIスレッドで行う（DispatcherOperationが
+            // async delegateを返すため、結果取得には2段階のawaitが必要）。
+            var op = Dispatcher.InvokeAsync(async () =>
+            {
+                var tcs = new TaskCompletionSource<bool>();
+                RoutedEventHandler openedHandler = (s, e) => tcs.TrySetResult(true);
+                EventHandler<FfmpegMediaFailedEventArgs> failedHandler = (s, e) => tcs.TrySetResult(false);
+
+                ThumbCapturePlayer.MediaOpened += openedHandler;
+                ThumbCapturePlayer.MediaFailed += failedHandler;
+                try
+                {
+                    ThumbCapturePlayer.Stop();
+                    ThumbCapturePlayer.Source = new Uri(videoPath);
+
+                    var completed = await Task.WhenAny(tcs.Task, Task.Delay(5000));
+                    if (completed != tcs.Task || !await tcs.Task)
+                        return null; // オープン失敗 or タイムアウト
+
+                    var duration = ThumbCapturePlayer.NaturalDuration.HasTimeSpan
+                        ? ThumbCapturePlayer.NaturalDuration.TimeSpan
+                        : TimeSpan.FromSeconds(4);
+                    var target = TimeSpan.FromSeconds(Math.Min(2, duration.TotalSeconds * 0.3));
+                    await ThumbCapturePlayer.StepToVideoOnlyAsync(target, timeoutMs: 3000);
+
+                    // 画面外(Canvas.Left/Top=-2000)のままだとMeasure/Arrangeが確定しておらず、
+                    // RenderTargetBitmap.Render(ThumbCapturePlayer)を直接呼んでも空(透明)の
+                    // ビットマップになる不具合が実機で確認された。160x90でレイアウトを明示的に
+                    // 確定させ、さらにVisualBrush経由でDrawingVisualへ転写してからキャプチャする
+                    // ことで解消している。
+                    ThumbCapturePlayer.Measure(new Size(160, 90));
+                    ThumbCapturePlayer.Arrange(new Rect(-2000, -2000, 160, 90));
+                    ThumbCapturePlayer.UpdateLayout();
+                    await Task.Delay(100);
+
+                    var visualBrush = new VisualBrush(ThumbCapturePlayer) { Stretch = Stretch.Fill };
+                    var drawingVisual = new DrawingVisual();
+                    using (var dc = drawingVisual.RenderOpen())
+                    {
+                        dc.DrawRectangle(visualBrush, null, new Rect(0, 0, 160, 90));
+                    }
+
+                    var rtb = new RenderTargetBitmap(160, 90, 96, 96, PixelFormats.Pbgra32);
+                    rtb.Render(drawingVisual);
+
+                    // JPEG(品質80%)でバイト数を大幅カット（SQLiteへ大量保存するため）
+                    var encoder = new JpegBitmapEncoder { QualityLevel = 80 };
+                    encoder.Frames.Add(BitmapFrame.Create(rtb));
+                    using var ms = new MemoryStream();
+                    encoder.Save(ms);
+                    return ms.ToArray();
+                }
+                catch
+                {
+                    return null;
+                }
+                finally
+                {
+                    ThumbCapturePlayer.MediaOpened -= openedHandler;
+                    ThumbCapturePlayer.MediaFailed -= failedHandler;
+                    ThumbCapturePlayer.Stop();
+                }
+            });
+
+            var innerTask = await op;
+            return await innerTask;
         }
 
         // ---- リスト選択 → 再生 ----
@@ -286,11 +450,12 @@ namespace VerticalPlayer.Dashcam
                 }
                 else
                 {
-                    // フロントと同名のリアファイルが存在しないケース。Rearは単に非表示のまま何もしない。
+                    // フロントと同名のリアファイルが存在しないケース。スイッチ自体はユーザーの
+                    // 操作結果のまま変更せず（勝手にOFFにしない）、表示できないので黙って隠すだけにする。
                     PlayerRear.Stop();
                     _currentRearGroup = null;
-                    RearPipBorder.Visibility = Visibility.Collapsed;
-                    RearVisibleCheck.IsChecked = false;
+                    _rearAvailable = false;
+                    UpdateRearPipVisibility();
                 }
             }
         }
@@ -299,6 +464,8 @@ namespace VerticalPlayer.Dashcam
         {
             _currentRearGroup = group;
             _wantsPlaying = true; // 独立選択(リア追従OFF時)から呼ばれた場合もここで意図をセットする
+            _rearAvailable = false; // 新しいSourceが実際に開き終わるまでは「表示可能」とみなさない
+            UpdateRearPipVisibility();
 
             if (group.RearVideoPath != null)
             {
@@ -331,9 +498,24 @@ namespace VerticalPlayer.Dashcam
             _sensorFrames = nmeaPath != null
                 ? NmeaSensorParser.Parse(nmeaPath, _currentFrontGroup?.Timestamp, duration)
                 : new List<DashcamSensorFrame>();
+            AccelChart.Clear(); // 新しいファイルに切り替わったので加速度チャートの連続性もリセットする
 
             if (_currentFrontGroup != null)
                 _ = RefreshMapBufferAsync(_currentFrontGroup);
+
+            // レジューム再生: 位置決めは必ずPlay()より先に行う。
+            // StepToVideoOnlyAsyncはドラッグシーク確定時と同じ「指定フレームへ正確に着地させたら
+            // 内部的にPause()する」設計のメソッドのため、これより先にPlay()してしまうと
+            // 音声(hidden MediaElement側)だけ既に再生が進み、映像(AVEngine側)はシーク後に
+            // Pause()されたまま……という「映像は止まったまま音声だけ流れる」不具合になる
+            // （実機ログで確認: Play()→Seek()→catch-up→最後にPause()で終わっており、
+            // その後Play()を呼び直していなかったのが原因）。
+            if (_pendingResumeSeconds is double resumeSec)
+            {
+                _pendingResumeSeconds = null;
+                if (resumeSec > 0.5 && resumeSec < duration.TotalSeconds)
+                    await PlayerFront.StepToVideoOnlyAsync(TimeSpan.FromSeconds(resumeSec), timeoutMs: 3000);
+            }
 
             if (_wantsPlaying)
             {
@@ -343,13 +525,9 @@ namespace VerticalPlayer.Dashcam
             }
 
             if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
-                RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
-
-            if (_pendingResumeSeconds is double resumeSec)
             {
-                _pendingResumeSeconds = null;
-                if (resumeSec > 0.5 && resumeSec < duration.TotalSeconds)
-                    await PlayerFront.StepToVideoOnlyAsync(TimeSpan.FromSeconds(resumeSec), timeoutMs: 3000);
+                RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
+                UpdateZoomAvailability();
             }
 
             SchedulePrefetchIfNeeded();
@@ -358,6 +536,8 @@ namespace VerticalPlayer.Dashcam
         private void PlayerRear_MediaOpened(object sender, RoutedEventArgs e)
         {
             PlayerRear.ResetDnnEngineForNewFile();
+            _rearAvailable = true;
+            UpdateRearPipVisibility();
             if (_wantsPlaying)
                 PlayerRear.Play();
         }
@@ -368,8 +548,9 @@ namespace VerticalPlayer.Dashcam
             if (_consecutiveFrontFailures >= 3)
             {
                 _consecutiveFrontFailures = 0;
-                MessageBox.Show("複数のFront動画が連続して再生できませんでした。ファイルの状態を確認してください。",
-                    "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Warning);
+                AppMessageBox.Show(Window.GetWindow(this),
+                    "複数のFront動画が連続して再生できませんでした。ファイルの状態を確認してください。",
+                    "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Warning, isDarkMode: true);
                 return;
             }
             AdvanceToNextFrontScene();
@@ -377,10 +558,13 @@ namespace VerticalPlayer.Dashcam
 
         private void PlayerRear_MediaFailed(object sender, FfmpegMediaFailedEventArgs e)
         {
+            // 「エラー記録」ファイル等で開けない場合。スイッチには一切触らず（ユーザーが自分で
+            // 操作したものを勝手にOFFにするのは体験として最悪、というご指摘のため）、
+            // 単に「今は表示できるものが無い」状態にしてPiPを黙って隠すだけにする。
             PlayerRear.Stop();
-            RearPipBorder.Visibility = Visibility.Collapsed;
-            RearVisibleCheck.IsChecked = false;
             _currentRearGroup = null;
+            _rearAvailable = false;
+            UpdateRearPipVisibility();
         }
 
         private void PlayerFront_MediaEnded(object sender, RoutedEventArgs e) => AdvanceToNextFrontScene();
@@ -467,7 +651,8 @@ namespace VerticalPlayer.Dashcam
         {
             if (_currentFrontGroup?.FrontVideoPath == null)
             {
-                MessageBox.Show("Front動画を再生してから撮影してください。", "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Information);
+                AppMessageBox.Show(Window.GetWindow(this), "Front動画を再生してから撮影してください。",
+                    "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Information, isDarkMode: true);
                 return;
             }
 
@@ -490,7 +675,8 @@ namespace VerticalPlayer.Dashcam
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"スクリーンショットの保存に失敗しました。\n{ex.Message}", "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Warning);
+                AppMessageBox.Show(Window.GetWindow(this), $"スクリーンショットの保存に失敗しました。\n{ex.Message}",
+                    "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Warning, isDarkMode: true);
             }
         }
 
@@ -503,17 +689,21 @@ namespace VerticalPlayer.Dashcam
             PlayPauseButton.Content = "▶";
         }
 
-        private void RearVisibleCheck_Changed(object sender, RoutedEventArgs e)
-        {
-            bool hasRear = _currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null);
-            if (!hasRear)
-            {
-                RearVisibleCheck.IsChecked = false;
-                return;
-            }
-            RearPipBorder.Visibility = RearVisibleCheck.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        private void RearVisibleCheck_Changed(object sender, RoutedEventArgs e) => UpdateRearPipVisibility();
 
-            if (RearVisibleCheck.IsChecked == true && _wantsPlaying)
+        /// <summary>
+        /// 「リア表示」スイッチはユーザーが完全に手動で制御するものとして扱う（コード側から
+        /// 勝手にON/OFFを書き換えることは一切しない）。実際にPiPを見せるかどうかは
+        /// 「スイッチがONか」と「今リアが実際に再生可能か(_rearAvailable)」の掛け算で決まる。
+        /// 表示できない間はスイッチがONのままでも黙って隠すだけにし、後で表示可能になれば
+        /// （このメソッドを呼び直すことで）ユーザーは何も操作し直さなくても自動的に映るようになる。
+        /// </summary>
+        private void UpdateRearPipVisibility()
+        {
+            bool show = RearVisibleCheck.IsChecked == true && _rearAvailable;
+            RearPipBorder.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+
+            if (show && _wantsPlaying)
                 PlayerRear.Play();
         }
 
@@ -535,6 +725,44 @@ namespace VerticalPlayer.Dashcam
 
             if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
                 RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
+        }
+
+        /// <summary>
+        /// 動画のネイティブ解像度×各倍率が、いま使っている画面の作業領域に収まるかどうかで
+        /// ズーム選択肢のIsEnabledを更新する（「4xは2K/4K環境では選択不能に」というご要望に対応。
+        /// 画面の解像度そのものより「動画側の解像度が大きい場合に大倍率が意味をなさなくなる」方が
+        /// 本質なため、固定の解像度名で判定せず、実際にウィンドウが収まるかどうかで動的に判定する）。
+        /// 選択中の項目が入らなくなった場合は、収まる範囲で一番大きい倍率へ自動的に切り替える。
+        /// </summary>
+        private void UpdateZoomAvailability()
+        {
+            if (PlayerFront.NaturalVideoWidth <= 0 || PlayerFront.NaturalVideoHeight <= 0) return;
+
+            double screenW = SystemParameters.WorkArea.Width;
+            double screenH = SystemParameters.WorkArea.Height;
+            const double leftSidebarWidth = 16;
+            const double rightSidebarWidth = 260;
+            const double titleBarHeight = 48;
+            const double controlBarHeight = 56;
+
+            foreach (var item in ZoomCombo.Items.OfType<ComboBoxItem>())
+            {
+                if (!double.TryParse((string)item.Tag, System.Globalization.CultureInfo.InvariantCulture, out var scale))
+                    continue;
+
+                double neededW = leftSidebarWidth + rightSidebarWidth + PlayerFront.NaturalVideoWidth * scale;
+                double neededH = titleBarHeight + controlBarHeight + PlayerFront.NaturalVideoHeight * scale;
+                item.IsEnabled = neededW <= screenW && neededH <= screenH;
+            }
+
+            if (ZoomCombo.SelectedItem is ComboBoxItem selected && !selected.IsEnabled)
+            {
+                var fallback = ZoomCombo.Items.OfType<ComboBoxItem>()
+                    .Where(i => i.IsEnabled)
+                    .OrderByDescending(i => double.Parse((string)i.Tag, System.Globalization.CultureInfo.InvariantCulture))
+                    .FirstOrDefault();
+                if (fallback != null) ZoomCombo.SelectedItem = fallback;
+            }
         }
 
         private async void DnnEnabledCheck_Changed(object sender, RoutedEventArgs e)
@@ -624,6 +852,7 @@ namespace VerticalPlayer.Dashcam
                 await Task.Delay(15);
 
             var target = TimeSpan.FromSeconds(SeekSlider.Value);
+            AccelChart.Clear(); // シークで時間が飛ぶため、直前までの連続したチャートは一旦リセットする
             await PlayerFront.StepToVideoOnlyAsync(target, timeoutMs: 2000);
             if (_currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null))
                 await PlayerRear.StepToVideoOnlyAsync(target, timeoutMs: 2000);
@@ -693,7 +922,10 @@ namespace VerticalPlayer.Dashcam
             var frame = DashcamSensorLookup.FindNearest(_sensorFrames, pos);
             Hud.UpdateFrame(frame);
             if (frame != null)
+            {
                 MapView.SetCarPosition(frame.Latitude, frame.Longitude, frame.HasGpsFix);
+                AccelChart.AddSample(pos, frame.AccelX, frame.AccelY, frame.AccelZ);
+            }
 
             if (!_isDragging)
             {
@@ -720,6 +952,13 @@ namespace VerticalPlayer.Dashcam
         }
 
         // ---- 走行軌跡マップ: 前後数ファイル分をつないだ連続した経路として表示する ----
+        // NMEAは1ファイル数十KB程度と極めて軽量なため、動画本体(1ファイル150MB級)とは違い
+        // 大量にまとめて読み直しても実質コストが無い。前後の範囲は「10ファイルや20ファイルは
+        // 楽勝か」というご質問への回答を兼ねて、前後10ファイルずつ（現在込みで最大21ファイル分）
+        // まで広げている。必要であればもっと増やしても問題ない。
+        private const int MapBufferPrevFiles = 10;
+        private const int MapBufferNextFiles = 10;
+
         private async Task RefreshMapBufferAsync(DashcamMediaGroup currentGroup)
         {
             int idx = _frontGroups.IndexOf(currentGroup);
@@ -729,8 +968,8 @@ namespace VerticalPlayer.Dashcam
                 return;
             }
 
-            int prevCount = Math.Min(1, idx);
-            int nextCount = Math.Min(2, _frontGroups.Count - 1 - idx);
+            int prevCount = Math.Min(MapBufferPrevFiles, idx);
+            int nextCount = Math.Min(MapBufferNextFiles, _frontGroups.Count - 1 - idx);
             int startIdx = idx - prevCount;
             int endIdx = idx + nextCount;
 
@@ -805,50 +1044,58 @@ namespace VerticalPlayer.Dashcam
             if (string.IsNullOrEmpty(drivePath) || string.IsNullOrEmpty(groupKey))
                 return false;
 
-            if (!string.IsNullOrEmpty(eventFolderName) && Enum.TryParse<DashcamEventFolder>(eventFolderName, out var folder))
+            _isResuming = true;
+            try
             {
-                foreach (var obj in EventFolderCombo.Items)
+                if (!string.IsNullOrEmpty(eventFolderName) && Enum.TryParse<DashcamEventFolder>(eventFolderName, out var folder))
                 {
-                    if (obj is ComboBoxItem ci && (string)ci.Tag == folder.ToString())
+                    foreach (var obj in EventFolderCombo.Items)
                     {
-                        EventFolderCombo.SelectedItem = ci;
-                        break;
+                        if (obj is ComboBoxItem ci && (string)ci.Tag == folder.ToString())
+                        {
+                            EventFolderCombo.SelectedItem = ci;
+                            break;
+                        }
                     }
                 }
+
+                RefreshDriveList();
+                var options = DriveCombo.ItemsSource as IEnumerable<DriveOrFolderOption>;
+                var drive = options?.FirstOrDefault(o => !o.IsBrowseOption && string.Equals(o.RootPath, drivePath, StringComparison.OrdinalIgnoreCase));
+
+                if (drive == null && Directory.Exists(drivePath))
+                {
+                    // ドライブレターとしては見つからない（例: フォルダコピー運用）が、パス自体は存在する場合
+                    drive = new DriveOrFolderOption { DisplayName = drivePath, RootPath = drivePath };
+                    var list = new List<DriveOrFolderOption>(options ?? Enumerable.Empty<DriveOrFolderOption>());
+                    list.Insert(Math.Max(0, list.Count - 1), drive);
+                    DriveCombo.ItemsSource = list;
+                }
+
+                if (drive == null)
+                    return false;
+
+                DriveCombo.SelectedItem = drive;
+                ScanDrive(drive.RootPath!, CurrentEventFolder);
+
+                var group = _frontGroups.FirstOrDefault(g => g.TimestampKey == groupKey);
+                if (group == null)
+                    return false;
+
+                _pendingResumeSeconds = positionSeconds;
+                _suppressSelectionEvent = true;
+                FrontList.SelectedItem = group;
+                _suppressSelectionEvent = false;
+                FrontList.ScrollIntoView(group);
+                PlayFrontGroup(group);
+
+                await Task.CompletedTask;
+                return true;
             }
-
-            RefreshDriveList();
-            var options = DriveCombo.ItemsSource as IEnumerable<DriveOrFolderOption>;
-            var drive = options?.FirstOrDefault(o => !o.IsBrowseOption && string.Equals(o.RootPath, drivePath, StringComparison.OrdinalIgnoreCase));
-
-            if (drive == null && Directory.Exists(drivePath))
+            finally
             {
-                // ドライブレターとしては見つからない（例: フォルダコピー運用）が、パス自体は存在する場合
-                drive = new DriveOrFolderOption { DisplayName = drivePath, RootPath = drivePath };
-                var list = new List<DriveOrFolderOption>(options ?? Enumerable.Empty<DriveOrFolderOption>());
-                list.Insert(Math.Max(0, list.Count - 1), drive);
-                DriveCombo.ItemsSource = list;
+                _isResuming = false;
             }
-
-            if (drive == null)
-                return false;
-
-            DriveCombo.SelectedItem = drive;
-            ScanDrive(drive.RootPath!, CurrentEventFolder);
-
-            var group = _frontGroups.FirstOrDefault(g => g.TimestampKey == groupKey);
-            if (group == null)
-                return false;
-
-            _pendingResumeSeconds = positionSeconds;
-            _suppressSelectionEvent = true;
-            FrontList.SelectedItem = group;
-            _suppressSelectionEvent = false;
-            FrontList.ScrollIntoView(group);
-            PlayFrontGroup(group);
-
-            await Task.CompletedTask;
-            return true;
         }
     }
 }
