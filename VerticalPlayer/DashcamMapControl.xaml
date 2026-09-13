@@ -26,7 +26,7 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="走行軌跡" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="0" Text="走行軌跡" Foreground="{StaticResource TextAccentCyan}" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
             <CheckBox x:Name="FollowCheck" Grid.Column="1" Content="追従" IsChecked="True" Style="{StaticResource ModernCheck}"
                       Foreground="{StaticResource TextPrimary}" FontSize="11"
                       Checked="FollowCheck_Changed" Unchecked="FollowCheck_Changed"/>

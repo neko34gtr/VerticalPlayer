@@ -27,6 +27,11 @@
     <SolidColorBrush x:Key="AccentViolet" Color="#8B5CF6"/>
     <SolidColorBrush x:Key="TextPrimary"  Color="#F1F5F9"/>
     <SolidColorBrush x:Key="TextMuted"    Color="#64748B"/>
+    <!-- ドラレコモードの見出し系テキスト専用の強調色（ドライブ/表示倍率/センサー情報/
+         車速/加速度/前後/左右/上下/走行軌跡など）。TextMutedのままだとダーク背景で
+         薄グレーが見づらいとのご指摘により追加。オフホワイト(TextPrimary)の値表示部は
+         そのまま維持する。 -->
+    <SolidColorBrush x:Key="TextAccentCyan" Color="#38BDF8"/>
     <SolidColorBrush x:Key="TextFaint"    Color="#334155"/>
     <SolidColorBrush x:Key="Border"       Color="#1E2D45"/>
 
@@ -332,6 +337,7 @@
         <Setter Property="Background" Value="Transparent"/>
         <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
         <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="VirtualizingPanel.ScrollUnit" Value="Item"/>
         <Setter Property="ItemContainerStyle" Value="{StaticResource ModernListItem}"/>
         <Setter Property="Template">
             <Setter.Value>

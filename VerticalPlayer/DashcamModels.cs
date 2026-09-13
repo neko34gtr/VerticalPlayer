@@ -19,6 +19,20 @@ namespace VerticalPlayer.Dashcam
     );
 
     /// <summary>
+    /// ドライブ選択ComboBoxの1項目。実ドライブのほか、SSD/HDD等にコピーしたSDカードの
+    /// 中身を直接指すための任意フォルダ、および「フォルダを選択...」の選択肢自体も
+    /// この型で表す。
+    /// </summary>
+    public sealed class DriveOrFolderOption
+    {
+        public string DisplayName { get; init; } = string.Empty;
+        public string? RootPath { get; init; }
+        public bool IsBrowseOption { get; init; }
+
+        public override string ToString() => DisplayName;
+    }
+
+    /// <summary>
     /// Front/Rear動画とNMEAをタイムスタンプキーでペアリングした1トリップ分のセット。
     /// </summary>
     public sealed class DashcamMediaGroup

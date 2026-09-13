@@ -11,36 +11,44 @@
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </UserControl.Resources>
-    <!-- 配色・ボタンスタイル(IconBtn/SecondaryBtn/PrimaryBtn/ModernSlider/ModernCheck)は
+    <!-- 配色・ボタンスタイル(IconBtn/SecondaryBtn/PrimaryBtn/ModernSlider/ModernCheck/ModernCombo/ModernList)は
          DashcamTheme.xaml（MainWindow.xamlの配色トークン・共通スタイルの複製）を
-         UserControl.ResourcesにMergedDictionariesで取り込んで使っている。
-         UserControlはStaticResourceを自分自身の読み込み時点のリソーススコープでしか
-         解決できず、実行時にMainWindowの子として配置されてもWindow.Resourcesは
-         参照できないため（"'BgDeep' という名前のリソースが見つかりません"エラーの原因）。 -->
+         UserControl.ResourcesにMergedDictionariesで取り込んで使っている。 -->
     <Grid Background="{StaticResource BgDeep}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
-            <!-- ドライブ選択・オプション -->
+            <!-- 録画フォルダ種別・ドライブ選択・オプション -->
             <RowDefinition Height="*"/>
-            <!-- リスト + 映像 + センサー情報 -->
+            <!-- リスト(ホバーで展開) + 映像 + センサー情報/マップ -->
             <RowDefinition Height="Auto"/>
             <!-- 再生コントロール -->
         </Grid.RowDefinitions>
 
-        <!-- ========== ドライブ選択・オプションバー ========== -->
+        <!-- ========== 録画フォルダ種別・ドライブ選択・オプションバー ========== -->
+        <!-- 「読み込む」ボタンは廃止。イベント種別/ドライブいずれかの選択が変わったら自動で
+             読み込み直す（選択のたびに毎回ボタンを押す導線が無駄との指摘のため）。 -->
         <Border Grid.Row="0" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
             <StackPanel Orientation="Horizontal" Margin="8,6">
-                <TextBlock Text="ドライブ" Foreground="{StaticResource TextMuted}" VerticalAlignment="Center" Margin="4,0,6,0"/>
-                <ComboBox x:Name="DriveCombo" Width="160" Margin="0,0,4,0" Style="{StaticResource ModernCombo}"/>
+                <TextBlock Text="フォルダ" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="4,0,6,0"/>
+                <ComboBox x:Name="EventFolderCombo" Width="100" Margin="0,0,4,0" Style="{StaticResource ModernCombo}"
+                          SelectionChanged="EventFolderCombo_SelectionChanged">
+                    <ComboBoxItem Content="NORMAL" Tag="Normal" IsSelected="True"/>
+                    <ComboBoxItem Content="MANUAL" Tag="Manual"/>
+                    <ComboBoxItem Content="EVENT" Tag="Event"/>
+                    <ComboBoxItem Content="PARKING" Tag="Parking"/>
+                </ComboBox>
+
+                <TextBlock Text="ドライブ" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="12,0,6,0"/>
+                <ComboBox x:Name="DriveCombo" Width="200" Margin="0,0,4,0" Style="{StaticResource ModernCombo}"
+                          DisplayMemberPath="DisplayName" SelectionChanged="DriveCombo_SelectionChanged"/>
                 <Button x:Name="RefreshDrivesButton" Content="⟳" Width="28" Style="{StaticResource IconBtn}"
-                        Click="RefreshDrivesButton_Click" ToolTip="ドライブ一覧を更新" Margin="0,0,6,0"/>
-                <Button x:Name="LoadButton" Content="読み込む" Style="{StaticResource SecondaryBtn}" Click="LoadButton_Click" Margin="0,0,16,0"/>
+                        Click="RefreshDrivesButton_Click" ToolTip="ドライブ一覧を更新" Margin="0,0,16,0"/>
 
                 <CheckBox x:Name="RearLinkedCheck" Content="リア追従" IsChecked="True" Style="{StaticResource ModernCheck}"
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
                           Checked="RearLinkedCheck_Changed" Unchecked="RearLinkedCheck_Changed" Margin="0,0,16,0"/>
 
-                <TextBlock Text="表示倍率" Foreground="{StaticResource TextMuted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBlock Text="表示倍率" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <ComboBox x:Name="ZoomCombo" Width="90" SelectionChanged="ZoomCombo_SelectionChanged" Margin="0,0,16,0"
                           Style="{StaticResource ModernCombo}">
                     <ComboBoxItem Content="オリジナル" Tag="1"/>
@@ -53,36 +61,48 @@
                 <CheckBox x:Name="DnnEnabledCheck" Content="AI推論(超解像)" Style="{StaticResource ModernCheck}"
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
                           Checked="DnnEnabledCheck_Changed" Unchecked="DnnEnabledCheck_Changed"/>
+
+                <TextBlock x:Name="DecodeModeText" Text="デコード: -" Foreground="{StaticResource TextMuted}" FontSize="11"
+                           VerticalAlignment="Center" Margin="16,0,0,0" ToolTip="実際に使用されているデコードモード（HW=D3D11VA / SW）"/>
             </StackPanel>
         </Border>
 
-        <!-- ========== リスト + 映像 + センサー情報 ========== -->
+        <!-- ========== リスト(ホバー展開) + 映像 + センサー情報/マップ ========== -->
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="220"/>
+                <ColumnDefinition x:Name="LeftSidebarColumn" Width="16"/>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="260"/>
             </Grid.ColumnDefinitions>
 
-            <!-- 左サイドバー: フロント/リアの動画リスト -->
-            <Border Grid.Column="0" Background="{StaticResource BgPanel}" BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
+            <!-- 左サイドバー: 通常は幅16pxの細いバーだけ表示し、マウスオーバーで展開する
+                 （常時220px確保すると画面を圧迫するため。展開中は映像エリアが一時的に
+                 狭くなるが、離れれば自動で戻る）。 -->
+            <Border x:Name="LeftSidebarHost" Grid.Column="0" Background="{StaticResource BgPanel}"
+                    BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0"
+                    MouseEnter="LeftSidebarHost_MouseEnter" MouseLeave="LeftSidebarHost_MouseLeave">
                 <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
-                    </Grid.RowDefinitions>
+                    <Border x:Name="CollapsedHint" Background="{StaticResource TextAccentCyan}" Width="3"
+                            HorizontalAlignment="Left" Opacity="0.55"/>
 
-                    <TextBlock Grid.Row="0" Text="フロント" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" Margin="12,10,12,6"/>
-                    <ListBox x:Name="FrontList" Grid.Row="1" Style="{StaticResource ModernList}"
-                             DisplayMemberPath="DisplayLabel"
-                             SelectionChanged="FrontList_SelectionChanged"/>
+                    <Grid x:Name="SidebarContent" Visibility="Collapsed">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
 
-                    <TextBlock Grid.Row="2" Text="リア" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" Margin="12,10,12,6"/>
-                    <ListBox x:Name="RearList" Grid.Row="3" Style="{StaticResource ModernList}"
-                             DisplayMemberPath="DisplayLabel" IsEnabled="False"
-                             SelectionChanged="RearList_SelectionChanged"/>
+                        <TextBlock Grid.Row="0" Text="フロント" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" Margin="12,10,12,6"/>
+                        <ListBox x:Name="FrontList" Grid.Row="1" Style="{StaticResource ModernList}"
+                                 DisplayMemberPath="DisplayLabel"
+                                 SelectionChanged="FrontList_SelectionChanged"/>
+
+                        <TextBlock Grid.Row="2" Text="リア（手動選択可・選ぶと追従は自動解除）" Foreground="{StaticResource TextMuted}" FontSize="11" FontWeight="SemiBold" Margin="12,10,12,6"/>
+                        <ListBox x:Name="RearList" Grid.Row="3" Style="{StaticResource ModernList}"
+                                 DisplayMemberPath="DisplayLabel"
+                                 SelectionChanged="RearList_SelectionChanged"/>
+                    </Grid>
                 </Grid>
             </Border>
 
@@ -92,7 +112,8 @@
                 <media:FfmpegMediaElement x:Name="PlayerFront"
                                           UseGpuPresenter="True"
                                           MediaOpened="PlayerFront_MediaOpened"
-                                          MediaEnded="PlayerFront_MediaEnded"/>
+                                          MediaEnded="PlayerFront_MediaEnded"
+                                          MediaFailed="PlayerFront_MediaFailed"/>
                 <!-- FrameDisplayedはAction&lt;double&gt;型のCLRイベントでXAML属性からは配線できないため、
                      コードビハインドのコンストラクタで += 購読する（MainWindowのFPS集計と同じ作法）。 -->
 
@@ -106,13 +127,12 @@
                                               UseGpuPresenter="True"
                                               Volume="0"
                                               MediaOpened="PlayerRear_MediaOpened"
-                                              MediaEnded="PlayerRear_MediaEnded"/>
+                                              MediaEnded="PlayerRear_MediaEnded"
+                                              MediaFailed="PlayerRear_MediaFailed"/>
                 </Border>
             </Grid>
 
-            <!-- 右サイドバー: 上段=センサー情報（日時・速度・加速度）、下段=走行軌跡マップ。
-                 センサー情報は映像へのOSD重ねではなく常時表示のサイドウィンドウ形式。
-                 マップはその下に独立した領域として配置する。 -->
+            <!-- 右サイドバー: 上段=センサー情報（日時・速度・加速度）、下段=走行軌跡マップ。 -->
             <Grid Grid.Column="2">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -142,7 +162,11 @@
                     <CheckBox x:Name="RearVisibleCheck" Content="リア表示" Style="{StaticResource ModernCheck}"
                               Foreground="{StaticResource TextPrimary}"
                               Checked="RearVisibleCheck_Changed" Unchecked="RearVisibleCheck_Changed"
-                              VerticalAlignment="Center" Margin="6,0,0,0"/>
+                              VerticalAlignment="Center" Margin="6,0,16,0"/>
+
+                    <TextBlock Text="🔊" VerticalAlignment="Center" Margin="0,0,4,0" FontSize="13"/>
+                    <Slider x:Name="VolumeSlider" Style="{StaticResource ModernSlider}" Width="70" VerticalAlignment="Center"
+                            Minimum="0" Maximum="1" Value="1" ValueChanged="VolumeSlider_ValueChanged"/>
                 </StackPanel>
 
                 <Slider x:Name="SeekSlider" Grid.Column="1" VerticalAlignment="Center" Margin="8,0"
@@ -150,7 +174,19 @@
                         Minimum="0" Maximum="1"
                         Thumb.DragStarted="SeekSlider_DragStarted"
                         Thumb.DragCompleted="SeekSlider_DragCompleted"
-                        ValueChanged="SeekSlider_ValueChanged"/>
+                        ValueChanged="SeekSlider_ValueChanged"
+                        PreviewMouseLeftButtonDown="SeekSlider_PreviewMouseLeftButtonDown"
+                        PreviewMouseLeftButtonUp="SeekSlider_PreviewMouseLeftButtonUp"
+                        MouseMove="SeekSlider_MouseMove"
+                        MouseLeave="SeekSlider_MouseLeave"/>
+
+                <Popup x:Name="SeekPreviewPopup" Grid.Column="1" PlacementTarget="{Binding ElementName=SeekSlider}"
+                       Placement="Top" AllowsTransparency="True" IsOpen="False" IsHitTestVisible="False">
+                    <Border Background="{StaticResource BgCard}" BorderBrush="{StaticResource Border}" BorderThickness="1"
+                            CornerRadius="4" Padding="6,3">
+                        <TextBlock x:Name="SeekPreviewText" Foreground="{StaticResource TextPrimary}" FontSize="11"/>
+                    </Border>
+                </Popup>
 
                 <TextBlock x:Name="PositionText" Grid.Column="2" Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center" Margin="0,0,12,0"
                            Text="00:00:00 / 00:00:00"/>

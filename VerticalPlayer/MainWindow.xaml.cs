@@ -48,6 +48,11 @@ namespace VerticalPlayer
         public double DashcamZoomScale { get; set; } = 2.0;
         public double DashcamWindowWidth { get; set; }
         public double DashcamWindowHeight { get; set; }
+        public bool DashcamWasActive { get; set; }
+        public string? DashcamLastDrivePath { get; set; }
+        public string? DashcamLastGroupKey { get; set; }
+        public double DashcamLastPosition { get; set; }
+        public string? DashcamLastEventFolder { get; set; }
 
         // ── 再生 ──
         public double Volume { get; set; } = 0.7;
@@ -481,12 +486,27 @@ namespace VerticalPlayer
             _dashcamWindowWidth = s.DashcamWindowWidth;
             _dashcamWindowHeight = s.DashcamWindowHeight;
 
+            // ── ドラレコモードのレジューム再生 ──
+            // 前回終了時にドラレコモードだった場合、モードごと・ドライブ・選択ファイル・
+            // 再生位置を復元する。ドライブが挿さっていない/該当ファイルが無い場合は
+            // TryResumeAsync側がfalseを返すだけで、通常モードのまま何も起きない。
+            if (s.DashcamWasActive)
+            {
+                EnterDashcamMode();
+                string? drivePath = s.DashcamLastDrivePath;
+                string? groupKey = s.DashcamLastGroupKey;
+                double pos = s.DashcamLastPosition;
+                string? eventFolder = s.DashcamLastEventFolder;
+                _ = DashcamView.TryResumeAsync(drivePath, groupKey, pos, eventFolder);
+            }
+
             // ── プリセット ──
             _presets.Clear();
             foreach (var p in s.Presets) _presets.Add(p);
 
             // ── 前回ファイル復元 ──
-            if (!string.IsNullOrEmpty(s.LastFilePath) && File.Exists(s.LastFilePath))
+            // ドラレコモードとして復元した場合は、通常モードの最後のファイルを裏で開く必要はない
+            if (!s.DashcamWasActive && !string.IsNullOrEmpty(s.LastFilePath) && File.Exists(s.LastFilePath))
             {
                 LoadVideo(s.LastFilePath, s.LastPosition);
             }
@@ -522,6 +542,11 @@ namespace VerticalPlayer
                 DashcamZoomScale = DashcamView.ZoomScale,
                 DashcamWindowWidth = _isDashcamMode ? this.Width : _dashcamWindowWidth,
                 DashcamWindowHeight = _isDashcamMode ? this.Height : _dashcamWindowHeight,
+                DashcamWasActive = _isDashcamMode,
+                DashcamLastDrivePath = DashcamView.CurrentDrivePath,
+                DashcamLastGroupKey = DashcamView.CurrentGroupKey,
+                DashcamLastPosition = DashcamView.CurrentPositionSeconds,
+                DashcamLastEventFolder = DashcamView.CurrentEventFolderName,
 
                 // 再生
                 Volume = VolumeSlider.Value,
@@ -1738,48 +1763,56 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         private void DashcamModeToggle_Click(object sender, RoutedEventArgs e)
         {
-            bool enterDashcamMode = !_isDashcamMode;
-            _isDashcamMode = enterDashcamMode;
+            if (_isDashcamMode) ExitDashcamMode();
+            else EnterDashcamMode();
+        }
 
-            if (enterDashcamMode)
+        // 起動時レジューム（RestoreSettings）からも呼べるよう、ボタンクリック本体から切り出したもの。
+        private void EnterDashcamMode()
+        {
+            if (_isDashcamMode) return;
+            _isDashcamMode = true;
+
+            // 通常再生を止めてからドラレコモードのオーバーレイを表示する
+            if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdatePlayIcon(); _timer.Stop(); }
+            Player.Stop();
+
+            if (SidePanel.Visibility == Visibility.Visible)
+                TogglePanel();
+
+            VideoAreaBorder.Visibility = Visibility.Collapsed;
+            ControlPanel.Visibility = Visibility.Collapsed;
+            DashcamView.Visibility = Visibility.Visible;
+
+            // ドラレコモード専用のウィンドウサイズへ（前回終了時のサイズを記憶している場合はそれを復元。
+            // 動画を開いた時点でRequestWindowFitにより倍率どおりへ再フィットされる）
+            _preDashcamWidth = this.Width;
+            _preDashcamHeight = this.Height;
+            if (_dashcamWindowWidth > 0 && _dashcamWindowHeight > 0)
             {
-                // 通常再生を止めてからドラレコモードのオーバーレイを表示する
-                if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdatePlayIcon(); _timer.Stop(); }
-                Player.Stop();
-
-                if (SidePanel.Visibility == Visibility.Visible)
-                    TogglePanel();
-
-                VideoAreaBorder.Visibility = Visibility.Collapsed;
-                ControlPanel.Visibility = Visibility.Collapsed;
-                DashcamView.Visibility = Visibility.Visible;
-
-                // ドラレコモード専用のウィンドウサイズへ（前回終了時のサイズを記憶している場合はそれを復元。
-                // 動画を開いた時点でRequestWindowFitにより倍率どおりへ再フィットされる）
-                _preDashcamWidth = this.Width;
-                _preDashcamHeight = this.Height;
-                if (_dashcamWindowWidth > 0 && _dashcamWindowHeight > 0)
-                {
-                    this.Width = _dashcamWindowWidth;
-                    this.Height = _dashcamWindowHeight;
-                    EnsureOnScreen();
-                }
-            }
-            else
-            {
-                DashcamView.StopPlayback();
-                DashcamView.Visibility = Visibility.Collapsed;
-
-                VideoAreaBorder.Visibility = Visibility.Visible;
-                ControlPanel.Visibility = Visibility.Visible;
-
-                // ドラレコモードのウィンドウサイズを記憶してから通常モードのサイズへ戻す
-                _dashcamWindowWidth = this.Width;
-                _dashcamWindowHeight = this.Height;
-                this.Width = _preDashcamWidth;
-                this.Height = _preDashcamHeight;
+                this.Width = _dashcamWindowWidth;
+                this.Height = _dashcamWindowHeight;
                 EnsureOnScreen();
             }
+        }
+
+        private void ExitDashcamMode()
+        {
+            if (!_isDashcamMode) return;
+            _isDashcamMode = false;
+
+            DashcamView.StopPlayback();
+            DashcamView.Visibility = Visibility.Collapsed;
+
+            VideoAreaBorder.Visibility = Visibility.Visible;
+            ControlPanel.Visibility = Visibility.Visible;
+
+            // ドラレコモードのウィンドウサイズを記憶してから通常モードのサイズへ戻す
+            _dashcamWindowWidth = this.Width;
+            _dashcamWindowHeight = this.Height;
+            this.Width = _preDashcamWidth;
+            this.Height = _preDashcamHeight;
+            EnsureOnScreen();
         }
 
         // DashcamPlayerView.RequestWindowFit: 動画のネイティブ解像度×選択倍率(px)でウィンドウをフィットさせる。
@@ -1792,7 +1825,7 @@ namespace VerticalPlayer
         {
             if (!_isDashcamMode) return;
 
-            const double leftSidebarWidth = 220;
+            const double leftSidebarWidth = 16; // 通常は折りたたみ状態（ホバー時のみ220pxへ一時的に拡張）
             const double rightSidebarWidth = 260;
             const double titleBarHeight = 48;
             const double controlBarHeight = 56;

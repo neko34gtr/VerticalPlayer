@@ -6,6 +6,15 @@ using System.Text.RegularExpressions;
 
 namespace VerticalPlayer.Dashcam
 {
+    /// <summary>DH5系ドラレコの録画フォルダ種別。PICTURE(静止画)とSYSTEM(NMEA格納専用)は対象外。</summary>
+    public enum DashcamEventFolder
+    {
+        Normal,
+        Manual,
+        Event,
+        Parking
+    }
+
     /// <summary>
     /// [ROOT]/NORMAL/{Timestamp}_front.mp4 等のディレクトリ構造を走査し、
     /// Front/Rear動画とNMEAをタイムスタンプキーで自動ペアリングする。
@@ -21,12 +30,23 @@ namespace VerticalPlayer.Dashcam
             new(@"(?<y>\d{4})(?<mo>\d{2})(?<d>\d{2})[_-]?(?<h>\d{2})(?<mi>\d{2})(?<s>\d{2})",
                 RegexOptions.Compiled);
 
-        public static List<DashcamMediaGroup> Scan(string rootDir)
+        private static string FolderName(DashcamEventFolder folder) => folder switch
+        {
+            DashcamEventFolder.Normal => "NORMAL",
+            DashcamEventFolder.Manual => "MANUAL",
+            DashcamEventFolder.Event => "EVENT",
+            DashcamEventFolder.Parking => "PARKING",
+            _ => "NORMAL"
+        };
+
+        /// <summary>指定した録画フォルダ種別（既定NORMAL）だけを対象に走査する。</summary>
+        public static List<DashcamMediaGroup> Scan(string rootDir, DashcamEventFolder folder = DashcamEventFolder.Normal)
         {
             var groups = new Dictionary<string, DashcamMediaGroup>(StringComparer.OrdinalIgnoreCase);
 
-            string videoDir = Path.Combine(rootDir, "NORMAL");
-            string nmeaDir = Path.Combine(rootDir, "SYSTEM", "NMEA", "NORMAL");
+            string sub = FolderName(folder);
+            string videoDir = Path.Combine(rootDir, sub);
+            string nmeaDir = Path.Combine(rootDir, "SYSTEM", "NMEA", sub);
 
             if (Directory.Exists(videoDir))
             {

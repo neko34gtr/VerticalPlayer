@@ -17,6 +17,7 @@
 
 	<ItemGroup>
 		<PackageReference Include="FFmpeg.AutoGen" Version="8.1.0" />
+		<PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
 		<PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.26.0" />
 		<PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
 		<PackageReference Include="NAudio" Version="3.0.1" />
