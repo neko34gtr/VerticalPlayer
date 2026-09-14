@@ -924,7 +924,8 @@ namespace VerticalPlayer.Dashcam
             if (frame != null)
             {
                 MapView.SetCarPosition(frame.Latitude, frame.Longitude, frame.HasGpsFix);
-                AccelChart.AddSample(pos, frame.AccelX, frame.AccelY, frame.AccelZ);
+                //AccelChart.AddSample(pos, frame.AccelX, frame.AccelY, frame.AccelZ);
+                AccelChart.AddSample(pos, frame.AccelX, frame.AccelY, frame.AccelZ, frame.SpeedKmh);
             }
 
             if (!_isDragging)

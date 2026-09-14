@@ -13,26 +13,29 @@
          3本の折れ線で表示する。速度は軸のスケールが全く異なるため、あえてこのグラフには
          含めていない（速度は右サイドバーのHUD数値表示を参照）。 -->
     <Border Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0">
-        <Grid Height="72">
+        <Grid Height="130">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
             <StackPanel Grid.Column="0" Margin="10,4" VerticalAlignment="Center">
-                <TextBlock Text="加速度 (G)" Foreground="{StaticResource TextAccentCyan}" FontSize="10" FontWeight="SemiBold"/>
+                <TextBlock Text="加速度 (G) / 速度" Foreground="{StaticResource TextAccentCyan}" FontSize="10" FontWeight="SemiBold"/>
                 <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
                     <Rectangle Width="10" Height="3" Fill="#3B82F6" VerticalAlignment="Center"/>
                     <TextBlock Text=" 前後  " Foreground="{StaticResource TextMuted}" FontSize="9" VerticalAlignment="Center"/>
                     <Rectangle Width="10" Height="3" Fill="#22C55E" VerticalAlignment="Center"/>
                     <TextBlock Text=" 左右  " Foreground="{StaticResource TextMuted}" FontSize="9" VerticalAlignment="Center"/>
                     <Rectangle Width="10" Height="3" Fill="#F87171" VerticalAlignment="Center"/>
-                    <TextBlock Text=" 上下" Foreground="{StaticResource TextMuted}" FontSize="9" VerticalAlignment="Center"/>
+                    <TextBlock Text=" 上下  " Foreground="{StaticResource TextMuted}" FontSize="9" VerticalAlignment="Center"/>
+                    <Rectangle Width="10" Height="3" Fill="#E5E7EB" VerticalAlignment="Center"/>
+                    <TextBlock Text=" 速度" Foreground="{StaticResource TextMuted}" FontSize="9" VerticalAlignment="Center"/>
                 </StackPanel>
             </StackPanel>
 
             <Canvas x:Name="ChartCanvas" Grid.Column="1" ClipToBounds="True" Margin="4,4,12,4">
                 <Line x:Name="ZeroLine" Stroke="{StaticResource Border}" StrokeThickness="1" StrokeDashArray="2,2"/>
+                <Polyline x:Name="LineSpeed" Stroke="#E5E7EB" StrokeThickness="1.5" Opacity="0.9"/>
                 <Polyline x:Name="LineY" Stroke="#3B82F6" StrokeThickness="1.3"/>
                 <Polyline x:Name="LineX" Stroke="#22C55E" StrokeThickness="1.3"/>
                 <Polyline x:Name="LineZ" Stroke="#F87171" StrokeThickness="1.3"/>

@@ -82,7 +82,7 @@
             <!-- 左サイドバー: 通常は幅16pxの細いバーだけ表示し、マウスオーバーで展開する
                  （常時220px確保すると画面を圧迫するため。展開中は映像エリアが一時的に
                  狭くなるが、離れれば自動で戻る）。 -->
-            <Border x:Name="LeftSidebarHost" Grid.Column="0" HorizontalAlignment="Left" Width="16" Panel.ZIndex="20"
+            <Border x:Name="LeftSidebarHost" Grid.Column="0" Grid.ColumnSpan="2" HorizontalAlignment="Left" Width="16" Panel.ZIndex="100"       
                     Background="{StaticResource BgPanel}"
                     BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0"
                     MouseEnter="LeftSidebarHost_MouseEnter" MouseLeave="LeftSidebarHost_MouseLeave">
