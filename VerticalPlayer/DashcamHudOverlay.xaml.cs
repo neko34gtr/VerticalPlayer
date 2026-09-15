@@ -6,6 +6,11 @@ using System.Windows.Controls;
 
 namespace VerticalPlayer.Dashcam
 {
+    /// <summary>
+    /// AccelChart右隣（幅220×高さ130固定）に常時表示するセンサー情報パネル。
+    /// 日時・緯度経度は地図上部の専用パネル(DashcamPlayerView側のGeoDateTimeText等)へ
+    /// 分離済みのため、ここでは速度・加速度3軸のみを保持・表示する。
+    /// </summary>
     public partial class DashcamHudOverlay : UserControl, INotifyPropertyChanged
     {
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -17,13 +22,6 @@ namespace VerticalPlayer.Dashcam
         {
             InitializeComponent();
             DataContext = this;
-        }
-
-        private string _timestampText = "----/--/-- --:--:--";
-        public string TimestampText
-        {
-            get => _timestampText;
-            private set { _timestampText = value; Raise(); }
         }
 
         private string _speedText = "0";
@@ -42,18 +40,16 @@ namespace VerticalPlayer.Dashcam
         private string _accelZText = "0.00";
         public string AccelZText { get => _accelZText; private set { _accelZText = value; Raise(); } }
 
-        /// <summary>現在の再生位置に対応するセンサーフレームでHUD表示を更新する。</summary>
+        /// <summary>現在の再生位置に対応するセンサーフレームでHUD表示を更新する（速度・加速度3軸のみ）。</summary>
         public void UpdateFrame(DashcamSensorFrame? frame)
         {
             if (frame is null)
             {
-                TimestampText = "----/--/-- --:--:--";
                 SpeedText = "0";
                 AccelXText = AccelYText = AccelZText = "0.00";
                 return;
             }
 
-            TimestampText = frame.Timestamp.ToString("yyyy/MM/dd HH:mm:ss", CultureInfo.InvariantCulture);
             SpeedText = frame.SpeedKmh.ToString("F0", CultureInfo.InvariantCulture);
             AccelXText = frame.AccelX.ToString("F2", CultureInfo.InvariantCulture);
             AccelYText = frame.AccelY.ToString("F2", CultureInfo.InvariantCulture);

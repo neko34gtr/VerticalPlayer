@@ -5,7 +5,6 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -24,6 +23,11 @@ namespace VerticalPlayer.Dashcam
     /// レジューム再生・次ファイル先読み（OSファイルキャッシュ温め）を担当する。
     /// 動画再生・DNN超解像は既存FfmpegMediaElement/MainWindowの実装に合わせてある。
     /// AI推論(DNN超解像)はこの画面でも有効化可能だが、既定はOFF。
+    ///
+    /// シークバーはAccelChart（加速度/速度チャート）最上段の独立した帯に統合済み
+    /// （旧SeekSliderは廃止）。センサー情報(Hud)は縦/横/自動どの地図モードでも常に
+    /// AccelChartの右隣に固定表示する。地図の縦長/横長は右サイドバーの列幅だけを
+    /// MapView.OrientationMode（自動/縦/横）とルート方位の自動判定結果から調整する。
     /// </summary>
     public partial class DashcamPlayerView : UserControl
     {
@@ -67,19 +71,28 @@ namespace VerticalPlayer.Dashcam
         private readonly Queue<(DashcamMediaGroup group, string path)> _thumbnailQueue = new();
         private bool _thumbnailWorkerRunning;
 
-        // ---- シーク（MainWindowのSeekBarと同等の機能: ドラッグ間引きプレビュー、
-        //      クリックで即シーク、ホバーで時刻プレビュー表示） ----
+        // ---- シーク（AccelChart最上段の独立した帯から通知される。旧SeekSliderと同等の
+        //      ドラッグ間引きプレビュー・クリック即シーク・ホバー時刻プレビューを維持） ----
         private bool _isDragging;
         private bool _dragCompleting;
         private bool _wasPlayingBeforeSeekDrag;
         private bool _seekLiveBusy;
         private double? _seekLivePendingSeconds;
-        private bool _suppressSliderEvent;
+
+        // 実測fps表示（MainWindowのActualFpsLabelと同じ考え方で1秒集計）
+        private int _fpsFrameCount;
+        private DateTime _fpsWindowStart = DateTime.UtcNow;
+
+        // 地図の縦長/横長: ルート方位からの自動判定結果（Autoモード用）と、実際に現在適用中の状態。
+        // Hudの位置には一切影響しない（Hudは常にAccelChartの右隣に固定）。列幅だけを調整する。
+        private bool _lastAutoHorizontal;
+        private bool _mapHorizontal;
 
         /// <summary>ズーム変更・動画オープン時に、映像本来のサイズ×倍率での
         /// ウィンドウフィットをホスト(MainWindow)へ依頼する。引数は動画のネイティブ幅・高さ×倍率(px)。</summary>
         public event Action<double, double>? RequestWindowFit;
-        /// <summary>再生中のFrontファイル名が変わるたびに通知する（ホスト側でタイトルバー表示用）。停止時はnull。</summary>
+
+        /// <summary>再生中のFrontファイル名が変わるたびに通知する（ホスト側でウィンドウタイトル表示用）。停止時はnull。</summary>
         public event Action<string?>? CurrentFileChanged;
 
         public bool RearLinked
@@ -87,6 +100,8 @@ namespace VerticalPlayer.Dashcam
             get => RearLinkedCheck.IsChecked == true;
             set => RearLinkedCheck.IsChecked = value;
         }
+
+        /// <summary>リア(PiP)を表示するかどうかのユーザー設定（AppSettings.DashcamRearVisibleと連動、ホスト側で永続化）。</summary>
         public bool RearVisible
         {
             get => RearVisibleCheck.IsChecked == true;
@@ -131,18 +146,36 @@ namespace VerticalPlayer.Dashcam
 
             // ハードウェアデコード(D3D11VA、非対応/失敗時は自動でSWへフォールバック)・
             // ノイズリダクション・ダイナミックコントラストも、MainWindow本体の既定(true)に
-            // 合わせてドラレコ側でも既定ONにする。
+            // 合わせてドラレコ側でも既定ONにする。デインターレースはMainWindow本体と同じく
+            // 既定OFF。
+            // ※Deinterlaceプロパティ名はMainWindow側の命名規則(HardwareAcceleration/Denoise/
+            //   DynamicContrastと同型のbool)から類推したもの。実際のFfmpegMediaElementの
+            //   プロパティ名が異なる場合はここと下のDeintStatusText設定を要調整。
             PlayerFront.HardwareAcceleration = true;
             PlayerRear.HardwareAcceleration = true;
             PlayerFront.Denoise = true;
             PlayerRear.Denoise = true;
             PlayerFront.DynamicContrast = true;
             PlayerRear.DynamicContrast = true;
+            PlayerFront.Deinterlace = false;
+            PlayerRear.Deinterlace = false;
 
-            // 実際に使われたデコードモード（"HW (D3D11VA)" / "SW"）をツールバーに表示して確認できるようにする
+            // 実際に使われたデコードモード（"HW (D3D11VA)" / "SW"）をコントロールバーに表示して確認できるようにする
             PlayerFront.DecodeModeChanged += mode => Dispatcher.Invoke(() => DecodeModeText.Text = $"デコード: {mode}");
+            DeintStatusText.Text = "De-int: OFF";
+            NdrStatusText.Text = "NDR: ON";
+            DcrStatusText.Text = "DCR: ON";
 
             PlayerFront.FrameDisplayed += OnFrontFrameDisplayed;
+
+            // 旧SeekSliderの代わりにAccelChart自体がシーク操作を通知してくる
+            AccelChart.SeekDragStarted += AccelChart_SeekDragStarted;
+            AccelChart.SeekPreview += AccelChart_SeekPreview;
+            AccelChart.SeekDragCompleted += AccelChart_SeekDragCompleted;
+            AccelChart.HoverTimeChanged += AccelChart_HoverTimeChanged;
+
+            // 地図の表示方向をユーザーが手動変更したら、ルート方位の自動判定結果と合わせて再判定する
+            MapView.OrientationModeChanged += () => UpdateEffectiveMapOrientation();
 
             _syncTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _syncTimer.Tick += SyncTimer_Tick;
@@ -498,15 +531,15 @@ namespace VerticalPlayer.Dashcam
             var duration = PlayerFront.NaturalDuration.HasTimeSpan
                 ? PlayerFront.NaturalDuration.TimeSpan
                 : TimeSpan.Zero;
-            SeekSlider.Maximum = duration.TotalSeconds;
 
             string? nmeaPath = _currentFrontGroup?.FrontNmeaPath ?? _currentFrontGroup?.RearNmeaPath;
             _sensorFrames = nmeaPath != null
                 ? NmeaSensorParser.Parse(nmeaPath, _currentFrontGroup?.Timestamp, duration)
                 : new List<DashcamSensorFrame>();
             // グラフはファイル全体分をここで一度だけ計算して描画する（毎フレーム全点を再計算して
-            // いた従来方式はスレッド負荷が無駄に高かったため）。再生中はSetPlayhead()で現在位置の
-            // 縦線を動かすだけにする。
+            // いた従来方式はスレッド負荷が無駄に高かったため）。再生中はSetPlayhead()で現在位置を
+            // 反映するだけにする。チャート自体がシークUIも兼ねるため、Maximum等の設定は不要
+            // （AccelChart内部でこのdurationを元に比率計算する）。
             AccelChart.SetFullTrack(_sensorFrames, duration);
 
             // レジューム再生: 位置決めは必ずPlay()より先に行う。
@@ -560,6 +593,7 @@ namespace VerticalPlayer.Dashcam
         private void PlayerFront_MediaFailed(object sender, FfmpegMediaFailedEventArgs e)
         {
             _consecutiveFrontFailures++;
+            DashcamPlayErrorLogger.Log($"[MediaFailed] Front={_currentFrontGroup?.TimestampKey ?? "(null)"} 連続失敗={_consecutiveFrontFailures}回");
             if (_consecutiveFrontFailures >= 3)
             {
                 _consecutiveFrontFailures = 0;
@@ -576,6 +610,7 @@ namespace VerticalPlayer.Dashcam
             // 「エラー記録」ファイル等で開けない場合。スイッチには一切触らず（ユーザーが自分で
             // 操作したものを勝手にOFFにするのは体験として最悪、というご指摘のため）、
             // 単に「今は表示できるものが無い」状態にしてPiPを黙って隠すだけにする。
+            DashcamPlayErrorLogger.Log($"[MediaFailed] Rear={_currentRearGroup?.TimestampKey ?? "(null)"}");
             PlayerRear.Stop();
             _currentRearGroup = null;
             _rearAvailable = false;
@@ -597,6 +632,7 @@ namespace VerticalPlayer.Dashcam
                 DashcamPlayErrorLogger.Log("[Advance] _currentFrontGroupがnullのため中止");
                 return;
             }
+
             int idx = _frontGroups.IndexOf(_currentFrontGroup);
             if (idx < 0)
             {
@@ -766,6 +802,7 @@ namespace VerticalPlayer.Dashcam
         /// 画面の解像度そのものより「動画側の解像度が大きい場合に大倍率が意味をなさなくなる」方が
         /// 本質なため、固定の解像度名で判定せず、実際にウィンドウが収まるかどうかで動的に判定する）。
         /// 選択中の項目が入らなくなった場合は、収まる範囲で一番大きい倍率へ自動的に切り替える。
+        /// 右サイドバー幅は地図の向きで動的に変わるため、固定値ではなく実際のActualWidthを使う。
         /// </summary>
         private void UpdateZoomAvailability()
         {
@@ -774,7 +811,7 @@ namespace VerticalPlayer.Dashcam
             double screenW = SystemParameters.WorkArea.Width;
             double screenH = SystemParameters.WorkArea.Height;
             const double leftSidebarWidth = 16;
-            const double rightSidebarWidth = 260;
+            double rightSidebarWidth = RightSidebarColumnDef.ActualWidth > 0 ? RightSidebarColumnDef.ActualWidth : 260;
             const double titleBarHeight = 48;
             const double controlBarHeight = 56;
 
@@ -837,9 +874,10 @@ namespace VerticalPlayer.Dashcam
             if (wasPlaying) player.Play();
         }
 
-        // ---- シーク ----
+        // ---- シーク（AccelChart最上段の独立した帯から通知される。旧SeekSliderと同じ
+        //      ドラッグ間引きプレビュー・クリック即シーク・ホバー時刻プレビューを維持） ----
 
-        private void SeekSlider_DragStarted(object sender, DragStartedEventArgs e)
+        private void AccelChart_SeekDragStarted()
         {
             _isDragging = true;
             _wasPlayingBeforeSeekDrag = _isPlaying;
@@ -852,11 +890,10 @@ namespace VerticalPlayer.Dashcam
             }
         }
 
-        private async void SeekSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        private async void AccelChart_SeekPreview(TimeSpan pos)
         {
-            if (_suppressSliderEvent) return;
-            if (!_isDragging || _dragCompleting || !PlayerFront.NaturalDuration.HasTimeSpan) return;
-            await RequestLiveSeekAsync(e.NewValue);
+            if (_dragCompleting || !PlayerFront.NaturalDuration.HasTimeSpan) return;
+            await RequestLiveSeekAsync(pos.TotalSeconds);
         }
 
         private async Task RequestLiveSeekAsync(double seconds)
@@ -878,15 +915,15 @@ namespace VerticalPlayer.Dashcam
             }
         }
 
-        private async void SeekSlider_DragCompleted(object sender, DragCompletedEventArgs e)
+        private async void AccelChart_SeekDragCompleted(TimeSpan target)
         {
             _dragCompleting = true;
             while (_seekLiveBusy)
                 await Task.Delay(15);
 
-            var target = TimeSpan.FromSeconds(SeekSlider.Value);
-            // グラフはファイル全体を静的に表示する方式に変更したため、シークしても消さない
-            // （消すとまた全体を再計算することになり本末転倒）。プレイヘッドの位置だけ動かす。
+            // グラフはファイル全体を静的に表示する方式のため、シークしても消さない
+            // （消すとまた全体を再計算することになり本末転倒）。プレイヘッド／シークバーの
+            // 位置だけ動かす。
             AccelChart.SetPlayhead(target);
             await PlayerFront.StepToVideoOnlyAsync(target, timeoutMs: 2000);
             if (_currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null))
@@ -904,80 +941,65 @@ namespace VerticalPlayer.Dashcam
             }
         }
 
-        // クリックした位置に即座にシークする（MainWindow本体のSeekBarと同じ挙動）
-        private void SeekSlider_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
-        {
-            if (sender is not Slider sl || !PlayerFront.NaturalDuration.HasTimeSpan) return;
-            double pct = Math.Clamp(e.GetPosition(sl).X / sl.ActualWidth, 0, 1);
-            double t = sl.Maximum * pct;
-            sl.Value = t;
-            PlayerFront.Position = TimeSpan.FromSeconds(t);
-            if (_currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null))
-                PlayerRear.Position = TimeSpan.FromSeconds(t);
-        }
-
-        private void SeekSlider_PreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
-        {
-            if (sender is not Slider sl || !PlayerFront.NaturalDuration.HasTimeSpan) return;
-            double pct = Math.Clamp(e.GetPosition(sl).X / sl.ActualWidth, 0, 1);
-            double t = sl.Maximum * pct;
-            sl.Value = t;
-            PlayerFront.Position = TimeSpan.FromSeconds(t);
-        }
-
         // ホバー中の位置に対応する時刻をポップアップでプレビュー表示する（MainWindow本体と同等）
-        private void SeekSlider_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+        private void AccelChart_HoverTimeChanged(TimeSpan? time, double x)
         {
-            double width = SeekSlider.ActualWidth;
-            if (!PlayerFront.NaturalDuration.HasTimeSpan || width <= 0) { SeekPreviewPopup.IsOpen = false; return; }
+            if (time == null || !PlayerFront.NaturalDuration.HasTimeSpan)
+            {
+                SeekPreviewPopup.IsOpen = false;
+                return;
+            }
 
-            double ratio = Math.Clamp(e.GetPosition(SeekSlider).X / width, 0, 1);
-            double total = PlayerFront.NaturalDuration.TimeSpan.TotalSeconds;
-            SeekPreviewText.Text = TimeSpan.FromSeconds(ratio * total).ToString(@"hh\:mm\:ss");
-
+            SeekPreviewText.Text = time.Value.ToString(@"hh\:mm\:ss");
             SeekPreviewPopup.IsOpen = true;
             var popupChild = (FrameworkElement)SeekPreviewPopup.Child;
             popupChild.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             double halfW = popupChild.DesiredSize.Width / 2;
-            double cursorX = e.GetPosition(SeekSlider).X;
-            SeekPreviewPopup.HorizontalOffset = Math.Clamp(cursorX - halfW, 0, Math.Max(0, width - halfW * 2));
-        }
-
-        private void SeekSlider_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
-        {
-            SeekPreviewPopup.IsOpen = false;
+            double width = AccelChart.ActualWidth;
+            SeekPreviewPopup.HorizontalOffset = Math.Clamp(x - halfW, 0, Math.Max(0, width - halfW * 2));
         }
 
         // ---- HUD更新（Frontの実フレーム表示に同期。FrameDisplayedはAction<double>で秒単位pts） ----
 
         private void OnFrontFrameDisplayed(double ptsSeconds)
         {
+            _fpsFrameCount++;
+
             var pos = TimeSpan.FromSeconds(ptsSeconds);
-
             var frame = DashcamSensorLookup.FindNearest(_sensorFrames, pos);
-            Hud.UpdateFrame(frame);
+            Hud.UpdateFrame(frame); // Hud側は速度・加速度3軸のみ表示する想定（日時/緯度経度は下記の地図上パネルへ分離）
             if (frame != null)
-                MapView.SetCarPosition(frame.Latitude, frame.Longitude, frame.HasGpsFix);
-
-            // チャート本体はファイルを開いた時点で一度だけ計算済み（SetFullTrack）。
-            // 毎フレームはプレイヘッドの位置を動かすだけの軽量な処理にとどめる。
-            AccelChart.SetPlayhead(pos);
-
-            if (!_isDragging)
             {
-                _suppressSliderEvent = true;
-                SeekSlider.Value = ptsSeconds;
-                _suppressSliderEvent = false;
+                GeoDateTimeText.Text = frame.Timestamp.ToString("yyyy/MM/dd HH:mm:ss");
+                GeoLatText.Text = frame.HasGpsFix ? frame.Latitude.ToString("F6") : "---";
+                GeoLngText.Text = frame.HasGpsFix ? frame.Longitude.ToString("F6") : "---";
+                MapView.SetCarPosition(frame.Latitude, frame.Longitude, frame.HasGpsFix);
             }
+            // チャート本体はファイルを開いた時点で一度だけ計算済み（SetFullTrack）。
+            // 毎フレームはプレイヘッド／シークバーの位置を動かすだけの軽量な処理にとどめる。
+            // ドラッグ中はAccelChart側で既にマウス位置に応じた更新を行っているため、
+            // ここからの上書きは行わない（せめぎ合い防止）。
+            if (!_isDragging)
+                AccelChart.SetPlayhead(pos);
 
             var duration = PlayerFront.NaturalDuration.HasTimeSpan ? PlayerFront.NaturalDuration.TimeSpan : TimeSpan.Zero;
             PositionText.Text = $"{pos:hh\\:mm\\:ss} / {duration:hh\\:mm\\:ss}";
         }
 
-        // ---- Rearのドリフト追従 ----
+        // ---- Rearのドリフト追従・実測fps集計（1秒ごと） ----
 
         private void SyncTimer_Tick(object? sender, EventArgs e)
         {
+            var now = DateTime.UtcNow;
+            double elapsed = (now - _fpsWindowStart).TotalSeconds;
+            if (elapsed >= 1.0)
+            {
+                double fps = _fpsFrameCount / elapsed;
+                FpsText.Text = $"{fps:F0}fps";
+                _fpsFrameCount = 0;
+                _fpsWindowStart = now;
+            }
+
             bool hasActiveRear = _currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null);
             if (!hasActiveRear || _isDragging)
                 return;
@@ -1034,7 +1056,52 @@ namespace VerticalPlayer.Dashcam
             if (!ReferenceEquals(_currentFrontGroup, targetGroup))
                 return;
 
+            // 進行方位から縦長/横長を自動判定する（南北方向の移動量 dLat と、経度差を緯度で
+            // 補正した東西方向相当の移動量 dLng を比較。dLngの方が大きければ横長を推奨）。
+            // 有効なGPS測位点が2点未満の場合は前回の判定を維持する（無理に判定しない）。
+            var validPoints = merged.Where(f => f.HasGpsFix).ToList();
+            if (validPoints.Count >= 2)
+            {
+                double minLat = validPoints.Min(p => p.Latitude), maxLat = validPoints.Max(p => p.Latitude);
+                double minLng = validPoints.Min(p => p.Longitude), maxLng = validPoints.Max(p => p.Longitude);
+                double dLat = maxLat - minLat;
+                double lat0 = (minLat + maxLat) / 2.0;
+                double dLng = (maxLng - minLng) * Math.Cos(lat0 * Math.PI / 180.0);
+                _lastAutoHorizontal = dLng > dLat;
+                UpdateEffectiveMapOrientation();
+            }
+
             MapView.SetRoute(DashcamMapPointBuilder.BuildSegments(merged));
+        }
+
+        // ---- 地図の縦長/横長切替（自動判定＋手動上書き。Hudの位置には一切影響しない） ----
+
+        /// <summary>
+        /// 地図の縦長/横長を、ユーザー選択(MapView.OrientationMode)とルート方位の自動判定結果
+        /// (_lastAutoHorizontal)を総合して適用する。手動でVertical/Horizontalを選んでいる間は
+        /// 自動判定結果を無視し固定表示にする。
+        /// </summary>
+        private void UpdateEffectiveMapOrientation()
+        {
+            bool horizontal = MapView.OrientationMode switch
+            {
+                DashcamMapOrientation.Horizontal => true,
+                DashcamMapOrientation.Vertical => false,
+                _ => _lastAutoHorizontal
+            };
+            ApplyMapOrientation(horizontal);
+        }
+
+        /// <summary>
+        /// 実際のレイアウト切替本体。センサー情報(Hud)は常にAccelChartの右隣に固定表示のため
+        /// ここでは一切動かさない。地図が占める右サイドバーの列幅だけを調整する
+        /// （縦長ルート想定=狭め／横長ルート想定=広め）。
+        /// </summary>
+        private void ApplyMapOrientation(bool horizontal)
+        {
+            if (_mapHorizontal == horizontal) return;
+            _mapHorizontal = horizontal;
+            RightSidebarColumnDef.Width = new GridLength(horizontal ? 420 : 260);
         }
 
         // ---- 次ファイルの先読み（OSファイルキャッシュ温め） ----

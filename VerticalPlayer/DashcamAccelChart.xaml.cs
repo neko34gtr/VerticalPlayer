@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
 
@@ -12,10 +13,20 @@ namespace VerticalPlayer.Dashcam
     /// 加速度(前後/左右/上下)および速度の波形をファイル全体の固定スケールで表示するチャート。
     /// 従来は毎フレームAddSample()で1点ずつ追加し、そのたびに全点を再計算していたため
     /// スレッド負荷が無駄に高かった。ファイルを開いた時点で一度だけ全体を計算・描画し
-    /// （SetFullTrack）、再生中はSetPlayhead()で現在位置の縦線を動かすだけにしている。
+    /// （SetFullTrack）、再生中はSetPlayhead()で現在位置を反映するだけにしている。
     /// 速度はGPSロスト区間(HasGpsFix=false)では値が信頼できないため、0へ張り付けるのではなく
     /// 線を途切れさせる（区間ごとに別々のPolylineとして描画する）。
     /// 左側にG軸(-3〜3)、右側に速度軸(0〜180km/h)の目盛り・グリッド線を表示する。
+    ///
+    /// 旧SeekSliderを廃止し、シーク操作は最上段の独立した帯(SeekBarCanvas)へ統合した
+    /// （波形プロット下端に重ねる旧方式は0km/hのグリッド線と視覚的に被っていたため分離）。
+    /// 見た目はボリュームスライダーと同じ「トラック＋塗り＋丸いツマミ」形式
+    /// （SeekTrackBg/SeekTrackFill/SeekThumb）。トラックの左端〜右端はChartCanvasと同じ列
+    /// （XAML上で列定義を共有）のため、グラフのプロット開始〜終了位置と常に完全に一致する。
+    /// 波形プロット(ChartCanvas)自体はクリック/ドラッグを受け付けない見るだけの領域にした。
+    /// 実際のシーク処理（FastSeekPreviewAsync/StepToVideoOnlyAsync呼び出し）はホスト側
+    /// (DashcamPlayerView)が行うため、このクラスは「マウス位置→時刻」の変換とイベント
+    /// 通知・見た目の描画だけを担当する。
     /// </summary>
     public partial class DashcamAccelChart : UserControl
     {
@@ -25,6 +36,25 @@ namespace VerticalPlayer.Dashcam
         private TimeSpan _totalDuration = TimeSpan.FromMinutes(2);
         private IReadOnlyList<DashcamSensorFrame> _frames = Array.Empty<DashcamSensorFrame>();
         private readonly List<Polyline> _speedSegmentLines = new(); // GPSロスト区間で線を分けるため複数保持
+
+        private bool _isSeekDragging;
+        private double _lastRatio; // 直近の再生位置比率(0〜1)。SizeChanged時の再描画に使う
+
+        /// <summary>シーク操作の開始（旧SeekSlider.Thumb.DragStartedに相当）。</summary>
+        public event Action? SeekDragStarted;
+
+        /// <summary>クリック直後・ドラッグ中に連続して呼ばれる、シーク先候補（旧SeekSlider.ValueChangedに相当）。</summary>
+        public event Action<TimeSpan>? SeekPreview;
+
+        /// <summary>マウスを離した時点の最終シーク先（旧SeekSlider.Thumb.DragCompletedに相当）。</summary>
+        public event Action<TimeSpan>? SeekDragCompleted;
+
+        /// <summary>
+        /// ドラッグ中でない間のホバー時刻通知。時刻表示中はtimeが非null、
+        /// マウスがSeekBarCanvas外に出た場合はtime=nullで呼ばれる（ポップアップを閉じる合図）。
+        /// xはSeekBarCanvas内のX座標（ホスト側でのポップアップ位置決めに使う）。
+        /// </summary>
+        public event Action<TimeSpan?, double>? HoverTimeChanged;
 
         public DashcamAccelChart()
         {
@@ -43,19 +73,35 @@ namespace VerticalPlayer.Dashcam
             Redraw();
         }
 
-        /// <summary>現在の再生位置を示す縦線だけを動かす（軽量・毎フレーム呼んでよい）。</summary>
+        /// <summary>
+        /// 現在の再生位置に合わせて、波形側の薄いガイド線と、独立したシークバー
+        /// （トラック塗り＋丸ツマミ）の両方を動かす。軽量な処理なので毎フレーム呼んでよい。
+        /// </summary>
         public void SetPlayhead(TimeSpan pos)
         {
-            double w = ChartCanvas.ActualWidth;
-            double h = ChartCanvas.ActualHeight;
-            if (w <= 0 || h <= 0) return;
-
             double totalSec = _totalDuration.TotalSeconds > 0 ? _totalDuration.TotalSeconds : 120.0;
             double ratio = Math.Clamp(pos.TotalSeconds / totalSec, 0.0, 1.0);
-            double x = ratio * w;
+            _lastRatio = ratio;
 
-            Playhead.X1 = x; Playhead.X2 = x;
-            Playhead.Y1 = 0; Playhead.Y2 = h;
+            // 波形との対応を見るための薄い縦ガイド線
+            double cw = ChartCanvas.ActualWidth, ch = ChartCanvas.ActualHeight;
+            if (cw > 0 && ch > 0)
+            {
+                double gx = ratio * cw;
+                Playhead.X1 = gx; Playhead.X2 = gx;
+                Playhead.Y1 = 0; Playhead.Y2 = ch;
+            }
+
+            // 独立したシークバー本体（ボリュームスライダーと同じトラック＋塗り＋丸ツマミ）
+            double sw = SeekBarCanvas.ActualWidth, sh = SeekBarCanvas.ActualHeight;
+            if (sw <= 0 || sh <= 0) return;
+
+            double x = ratio * sw;
+            double trackY = sh / 2;
+            SeekTrackBg.X1 = 0; SeekTrackBg.X2 = sw; SeekTrackBg.Y1 = trackY; SeekTrackBg.Y2 = trackY;
+            SeekTrackFill.X1 = 0; SeekTrackFill.X2 = x; SeekTrackFill.Y1 = trackY; SeekTrackFill.Y2 = trackY;
+            Canvas.SetLeft(SeekThumb, x - SeekThumb.Width / 2);
+            Canvas.SetTop(SeekThumb, trackY - SeekThumb.Height / 2);
         }
 
         /// <summary>ファイル切り替え時にチャートを空にする。</summary>
@@ -78,7 +124,63 @@ namespace VerticalPlayer.Dashcam
         private void DashcamAccelChart_SizeChanged(object sender, SizeChangedEventArgs e)
         {
             Redraw();
-            SetPlayhead(TimeSpan.FromSeconds(_totalDuration.TotalSeconds * (Playhead.X1 / Math.Max(1, ChartCanvas.ActualWidth))));
+            SetPlayhead(TimeSpan.FromSeconds(_totalDuration.TotalSeconds * _lastRatio));
+        }
+
+        // ---- シーク操作（SeekBarCanvas専用。波形プロット(ChartCanvas)はクリックを受け付けない） ----
+
+        private TimeSpan PositionFromX(double x, double width)
+        {
+            double totalSec = _totalDuration.TotalSeconds > 0 ? _totalDuration.TotalSeconds : 120.0;
+            double ratio = width > 0 ? Math.Clamp(x / width, 0.0, 1.0) : 0.0;
+            return TimeSpan.FromSeconds(ratio * totalSec);
+        }
+
+        private void SeekBarCanvas_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (_totalDuration <= TimeSpan.Zero) return; // ファイル未読込時は無視
+            _isSeekDragging = true;
+            SeekBarCanvas.CaptureMouse();
+
+            var pos = PositionFromX(e.GetPosition(SeekBarCanvas).X, SeekBarCanvas.ActualWidth);
+            SetPlayhead(pos); // 押した瞬間から見た目のシークバーも動かす（クリック即シークの体感を合わせる）
+            SeekDragStarted?.Invoke();
+            SeekPreview?.Invoke(pos);
+            e.Handled = true;
+        }
+
+        private void SeekBarCanvas_MouseMove(object sender, MouseEventArgs e)
+        {
+            double x = e.GetPosition(SeekBarCanvas).X;
+            var pos = PositionFromX(x, SeekBarCanvas.ActualWidth);
+
+            if (_isSeekDragging)
+            {
+                SetPlayhead(pos);
+                SeekPreview?.Invoke(pos);
+            }
+            else if (_totalDuration > TimeSpan.Zero)
+            {
+                HoverTimeChanged?.Invoke(pos, x);
+            }
+        }
+
+        private void SeekBarCanvas_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            if (!_isSeekDragging) return;
+            _isSeekDragging = false;
+            SeekBarCanvas.ReleaseMouseCapture();
+
+            var pos = PositionFromX(e.GetPosition(SeekBarCanvas).X, SeekBarCanvas.ActualWidth);
+            SetPlayhead(pos);
+            SeekDragCompleted?.Invoke(pos);
+            e.Handled = true;
+        }
+
+        private void SeekBarCanvas_MouseLeave(object sender, MouseEventArgs e)
+        {
+            if (!_isSeekDragging)
+                HoverTimeChanged?.Invoke(null, 0);
         }
 
         private void Redraw()

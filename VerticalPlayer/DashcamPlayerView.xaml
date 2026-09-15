@@ -19,11 +19,11 @@
             <RowDefinition Height="Auto"/>
             <!-- 録画フォルダ種別・ドライブ選択・オプション -->
             <RowDefinition Height="*"/>
-            <!-- リスト(ホバーで展開) + 映像 + センサー情報/マップ -->
+            <!-- リスト(ホバーで展開) + 映像 + 日時/緯度経度 + 走行軌跡マップ -->
             <RowDefinition Height="Auto"/>
             <!-- 再生コントロール -->
             <RowDefinition Height="Auto"/>
-            <!-- 加速度ストリップチャート（再生コントロールバーの下） -->
+            <!-- 加速度ストリップチャート（右隣に常時センサー情報(速度/加速度3軸)を固定表示） -->
         </Grid.RowDefinitions>
 
         <!-- ========== 録画フォルダ種別・ドライブ選択・オプションバー ========== -->
@@ -65,18 +65,19 @@
                 <CheckBox x:Name="DnnEnabledCheck" Content="AI推論(超解像)" Style="{StaticResource ModernCheck}"
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
                           Checked="DnnEnabledCheck_Changed" Unchecked="DnnEnabledCheck_Changed"/>
-
-                <TextBlock x:Name="DecodeModeText" Text="デコード: -" Foreground="{StaticResource TextMuted}" FontSize="11"
-                           VerticalAlignment="Center" Margin="16,0,0,0" ToolTip="実際に使用されているデコードモード（HW=D3D11VA / SW）"/>
             </StackPanel>
         </Border>
 
-        <!-- ========== リスト(ホバー展開) + 映像 + センサー情報/マップ ========== -->
+        <!-- ========== リスト(ホバー展開) + 映像 + 日時/緯度経度 + 走行軌跡マップ ========== -->
+        <!-- センサー情報のうち「速度・加速度3軸」は縦/横どちらの地図モードでも常にチャート横
+             （Grid.Row="3"）に固定表示する。一方「日時」「緯度/経度」は従来通り地図の上に
+             独立して表示する（チャート横のHudには詰め込まない）。地図の向き(縦/横/自動)は
+             右サイドバーの列幅にのみ影響し、この日時/緯度経度パネルの位置には影響しない。 -->
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="LeftSidebarColumn" Width="16"/>
                 <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="260"/>
+                <ColumnDefinition x:Name="RightSidebarColumnDef" Width="260"/>
             </Grid.ColumnDefinitions>
 
             <!-- 左サイドバー: 通常は幅16pxの細いバーだけ表示し、マウスオーバーで展開する
@@ -143,18 +144,31 @@
                 </Border>
             </Grid>
 
-            <!-- 右サイドバー: 上段=センサー情報（日時・速度・加速度）、下段=走行軌跡マップ。 -->
+            <!-- 右サイドバー: 上段=日時・緯度経度（常時固定表示）、下段=走行軌跡マップ。
+                 列幅(RightSidebarColumnDef)だけを地図の向き(縦/横/自動)に応じて
+                 ApplyMapOrientationが調整する（狭め=縦長ルート向き／広め=横長ルート向き）。 -->
             <Grid Grid.Column="2">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <dash:DashcamHudOverlay x:Name="Hud" Grid.Row="0"/>
+
+                <Border Grid.Row="0" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1" Padding="12,8">
+                    <StackPanel>
+                        <TextBlock x:Name="GeoDateTimeText" Text="----/--/-- --:--:--" Foreground="White" FontSize="13" FontWeight="SemiBold"/>
+                        <TextBlock FontSize="11" Margin="0,5,0,0">
+                            <Run Text="経度 " Foreground="{StaticResource TextMuted}"/><Run x:Name="GeoLngText" Text="---" Foreground="White"/><Run Text="   緯度 " Foreground="{StaticResource TextMuted}"/><Run x:Name="GeoLatText" Text="---" Foreground="White"/>
+                        </TextBlock>
+                    </StackPanel>
+                </Border>
+
                 <dash:DashcamMapControl x:Name="MapView" Grid.Row="1"/>
             </Grid>
         </Grid>
 
         <!-- ========== コントロールバー ========== -->
+        <!-- 旧シークバーはAccelChart側へ統合したため、ここには代わりにデコード/画質処理/fpsの
+             状態表示を並べる（要望「シークバーがあった箇所にデコード:HW等の表示を移動」）。 -->
         <Border Grid.Row="2" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -180,31 +194,49 @@
                             Minimum="0" Maximum="1" Value="1" ValueChanged="VolumeSlider_ValueChanged"/>
                 </StackPanel>
 
-                <Slider x:Name="SeekSlider" Grid.Column="1" VerticalAlignment="Center" Margin="8,0"
-                        Style="{StaticResource ModernSlider}"
-                        Minimum="0" Maximum="1"
-                        Thumb.DragStarted="SeekSlider_DragStarted"
-                        Thumb.DragCompleted="SeekSlider_DragCompleted"
-                        ValueChanged="SeekSlider_ValueChanged"
-                        PreviewMouseLeftButtonDown="SeekSlider_PreviewMouseLeftButtonDown"
-                        PreviewMouseLeftButtonUp="SeekSlider_PreviewMouseLeftButtonUp"
-                        MouseMove="SeekSlider_MouseMove"
-                        MouseLeave="SeekSlider_MouseLeave"/>
-
-                <Popup x:Name="SeekPreviewPopup" Grid.Column="1" PlacementTarget="{Binding ElementName=SeekSlider}"
-                       Placement="Top" AllowsTransparency="True" IsOpen="False" IsHitTestVisible="False">
-                    <Border Background="{StaticResource BgCard}" BorderBrush="{StaticResource Border}" BorderThickness="1"
-                            CornerRadius="4" Padding="6,3">
-                        <TextBlock x:Name="SeekPreviewText" Foreground="{StaticResource TextPrimary}" FontSize="11"/>
-                    </Border>
-                </Popup>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="8,0">
+                    <TextBlock x:Name="DecodeModeText" Text="デコード: -" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,0,14,0"
+                               ToolTip="実際に使用されているデコードモード（HW=D3D11VA / SW）"/>
+                    <TextBlock x:Name="DeintStatusText" Text="De-int: OFF" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,0,14,0"
+                               ToolTip="デインターレース"/>
+                    <TextBlock x:Name="NdrStatusText" Text="NDR: ON" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,0,14,0"
+                               ToolTip="ノイズリダクション"/>
+                    <TextBlock x:Name="DcrStatusText" Text="DCR: ON" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,0,14,0"
+                               ToolTip="ダイナミックコントラスト"/>
+                    <TextBlock x:Name="FpsText" Text="-- fps" Foreground="{StaticResource TextMuted}" FontSize="11"/>
+                </StackPanel>
 
                 <TextBlock x:Name="PositionText" Grid.Column="2" Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center" Margin="0,0,12,0"
                            Text="00:00:00 / 00:00:00"/>
             </Grid>
         </Border>
 
-        <dash:DashcamAccelChart x:Name="AccelChart" Grid.Row="3"/>
+        <!-- AccelChart自体がシーク操作を兼ねる（最上段の独立した帯でクリック即シーク・
+             ドラッグでプレビュー・ホバーで時刻ポップアップ）。センサー情報(速度・加速度3軸)は
+             常にこの右隣に固定表示し、高さもチャートと同じ130に揃えている。日時・緯度経度は
+             ここには置かず、上の地図パネル側に表示する（詰め込みすぎて速度表示が途切れていた
+             不具合への対応）。 -->
+        <Grid Grid.Row="3">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="220"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="130"/>
+            </Grid.RowDefinitions>
+            <dash:DashcamAccelChart x:Name="AccelChart" Grid.Column="0"/>
+            <Border Grid.Column="1" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="1,1,0,0">
+                <dash:DashcamHudOverlay x:Name="Hud"/>
+            </Border>
+        </Grid>
+
+        <Popup x:Name="SeekPreviewPopup" PlacementTarget="{Binding ElementName=AccelChart}"
+               Placement="Top" AllowsTransparency="True" IsOpen="False" IsHitTestVisible="False">
+            <Border Background="{StaticResource BgCard}" BorderBrush="{StaticResource Border}" BorderThickness="1"
+                    CornerRadius="4" Padding="6,3">
+                <TextBlock x:Name="SeekPreviewText" Foreground="{StaticResource TextPrimary}" FontSize="11"/>
+            </Border>
+        </Popup>
 
         <!-- サムネイル生成専用の非表示プレイヤー。画面外（Canvas.Left/Top=-2000）に配置することで
              通常のスクリーンショット機能と全く同じ描画経路（RenderTargetBitmap）を使えるようにする

@@ -26,11 +26,24 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" Text="走行軌跡" Foreground="{StaticResource TextAccentCyan}" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
-            <Button x:Name="FitAllButton" Grid.Column="1" Content="全体表示" Style="{StaticResource SecondaryBtn}" FontSize="10"
+
+            <!-- 表示方向: 自動(進行方位から東西/南北を判定)/縦固定/横固定。既定は自動。
+                 実際のレイアウト切替（Hud配置・地図領域の拡大等）はDashcamPlayerView側が
+                 OrientationModeとルート方位から総合判定して行う。 -->
+            <ComboBox x:Name="OrientationCombo" Grid.Column="1" Width="64" Margin="0,0,8,0" FontSize="10"
+                      Style="{StaticResource ModernCombo}" SelectionChanged="OrientationCombo_SelectionChanged"
+                      ToolTip="地図の縦長/横長表示（自動=進行方位から判定、手動=固定）">
+                <ComboBoxItem Content="自動" Tag="Auto" IsSelected="True"/>
+                <ComboBoxItem Content="縦" Tag="Vertical"/>
+                <ComboBoxItem Content="横" Tag="Horizontal"/>
+            </ComboBox>
+
+            <Button x:Name="FitAllButton" Grid.Column="2" Content="全体表示" Style="{StaticResource SecondaryBtn}" FontSize="10"
                     Padding="6,2" Margin="0,0,8,0" Click="FitAllButton_Click" ToolTip="今表示している軌跡全体が入るようにズームし直す"/>
-            <CheckBox x:Name="FollowCheck" Grid.Column="2" Content="追従" IsChecked="True" Style="{StaticResource ModernCheck}"
+            <CheckBox x:Name="FollowCheck" Grid.Column="3" Content="追従" IsChecked="True" Style="{StaticResource ModernCheck}"
                       Foreground="{StaticResource TextPrimary}" FontSize="11"
                       Checked="FollowCheck_Changed" Unchecked="FollowCheck_Changed"/>
         </Grid>

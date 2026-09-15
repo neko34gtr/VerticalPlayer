@@ -8,44 +8,57 @@
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </UserControl.Resources>
-    <!-- 映像への重ね表示(OSD)ではなく、Front/Rearリストと同じ「サイドパネル」として
-         再生コントロール領域の右側に常時表示する（メイン画面のダークテーマに合わせる）。 -->
+    <!-- 映像への重ね表示(OSD)ではなく、AccelChartの右隣（幅220×高さ130固定）に常時表示する
+         「サイドパネル」。日時・緯度経度はここではなく地図上部の専用パネルへ分離済みのため、
+         速度・加速度3軸だけを表示する。高さ130pxしか無いため、従来の縦積みレイアウトでは
+         入り切らず、速度ボックスと加速度ボックスを横並びに変更してある。 -->
     <Border Background="{StaticResource BgPanel}" BorderBrush="{StaticResource Border}" BorderThickness="1,0,0,0">
-        <StackPanel Margin="12,10">
-            <TextBlock Text="センサー情報" Foreground="{StaticResource TextAccentCyan}" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,10"/>
+        <Grid Margin="10,6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
 
-            <TextBlock Text="{Binding TimestampText}" Foreground="{StaticResource TextPrimary}" FontSize="13"
-                       HorizontalAlignment="Center" Margin="0,0,0,16" TextWrapping="Wrap"/>
+            <TextBlock Grid.Row="0" Grid.ColumnSpan="2" Text="センサー情報" Foreground="{StaticResource TextAccentCyan}" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,6"/>
 
-            <TextBlock Text="車速 (km/h)" Foreground="{StaticResource TextAccentCyan}" FontSize="11" Margin="0,0,0,4"/>
-            <Border Background="{StaticResource BgCard}" CornerRadius="8" Padding="0,10" Margin="0,0,0,18">
-                <TextBlock Text="{Binding SpeedText}" Foreground="{StaticResource TextPrimary}" FontSize="26"
-                           FontWeight="Bold" HorizontalAlignment="Center"/>
-            </Border>
+            <!-- 速度(km/h) -->
+            <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,0,6,0">
+                <TextBlock Text="速度(km/h)" Foreground="{StaticResource TextAccentCyan}" FontSize="10" Margin="0,0,0,3"/>
+                <Border Background="{StaticResource BgCard}" CornerRadius="6" Padding="0,8" VerticalAlignment="Top">
+                    <TextBlock Text="{Binding SpeedText}" Foreground="White" FontSize="22" FontWeight="Bold" HorizontalAlignment="Center"/>
+                </Border>
+            </StackPanel>
 
-            <TextBlock Text="加速度 (G)" Foreground="{StaticResource TextAccentCyan}" FontSize="11" Margin="0,0,0,4"/>
-            <Border Background="{StaticResource BgCard}" CornerRadius="8" Padding="10">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <Grid.RowDefinitions>
-                        <RowDefinition/>
-                        <RowDefinition/>
-                        <RowDefinition/>
-                    </Grid.RowDefinitions>
+            <!-- 加速度(G) 前後/左右/上下 -->
+            <StackPanel Grid.Row="1" Grid.Column="1">
+                <TextBlock Text="加速度(G)" Foreground="{StaticResource TextAccentCyan}" FontSize="10" Margin="0,0,0,3"/>
+                <Border Background="{StaticResource BgCard}" CornerRadius="6" Padding="8,5" VerticalAlignment="Top">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition/>
+                            <RowDefinition/>
+                            <RowDefinition/>
+                        </Grid.RowDefinitions>
 
-                    <TextBlock Grid.Row="0" Grid.Column="0" Text="前後" Foreground="{StaticResource TextAccentCyan}" FontSize="12" Margin="0,3,10,3"/>
-                    <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding AccelYText}" Foreground="{StaticResource TextPrimary}" FontSize="12" HorizontalAlignment="Right" Margin="0,3"/>
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="前後" Foreground="{StaticResource TextAccentCyan}" FontSize="10" Margin="0,1,8,1"/>
+                        <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding AccelYText}" Foreground="White" FontSize="10" HorizontalAlignment="Right" Margin="0,1"/>
 
-                    <TextBlock Grid.Row="1" Grid.Column="0" Text="左右" Foreground="{StaticResource TextAccentCyan}" FontSize="12" Margin="0,3,10,3"/>
-                    <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding AccelXText}" Foreground="{StaticResource TextPrimary}" FontSize="12" HorizontalAlignment="Right" Margin="0,3"/>
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="左右" Foreground="{StaticResource TextAccentCyan}" FontSize="10" Margin="0,1,8,1"/>
+                        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding AccelXText}" Foreground="White" FontSize="10" HorizontalAlignment="Right" Margin="0,1"/>
 
-                    <TextBlock Grid.Row="2" Grid.Column="0" Text="上下" Foreground="{StaticResource TextAccentCyan}" FontSize="12" Margin="0,3,10,3"/>
-                    <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding AccelZText}" Foreground="{StaticResource TextPrimary}" FontSize="12" HorizontalAlignment="Right" Margin="0,3"/>
-                </Grid>
-            </Border>
-        </StackPanel>
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="上下" Foreground="{StaticResource TextAccentCyan}" FontSize="10" Margin="0,1,8,1"/>
+                        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding AccelZText}" Foreground="White" FontSize="10" HorizontalAlignment="Right" Margin="0,1"/>
+                    </Grid>
+                </Border>
+            </StackPanel>
+        </Grid>
     </Border>
 </UserControl>

@@ -6,6 +6,14 @@ using System.Windows.Controls;
 
 namespace VerticalPlayer.Dashcam
 {
+    /// <summary>地図の縦長/横長表示方向。Autoは進行方位（東西/南北）からDashcamPlayerViewが自動判定する。</summary>
+    public enum DashcamMapOrientation
+    {
+        Auto,
+        Vertical,
+        Horizontal
+    }
+
     /// <summary>
     /// Leaflet.js + OpenStreetMapによる走行軌跡表示・自車位置追従用コントロール。
     /// APIキー不要（OSMタイルはAPIキー不要で利用可能）。WebView2上にHTMLを1枚だけ
@@ -15,6 +23,11 @@ namespace VerticalPlayer.Dashcam
     ///
     /// 前提: プロジェクトにNuGetパッケージ Microsoft.Web.WebView2 の参照が必要
     /// （.csprojは未確認のため、こちらで追加してください）。
+    ///
+    /// 表示方向(OrientationMode)はこのコントロール自身では反映しない（このコントロールは
+    /// WebView2の地図描画だけを担当する末端UIのため）。実際のレイアウト切替（センサー情報
+    /// パネルの配置変更・地図領域の拡大等）は、Hud/Mapを両方ホストするDashcamPlayerView側が
+    /// OrientationModeCheに応じて行う。
     /// </summary>
     public partial class DashcamMapControl : UserControl
     {
@@ -28,9 +41,35 @@ namespace VerticalPlayer.Dashcam
             set => FollowCheck.IsChecked = value;
         }
 
+        /// <summary>ユーザーが選択した表示方向（既定Auto）。実際の切替判定はホスト側が行う。</summary>
+        public DashcamMapOrientation OrientationMode
+        {
+            get => OrientationCombo.SelectedItem is ComboBoxItem ci && Enum.TryParse<DashcamMapOrientation>((string)ci.Tag, out var v)
+                ? v : DashcamMapOrientation.Auto;
+            set
+            {
+                foreach (var obj in OrientationCombo.Items)
+                {
+                    if (obj is ComboBoxItem ci && (string)ci.Tag == value.ToString())
+                    {
+                        OrientationCombo.SelectedItem = ci;
+                        return;
+                    }
+                }
+            }
+        }
+
+        /// <summary>OrientationModeがユーザー操作で変わるたびに通知する（ホスト側でレイアウト再判定するため）。</summary>
+        public event Action? OrientationModeChanged;
+
         public DashcamMapControl()
         {
             InitializeComponent();
+        }
+
+        private void OrientationCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            OrientationModeChanged?.Invoke();
         }
 
         private async void DashcamMapControl_Loaded(object sender, RoutedEventArgs e)
