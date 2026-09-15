@@ -359,13 +359,16 @@
     <!-- ========== ドラレコ動画リストの項目テンプレート（中サイズサムネイル＋ラベル） ========== -->
     <!-- Thumbnailは生成完了までnullのため、その間は背景色だけのプレースホルダーになる。
          DashcamMediaGroup.ThumbnailはINotifyPropertyChanged経由でバインディングに反映される。 -->
+    <!-- カード形式(サムネ|短縮ファイル名)で横並びにし、1件あたりの縦の高さを抑えることで
+         リストに一度に表示できる件数を増やす（従来は縦積みで1件あたり約140pxもあり、
+         3件程度しか見えていなかった）。サムネイルも半分程度のサイズに縮小。 -->
     <DataTemplate x:Key="DashcamListItemTemplate">
-        <StackPanel Margin="2,4">
-            <Border Width="196" Height="110" Background="#0A0F1A" CornerRadius="4" ClipToBounds="True">
+        <StackPanel Orientation="Horizontal" Margin="4,2">
+            <Border Width="96" Height="54" Background="#0A0F1A" CornerRadius="3" ClipToBounds="True">
                 <Image Source="{Binding Thumbnail}" Stretch="UniformToFill"/>
             </Border>
-            <TextBlock Text="{Binding DisplayLabel}" Foreground="{StaticResource TextPrimary}" FontSize="11"
-                       Margin="2,4,2,0" TextTrimming="CharacterEllipsis"/>
+            <TextBlock Text="{Binding ShortLabel}" Foreground="{StaticResource TextPrimary}" FontSize="10"
+                       Margin="8,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
         </StackPanel>
     </DataTemplate>
 

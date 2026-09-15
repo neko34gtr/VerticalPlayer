@@ -68,6 +68,10 @@ namespace VerticalPlayer.Dashcam
         /// <summary>リスト表示用のラベル（日時が読み取れればそれを、無理ならキーそのものを表示）。</summary>
         public string DisplayLabel => Timestamp?.ToString("yyyy/MM/dd HH:mm:ss") ?? TimestampKey;
 
+        /// <summary>リストのカード表示用の短縮ラベル（yyMMddHHmmssの12桁、日時不明ならキー先頭12文字）。</summary>
+        public string ShortLabel => Timestamp?.ToString("yyMMddHHmmss")
+            ?? (TimestampKey.Length > 12 ? TimestampKey[..12] : TimestampKey);
+
         public override string ToString() => DisplayLabel;
     }
 

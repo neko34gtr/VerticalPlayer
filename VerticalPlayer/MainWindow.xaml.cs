@@ -45,6 +45,7 @@ namespace VerticalPlayer
 
         // ── ドラレコモード ──
         public bool DashcamRearLinked { get; set; } = true;
+        public bool DashcamRearVisible { get; set; } = true;
         public double DashcamZoomScale { get; set; } = 2.0;
         public double DashcamWindowWidth { get; set; }
         public double DashcamWindowHeight { get; set; }
@@ -217,6 +218,7 @@ namespace VerticalPlayer
         private double _preDashcamHeight;
         private double _dashcamWindowWidth;
         private double _dashcamWindowHeight;
+        private string _baseTitle = "";
 
         // ── タイマー ──
         private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(100) };
@@ -271,6 +273,8 @@ namespace VerticalPlayer
             Trace("=== MainWindow() start ===");
             InitializeComponent();
             Trace("InitializeComponent done");
+            _baseTitle = this.Title;
+            DashcamView.CurrentFileChanged += DashcamView_CurrentFileChanged;
 
             // ドラレコモード: 動画オープン/ズーム変更時にウィンドウをフィットさせる
             DashcamView.RequestWindowFit += DashcamView_RequestWindowFit;
@@ -482,6 +486,7 @@ namespace VerticalPlayer
 
             // ── ドラレコモード ──
             DashcamView.RearLinked = s.DashcamRearLinked;
+            DashcamView.RearVisible = s.DashcamRearVisible;
             DashcamView.ZoomScale = s.DashcamZoomScale;
             _dashcamWindowWidth = s.DashcamWindowWidth;
             _dashcamWindowHeight = s.DashcamWindowHeight;
@@ -539,6 +544,7 @@ namespace VerticalPlayer
 
                 // ドラレコモード
                 DashcamRearLinked = DashcamView.RearLinked,
+                DashcamRearVisible = DashcamView.RearVisible,
                 DashcamZoomScale = DashcamView.ZoomScale,
                 DashcamWindowWidth = _isDashcamMode ? this.Width : _dashcamWindowWidth,
                 DashcamWindowHeight = _isDashcamMode ? this.Height : _dashcamWindowHeight,
@@ -1813,6 +1819,11 @@ namespace VerticalPlayer
             this.Width = _preDashcamWidth;
             this.Height = _preDashcamHeight;
             EnsureOnScreen();
+            this.Title = _baseTitle;
+        }
+        private void DashcamView_CurrentFileChanged(string? fileName)
+        {
+            this.Title = string.IsNullOrEmpty(fileName) ? _baseTitle : $"{_baseTitle} - {fileName}";
         }
 
         // DashcamPlayerView.RequestWindowFit: 動画のネイティブ解像度×選択倍率(px)でウィンドウをフィットさせる。

@@ -82,15 +82,21 @@
             <!-- 左サイドバー: 通常は幅16pxの細いバーだけ表示し、マウスオーバーで展開する
                  （常時220px確保すると画面を圧迫するため。展開中は映像エリアが一時的に
                  狭くなるが、離れれば自動で戻る）。 -->
-            <Border x:Name="LeftSidebarHost" Grid.Column="0" Grid.ColumnSpan="2" HorizontalAlignment="Left" Width="16" Panel.ZIndex="100"       
+            <Border x:Name="LeftSidebarHost" Grid.Column="0" Grid.ColumnSpan="2" HorizontalAlignment="Left" Width="16" Panel.ZIndex="100"
                     Background="{StaticResource BgPanel}"
                     BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0"
+                    ClipToBounds="True"
                     MouseEnter="LeftSidebarHost_MouseEnter" MouseLeave="LeftSidebarHost_MouseLeave">
                 <Grid>
                     <Border x:Name="CollapsedHint" Background="{StaticResource TextAccentCyan}" Width="3"
                             HorizontalAlignment="Left" Opacity="0.55"/>
 
-                    <Grid x:Name="SidebarContent" Visibility="Collapsed">
+                    <!-- 折りたたみ中もVisibility="Collapsed"にはしない（レイアウトパス自体が
+                         スキップされ、ListBox内部のScrollViewerテンプレートが一度も生成されず
+                         「一度もホバーしていないと自動スクロールが効かない」不具合の原因に
+                         なっていたため）。表示上はホストのWidth=16px＋ClipToBounds=Trueで
+                         十分隠れるので、中身は常にVisible/レイアウト済みのまま持っておく。 -->
+                    <Grid x:Name="SidebarContent">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>

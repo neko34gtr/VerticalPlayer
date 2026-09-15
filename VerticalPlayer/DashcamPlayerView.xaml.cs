@@ -79,11 +79,18 @@ namespace VerticalPlayer.Dashcam
         /// <summary>ズーム変更・動画オープン時に、映像本来のサイズ×倍率での
         /// ウィンドウフィットをホスト(MainWindow)へ依頼する。引数は動画のネイティブ幅・高さ×倍率(px)。</summary>
         public event Action<double, double>? RequestWindowFit;
+        /// <summary>再生中のFrontファイル名が変わるたびに通知する（ホスト側でタイトルバー表示用）。停止時はnull。</summary>
+        public event Action<string?>? CurrentFileChanged;
 
         public bool RearLinked
         {
             get => RearLinkedCheck.IsChecked == true;
             set => RearLinkedCheck.IsChecked = value;
+        }
+        public bool RearVisible
+        {
+            get => RearVisibleCheck.IsChecked == true;
+            set => RearVisibleCheck.IsChecked = value;
         }
 
         public double ZoomScale
@@ -149,19 +156,17 @@ namespace VerticalPlayer.Dashcam
         private void LeftSidebarHost_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
         {
             // 列幅(LeftSidebarColumn)は常に16pxで固定のまま変更しない。展開はLeftSidebarHost自身の
-            // Widthだけを広げ、Panel.ZIndexで映像の上にオーバーレイ表示する方式にしている。
-            // 以前は列幅そのものを16→220pxへ変更していたため、動画エリア(Grid.Column="1"の*列)の
-            // 実際のレンダリングサイズが毎回変わってしまい、「ホバーしただけなのに動画が
-            // 一瞬リサイズされる」という違和感の原因になっていた。
+            // Widthだけを広げ、Grid.ColumnSpan+Panel.ZIndexで映像の上にオーバーレイ表示する方式に
+            // している（列幅そのものを変更する旧方式だと動画エリアが毎回リサイズされてしまい、
+            // D3DImage経由の映像とZ順が競合して一覧が表に出てこない不具合もあったため）。
             LeftSidebarHost.Width = 220;
             CollapsedHint.Visibility = Visibility.Collapsed;
-            SidebarContent.Visibility = Visibility.Visible;
+            // SidebarContent自体のVisibilityは常にVisibleのまま変更しない（下記コメント参照）。
         }
 
         private void LeftSidebarHost_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
         {
             LeftSidebarHost.Width = 16;
-            SidebarContent.Visibility = Visibility.Collapsed;
             CollapsedHint.Visibility = Visibility.Visible;
         }
 
@@ -431,6 +436,7 @@ namespace VerticalPlayer.Dashcam
         private void PlayFrontGroup(DashcamMediaGroup group)
         {
             _currentFrontGroup = group;
+            CurrentFileChanged?.Invoke(Path.GetFileName(group.FrontVideoPath) ?? group.TimestampKey);
             _sensorFrames = new List<DashcamSensorFrame>(); // Frontの動画長が判明してからParseし直す（MediaOpened側）
             _wantsPlaying = true; // Front/RearどちらのMediaOpenedが先に来ても再生開始させる意図フラグ
 
@@ -498,10 +504,10 @@ namespace VerticalPlayer.Dashcam
             _sensorFrames = nmeaPath != null
                 ? NmeaSensorParser.Parse(nmeaPath, _currentFrontGroup?.Timestamp, duration)
                 : new List<DashcamSensorFrame>();
-            AccelChart.Clear(); // 新しいファイルに切り替わったので加速度チャートの連続性もリセットする
-
-            if (_currentFrontGroup != null)
-                _ = RefreshMapBufferAsync(_currentFrontGroup);
+            // グラフはファイル全体分をここで一度だけ計算して描画する（毎フレーム全点を再計算して
+            // いた従来方式はスレッド負荷が無駄に高かったため）。再生中はSetPlayhead()で現在位置の
+            // 縦線を動かすだけにする。
+            AccelChart.SetFullTrack(_sensorFrames, duration);
 
             // レジューム再生: 位置決めは必ずPlay()より先に行う。
             // StepToVideoOnlyAsyncはドラッグシーク確定時と同じ「指定フレームへ正確に着地させたら
@@ -510,6 +516,12 @@ namespace VerticalPlayer.Dashcam
             // Pause()されたまま……という「映像は止まったまま音声だけ流れる」不具合になる
             // （実機ログで確認: Play()→Seek()→catch-up→最後にPause()で終わっており、
             // その後Play()を呼び直していなかったのが原因）。
+            //
+            // また、レジューム直後のシークはSDカード等の低速ストレージからの読み出しが
+            // まだ間に合っておらず本来遅くなりがちな処理のため、同じストレージへ同時に
+            // アクセスするRefreshMapBufferAsync(前後最大21ファイル分のNMEA読み直し)や
+            // SchedulePrefetchIfNeeded(次ファイルの先読み)は、あえてこのシークが完了した
+            // "後"に回している（以前は先に走らせておりI/Oが競合して余計に遅くなっていた）。
             if (_pendingResumeSeconds is double resumeSec)
             {
                 _pendingResumeSeconds = null;
@@ -529,6 +541,9 @@ namespace VerticalPlayer.Dashcam
                 RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
                 UpdateZoomAvailability();
             }
+
+            if (_currentFrontGroup != null)
+                _ = RefreshMapBufferAsync(_currentFrontGroup);
 
             SchedulePrefetchIfNeeded();
         }
@@ -567,15 +582,32 @@ namespace VerticalPlayer.Dashcam
             UpdateRearPipVisibility();
         }
 
-        private void PlayerFront_MediaEnded(object sender, RoutedEventArgs e) => AdvanceToNextFrontScene();
+        private void PlayerFront_MediaEnded(object sender, RoutedEventArgs e)
+        {
+            DashcamPlayErrorLogger.Log($"[MediaEnded] Front={_currentFrontGroup?.TimestampKey ?? "(null)"}");
+            AdvanceToNextFrontScene();
+        }
 
         private void NextSceneButton_Click(object sender, RoutedEventArgs e) => AdvanceToNextFrontScene();
 
         private void AdvanceToNextFrontScene()
         {
-            if (_currentFrontGroup is null) return;
+            if (_currentFrontGroup is null)
+            {
+                DashcamPlayErrorLogger.Log("[Advance] _currentFrontGroupがnullのため中止");
+                return;
+            }
             int idx = _frontGroups.IndexOf(_currentFrontGroup);
-            if (idx < 0 || idx + 1 >= _frontGroups.Count) return;
+            if (idx < 0)
+            {
+                DashcamPlayErrorLogger.Log($"[Advance] {_currentFrontGroup.TimestampKey}が_frontGroupsに見つからず中止（再スキャンで参照が失われた可能性）");
+                return;
+            }
+            if (idx + 1 >= _frontGroups.Count)
+            {
+                DashcamPlayErrorLogger.Log($"[Advance] {_currentFrontGroup.TimestampKey}は最終ファイルのため中止");
+                return;
+            }
 
             var next = _frontGroups[idx + 1];
             _suppressSelectionEvent = true;
@@ -687,6 +719,7 @@ namespace VerticalPlayer.Dashcam
             _isPlaying = false;
             _wantsPlaying = false;
             PlayPauseButton.Content = "▶";
+            CurrentFileChanged?.Invoke(null);
         }
 
         private void RearVisibleCheck_Changed(object sender, RoutedEventArgs e) => UpdateRearPipVisibility();
@@ -852,7 +885,9 @@ namespace VerticalPlayer.Dashcam
                 await Task.Delay(15);
 
             var target = TimeSpan.FromSeconds(SeekSlider.Value);
-            AccelChart.Clear(); // シークで時間が飛ぶため、直前までの連続したチャートは一旦リセットする
+            // グラフはファイル全体を静的に表示する方式に変更したため、シークしても消さない
+            // （消すとまた全体を再計算することになり本末転倒）。プレイヘッドの位置だけ動かす。
+            AccelChart.SetPlayhead(target);
             await PlayerFront.StepToVideoOnlyAsync(target, timeoutMs: 2000);
             if (_currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null))
                 await PlayerRear.StepToVideoOnlyAsync(target, timeoutMs: 2000);
@@ -922,11 +957,11 @@ namespace VerticalPlayer.Dashcam
             var frame = DashcamSensorLookup.FindNearest(_sensorFrames, pos);
             Hud.UpdateFrame(frame);
             if (frame != null)
-            {
                 MapView.SetCarPosition(frame.Latitude, frame.Longitude, frame.HasGpsFix);
-                //AccelChart.AddSample(pos, frame.AccelX, frame.AccelY, frame.AccelZ);
-                AccelChart.AddSample(pos, frame.AccelX, frame.AccelY, frame.AccelZ, frame.SpeedKmh);
-            }
+
+            // チャート本体はファイルを開いた時点で一度だけ計算済み（SetFullTrack）。
+            // 毎フレームはプレイヘッドの位置を動かすだけの軽量な処理にとどめる。
+            AccelChart.SetPlayhead(pos);
 
             if (!_isDragging)
             {
