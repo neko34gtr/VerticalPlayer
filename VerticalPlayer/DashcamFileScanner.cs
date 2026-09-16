@@ -28,7 +28,7 @@ namespace VerticalPlayer.Dashcam
         // Front/Rearのタイムスタンプが何秒までズレていれば同一録画とみなすか。
         // 実機で確認できた最大ズレは3秒程度のため、余裕を見て10秒とする
         // （録画間隔は約2分あるため誤マッチのリスクは無い）。
-        private const int PairToleranceSeconds = 10;
+        private const int PairToleranceSeconds = 50;
 
         // "..._front.mp4" / "..._Rear.NMEA" のような末尾のfront/rear表記を除去してキー化する
         private static readonly Regex SuffixRegex =
