@@ -68,8 +68,18 @@ namespace VerticalPlayer.Dashcam
 
         // サムネイル生成キュー（1件ずつ順番に処理。ThumbCapturePlayerという専用の非表示
         // プレイヤーを使い回すため並列実行はしない）
-        private readonly Queue<(DashcamMediaGroup group, string path)> _thumbnailQueue = new();
+        //private readonly Queue<(DashcamMediaGroup group, string path)> _thumbnailQueue = new();
+        private readonly Queue<(DashcamMediaGroup group, string path, bool fast)> _thumbnailQueue = new();
+        private readonly HashSet<string> _finalizedThumbnailPaths = new(); // 正規版(DB保存対象)まで到達済みのパス
+        private const int FastThumbnailCount = 8; // 初期表示ですぐ目に入る分だけ先に簡易生成する件数
         private bool _thumbnailWorkerRunning;
+
+        // リア(PiP)ドラッグ移動・リサイズ用状態
+        private bool _pipUserPositioned;
+        private Point? _pipDragStart;
+        private Point? _pipDragStartPos;
+        private Point? _pipResizeStart;
+        private Size? _pipResizeStartSize;
 
         // ---- シーク（AccelChart最上段の独立した帯から通知される。旧SeekSliderと同等の
         //      ドラッグ間引きプレビュー・クリック即シーク・ホバー時刻プレビューを維持） ----
@@ -99,6 +109,44 @@ namespace VerticalPlayer.Dashcam
         {
             get => RearLinkedCheck.IsChecked == true;
             set => RearLinkedCheck.IsChecked = value;
+        }
+        /// <summary>
+        /// ハードウェアデコード(HW/SW)の切り替え。MainWindow本体のHwAccelCheckと共有する設定で、
+        /// トグル時はメイン画面のHwAccel_Changedと同様に、現在開いているFront/Rearを
+        /// 位置・再生状態を保ったまま開き直して即時反映する。
+        /// </summary>
+        public bool HardwareAcceleration
+        {
+            get => PlayerFront.HardwareAcceleration;
+            set
+            {
+                PlayerFront.HardwareAcceleration = value;
+                PlayerRear.HardwareAcceleration = value;
+                ReapplyDecodeModeToOpenFiles();
+            }
+        }
+
+        private void ReapplyDecodeModeToOpenFiles()
+        {
+            if (PlayerFront.Source != null)
+            {
+                var pos = PlayerFront.Position;
+                bool wasPlaying = _isPlaying;
+                var src = PlayerFront.Source;
+                PlayerFront.Source = src;
+                PlayerFront.Position = pos;
+                if (wasPlaying) PlayerFront.Play();
+            }
+
+            bool rearActive = _currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null);
+            if (rearActive && PlayerRear.Source != null)
+            {
+                var pos = PlayerRear.Position;
+                var src = PlayerRear.Source;
+                PlayerRear.Source = src;
+                PlayerRear.Position = pos;
+                if (_isPlaying) PlayerRear.Play();
+            }
         }
 
         /// <summary>リア(PiP)を表示するかどうかのユーザー設定（AppSettings.DashcamRearVisibleと連動、ホスト側で永続化）。</summary>
@@ -299,6 +347,7 @@ namespace VerticalPlayer.Dashcam
             RearList.ItemsSource = _rearGroups;
 
             _thumbnailQueue.Clear(); // 別ドライブ/別フォルダへ切り替えたら古いキューは破棄する
+            _finalizedThumbnailPaths.Clear();
             EnqueueThumbnails(_groups);
         }
 
@@ -311,13 +360,20 @@ namespace VerticalPlayer.Dashcam
 
         private void EnqueueThumbnails(IEnumerable<DashcamMediaGroup> groups)
         {
-            foreach (var g in groups)
-            {
-                if (g.Thumbnail != null) continue;
-                string? path = g.FrontVideoPath ?? g.RearVideoPath;
-                if (path == null) continue;
-                _thumbnailQueue.Enqueue((g, path));
-            }
+            var withPath = groups
+                .Where(g => g.Thumbnail == null)
+                .Select(g => (group: g, path: g.FrontVideoPath ?? g.RearVideoPath))
+                .Where(x => x.path != null)
+                .Select(x => (x.group, path: x.path!))
+                .ToList();
+
+            // 初期表示側の体感速度を優先し、先頭N件だけ先に簡易生成(fast)をキューの先頭へ積む。
+            // 同じThumbCapturePlayerを使い回すため並列実行はできない＝キューの順序で優先度を表現する。
+            foreach (var (group, path) in withPath.Take(FastThumbnailCount))
+                _thumbnailQueue.Enqueue((group, path, fast: true));
+
+            foreach (var (group, path) in withPath)
+                _thumbnailQueue.Enqueue((group, path, fast: false));
 
             if (!_thumbnailWorkerRunning)
                 _ = RunThumbnailWorkerAsync();
@@ -330,14 +386,34 @@ namespace VerticalPlayer.Dashcam
             {
                 while (_thumbnailQueue.Count > 0)
                 {
-                    var (group, path) = _thumbnailQueue.Dequeue();
-                    if (group.Thumbnail != null) continue; // 別経路で既に生成済み
+                    var (group, path, fast) = _thumbnailQueue.Dequeue();
+
+                    if (fast)
+                    {
+                        if (_finalizedThumbnailPaths.Contains(path)) continue; // 既に正規版まで到達済み
+
+                        byte[]? cachedForFast = await Task.Run(() => DashcamThumbnailCache.TryGet(path));
+                        if (cachedForFast != null)
+                        {
+                            _finalizedThumbnailPaths.Add(path);
+                            var cachedSource = BytesToImageSource(cachedForFast);
+                            Dispatcher.Invoke(() => group.Thumbnail = cachedSource);
+                            continue; // DBキャッシュがあるならそれが正規版なので簡易生成は不要
+                        }
+
+                        byte[]? fastBytes = await GenerateThumbnailAsync(path, fast: true);
+                        if (fastBytes != null)
+                        {
+                            var fastSource = BytesToImageSource(fastBytes);
+                            Dispatcher.Invoke(() => group.Thumbnail = fastSource);
+                        }
+                        continue; // 簡易版はDB保存しない。正規版は後続のfast:falseキューで生成される
+                    }
+
+                    if (_finalizedThumbnailPaths.Contains(path)) continue; // fastパスでキャッシュ命中済み等、既に正規版が出ている
 
                     byte[]? cached = await Task.Run(() => DashcamThumbnailCache.TryGet(path));
-                    byte[]? pngBytes = cached;
-
-                    if (pngBytes == null)
-                        pngBytes = await GenerateThumbnailAsync(path);
+                    byte[]? pngBytes = cached ?? await GenerateThumbnailAsync(path, fast: false);
 
                     if (pngBytes == null)
                         continue; // 生成失敗（壊れたファイル等）はスキップし、他の項目の処理は継続する
@@ -345,8 +421,8 @@ namespace VerticalPlayer.Dashcam
                     if (cached == null)
                         await Task.Run(() => DashcamThumbnailCache.Save(path, pngBytes));
 
+                    _finalizedThumbnailPaths.Add(path);
                     var imageSource = BytesToImageSource(pngBytes);
-                    // PropertyChanged通知を確実にUIスレッドへ送るためDispatcherを経由する
                     Dispatcher.Invoke(() => group.Thumbnail = imageSource);
                 }
             }
@@ -368,7 +444,7 @@ namespace VerticalPlayer.Dashcam
             return bmp;
         }
 
-        private async Task<byte[]?> GenerateThumbnailAsync(string videoPath)
+        private async Task<byte[]?> GenerateThumbnailAsync(string videoPath, bool fast = false)
         {
             // UI要素の操作およびキャプチャは確実にUIスレッドで行う（DispatcherOperationが
             // async delegateを返すため、結果取得には2段階のawaitが必要）。
@@ -392,9 +468,14 @@ namespace VerticalPlayer.Dashcam
                     var duration = ThumbCapturePlayer.NaturalDuration.HasTimeSpan
                         ? ThumbCapturePlayer.NaturalDuration.TimeSpan
                         : TimeSpan.FromSeconds(4);
-                    var target = TimeSpan.FromSeconds(Math.Min(2, duration.TotalSeconds * 0.3));
-                    await ThumbCapturePlayer.StepToVideoOnlyAsync(target, timeoutMs: 3000);
 
+                    if (!fast)
+                    {
+                        // 簡易生成(fast)はシーク待ちの数百ms〜秒単位を丸ごと省略し、MediaOpened直後の
+                        // 先頭フレームをそのまま使う（体感速度優先。正式なDB保存版は後で上書きされる）。
+                        var target = TimeSpan.FromSeconds(Math.Min(2, duration.TotalSeconds * 0.3));
+                        await ThumbCapturePlayer.StepToVideoOnlyAsync(target, timeoutMs: 3000);
+                    }
                     // 画面外(Canvas.Left/Top=-2000)のままだとMeasure/Arrangeが確定しておらず、
                     // RenderTargetBitmap.Render(ThumbCapturePlayer)を直接呼んでも空(透明)の
                     // ビットマップになる不具合が実機で確認された。160x90でレイアウトを明示的に
@@ -403,7 +484,7 @@ namespace VerticalPlayer.Dashcam
                     ThumbCapturePlayer.Measure(new Size(160, 90));
                     ThumbCapturePlayer.Arrange(new Rect(-2000, -2000, 160, 90));
                     ThumbCapturePlayer.UpdateLayout();
-                    await Task.Delay(100);
+                    await Task.Delay(fast ? 30 : 100);
 
                     var visualBrush = new VisualBrush(ThumbCapturePlayer) { Stretch = Stretch.Fill };
                     var drawingVisual = new DrawingVisual();
@@ -774,6 +855,73 @@ namespace VerticalPlayer.Dashcam
 
             if (show && _wantsPlaying)
                 PlayerRear.Play();
+        }
+        private void RearPipCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            if (_pipUserPositioned) return; // ユーザーが一度でも動かしたら自動追従はやめる
+            Canvas.SetLeft(RearPipBorder, 12);
+            Canvas.SetTop(RearPipBorder, Math.Max(0, RearPipCanvas.ActualHeight - RearPipBorder.Height - 12));
+        }
+
+        private void RearPipBorder_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            _pipUserPositioned = true;
+            _pipDragStart = e.GetPosition(RearPipCanvas);
+            _pipDragStartPos = new Point(Canvas.GetLeft(RearPipBorder), Canvas.GetTop(RearPipBorder));
+            RearPipBorder.CaptureMouse();
+            e.Handled = true;
+        }
+
+        private void RearPipBorder_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            if (_pipDragStart is not Point start || _pipDragStartPos is not Point startPos) return;
+            if (e.LeftButton != System.Windows.Input.MouseButtonState.Pressed) return;
+
+            var cur = e.GetPosition(RearPipCanvas);
+            double newLeft = startPos.X + (cur.X - start.X);
+            double newTop = startPos.Y + (cur.Y - start.Y);
+
+            // 映像エリアの外へ出て行方不明にならないよう範囲内にクランプする
+            newLeft = Math.Clamp(newLeft, 0, Math.Max(0, RearPipCanvas.ActualWidth - RearPipBorder.Width));
+            newTop = Math.Clamp(newTop, 0, Math.Max(0, RearPipCanvas.ActualHeight - RearPipBorder.Height));
+
+            Canvas.SetLeft(RearPipBorder, newLeft);
+            Canvas.SetTop(RearPipBorder, newTop);
+        }
+
+        private void RearPipBorder_MouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            _pipDragStart = null;
+            _pipDragStartPos = null;
+            RearPipBorder.ReleaseMouseCapture();
+        }
+
+        private void RearPipResizeGrip_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            _pipResizeStart = e.GetPosition(RearPipCanvas);
+            _pipResizeStartSize = new Size(RearPipBorder.Width, RearPipBorder.Height);
+            RearPipResizeGrip.CaptureMouse();
+            e.Handled = true; // Border側のドラッグ判定へ伝播させない
+        }
+
+        private void RearPipResizeGrip_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            if (_pipResizeStart is not Point start || _pipResizeStartSize is not Size startSize) return;
+            if (e.LeftButton != System.Windows.Input.MouseButtonState.Pressed) return;
+
+            var cur = e.GetPosition(RearPipCanvas);
+            double newW = Math.Max(120, startSize.Width + (cur.X - start.X));
+            double newH = newW * 9.0 / 16.0; // 16:9に近い比率を維持して映像が歪まないようにする
+
+            RearPipBorder.Width = newW;
+            RearPipBorder.Height = newH;
+        }
+
+        private void RearPipResizeGrip_MouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            _pipResizeStart = null;
+            _pipResizeStartSize = null;
+            RearPipResizeGrip.ReleaseMouseCapture();
         }
 
         private void RearLinkedCheck_Changed(object sender, RoutedEventArgs e)
@@ -1200,5 +1348,36 @@ namespace VerticalPlayer.Dashcam
                 _isResuming = false;
             }
         }
+        /// <summary>
+        /// 起動時にコマンドライン引数でフォルダが渡された場合の直接読み込み。
+        /// レジューム(ドライブ/ファイル選択/再生位置の復元)は一切行わず、指定フォルダを
+        /// ドライブ一覧に追加してスキャンするだけに留める（ファイル選択・再生開始はユーザーに委ねる）。
+        /// </summary>
+        public void LoadFolderDirect(string folderPath)
+        {
+            if (!Directory.Exists(folderPath)) return;
+
+            RefreshDriveList();
+            var options = DriveCombo.ItemsSource as IEnumerable<DriveOrFolderOption>;
+            var existing = options?.FirstOrDefault(o => !o.IsBrowseOption && string.Equals(o.RootPath, folderPath, StringComparison.OrdinalIgnoreCase));
+
+            DriveOrFolderOption target;
+            if (existing != null)
+            {
+                target = existing;
+            }
+            else
+            {
+                target = new DriveOrFolderOption { DisplayName = folderPath, RootPath = folderPath };
+                var list = new List<DriveOrFolderOption>(options ?? Enumerable.Empty<DriveOrFolderOption>());
+                list.Insert(Math.Max(0, list.Count - 1), target);
+                DriveCombo.ItemsSource = list;
+            }
+
+            // DriveCombo_SelectionChanged経由でRescanCurrentSelection→ScanDriveが走り、
+            // フロント/リアリストが表示される（ファイルの自動選択・再生は行わない）。
+            DriveCombo.SelectedItem = target;
+        }
+
     }
 }

@@ -214,6 +214,9 @@ namespace VerticalPlayer
 
         // ── ドラレコモード ──
         private bool _isDashcamMode;
+        private string? _startupFolderArg; // 起動引数でフォルダが渡された場合のパス（App.xaml.csから設定される）
+        /// <summary>App.xaml.csから、起動引数で渡されたフォルダパスを伝える。Window_Loadedより前に呼ぶこと。</summary>
+        public void SetStartupFolder(string folderPath) => _startupFolderArg = folderPath;
         private double _preDashcamWidth;
         private double _preDashcamHeight;
         private double _dashcamWindowWidth;
@@ -397,6 +400,13 @@ namespace VerticalPlayer
                 catch { /* 壊れていたらデフォルト */ }
             }
             CenterOnScreen();
+            // 設定ファイルが無い(初回起動等)場合でも、起動引数でフォルダが渡されていれば
+            // ドラレコモードへ直接入る。
+            if (_startupFolderArg != null)
+            {
+                EnterDashcamMode();
+                DashcamView.LoadFolderDirect(_startupFolderArg);
+            }
         }
 
         private void RestoreSettings(AppSettings s)
@@ -504,14 +514,38 @@ namespace VerticalPlayer
                 string? eventFolder = s.DashcamLastEventFolder;
                 _ = DashcamView.TryResumeAsync(drivePath, groupKey, pos, eventFolder);
             }
+            // ── ドラレコモードのレジューム再生 ──
+            // 起動引数でフォルダが渡されている場合は、前回のドライブ・選択ファイル・再生位置の
+            // 復元(レジューム経路)を完全にスキップし、渡されたフォルダを直接読み込む。
+            // リア追従・リア表示・ズーム等のオプション/スイッチ類は、この上で既に
+            // DashcamView.RearLinked = s.DashcamRearLinked; 等により通常通り復元済みなので、
+            // ここでは一切触れない。
+            if (_startupFolderArg != null)
+            {
+                EnterDashcamMode();
+                DashcamView.LoadFolderDirect(_startupFolderArg);
+            }
+            // 前回終了時にドラレコモードだった場合、モードごと・ドライブ・選択ファイル・
+            // 再生位置を復元する。ドライブが挿さっていない/該当ファイルが無い場合は
+            // TryResumeAsync側がfalseを返すだけで、通常モードのまま何も起きない。
+            else if (s.DashcamWasActive)
+            {
+                EnterDashcamMode();
+                string? drivePath = s.DashcamLastDrivePath;
+                string? groupKey = s.DashcamLastGroupKey;
+                double pos = s.DashcamLastPosition;
+                string? eventFolder = s.DashcamLastEventFolder;
+                _ = DashcamView.TryResumeAsync(drivePath, groupKey, pos, eventFolder);
+            }
 
             // ── プリセット ──
             _presets.Clear();
             foreach (var p in s.Presets) _presets.Add(p);
 
             // ── 前回ファイル復元 ──
-            // ドラレコモードとして復元した場合は、通常モードの最後のファイルを裏で開く必要はない
-            if (!s.DashcamWasActive && !string.IsNullOrEmpty(s.LastFilePath) && File.Exists(s.LastFilePath))
+            // ドラレコモードとして復元した場合、および起動引数でフォルダが渡された場合は、
+            // 通常モードの最後のファイルを裏で開く必要はない
+            if (_startupFolderArg == null && !s.DashcamWasActive && !string.IsNullOrEmpty(s.LastFilePath) && File.Exists(s.LastFilePath))
             {
                 LoadVideo(s.LastFilePath, s.LastPosition);
             }
@@ -1483,6 +1517,8 @@ namespace VerticalPlayer
         private void HwAccel_Changed(object sender, RoutedEventArgs e)
         {
             Player.HardwareAcceleration = HwAccelCheck.IsChecked ?? false;
+
+            DashcamView.HardwareAcceleration = HwAccelCheck.IsChecked ?? false; // ドラレコモード側のFront/Rearにも同じ設定を反映する
 
             if (Player.Source != null)
             {

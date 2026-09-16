@@ -122,26 +122,41 @@
             <Grid Grid.Column="1" Background="Black">
                 <!-- フロント（メイン） -->
                 <media:FfmpegMediaElement x:Name="PlayerFront"
-                                          UseGpuPresenter="True"
-                                          MediaOpened="PlayerFront_MediaOpened"
-                                          MediaEnded="PlayerFront_MediaEnded"
-                                          MediaFailed="PlayerFront_MediaFailed"/>
-                <!-- FrameDisplayedはAction&lt;double&gt;型のCLRイベントでXAML属性からは配線できないため、
-                     コードビハインドのコンストラクタで += 購読する（MainWindowのFPS集計と同じ作法）。 -->
+                              UseGpuPresenter="True"
+                              MediaOpened="PlayerFront_MediaOpened"
+                              MediaEnded="PlayerFront_MediaEnded"
+                              MediaFailed="PlayerFront_MediaFailed"/>
 
-                <!-- リア（PiP） -->
-                <Border x:Name="RearPipBorder"
-                        Width="220" Height="124"
-                        HorizontalAlignment="Left" VerticalAlignment="Bottom"
-                        Margin="12" BorderBrush="{StaticResource Border}" BorderThickness="1"
-                        Visibility="Collapsed">
-                    <media:FfmpegMediaElement x:Name="PlayerRear"
-                                              UseGpuPresenter="True"
-                                              Volume="0"
-                                              MediaOpened="PlayerRear_MediaOpened"
-                                              MediaEnded="PlayerRear_MediaEnded"
-                                              MediaFailed="PlayerRear_MediaFailed"/>
-                </Border>
+                <!-- リア（PiP）: ドラッグで自由配置・右下グリップで自由リサイズできるようCanvasに乗せる -->
+                <Canvas x:Name="RearPipCanvas" SizeChanged="RearPipCanvas_SizeChanged">
+                    <Border x:Name="RearPipBorder"
+                Width="220" Height="124"
+                BorderBrush="{StaticResource Border}" BorderThickness="1"
+                Background="Black"
+                Visibility="Collapsed"
+                Cursor="SizeAll"
+                MouseLeftButtonDown="RearPipBorder_MouseLeftButtonDown"
+                MouseMove="RearPipBorder_MouseMove"
+                MouseLeftButtonUp="RearPipBorder_MouseLeftButtonUp">
+                        <Grid>
+                            <media:FfmpegMediaElement x:Name="PlayerRear"
+                                          UseGpuPresenter="True"
+                                          Volume="0"
+                                          IsHitTestVisible="False"
+                                          MediaOpened="PlayerRear_MediaOpened"
+                                          MediaEnded="PlayerRear_MediaEnded"
+                                          MediaFailed="PlayerRear_MediaFailed"/>
+                            <!-- 右下の小さな三角グリップだけリサイズ専用（ドラッグ移動より手前で受け止める） -->
+                            <Rectangle x:Name="RearPipResizeGrip" Width="14" Height="14"
+                           HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                           Fill="{StaticResource TextAccentCyan}" Opacity="0.7"
+                           Cursor="SizeNWSE"
+                           MouseLeftButtonDown="RearPipResizeGrip_MouseLeftButtonDown"
+                           MouseMove="RearPipResizeGrip_MouseMove"
+                           MouseLeftButtonUp="RearPipResizeGrip_MouseLeftButtonUp"/>
+                        </Grid>
+                    </Border>
+                </Canvas>
             </Grid>
 
             <!-- 右サイドバー: 上段=日時・緯度経度（常時固定表示）、下段=走行軌跡マップ。
