@@ -261,6 +261,28 @@ namespace VerticalPlayer.Dashcam
 
         private void RefreshDrivesButton_Click(object sender, RoutedEventArgs e) => RefreshDriveList();
 
+        private void PairListButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (DriveCombo.SelectedItem is not DriveOrFolderOption option || option.IsBrowseOption || option.RootPath == null)
+            {
+                AppMessageBox.Show(Window.GetWindow(this), "先にドライブ/フォルダを選択してください。",
+                    "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Information, isDarkMode: true);
+                return;
+            }
+
+            var availableRear = _rearGroups
+                .Where(g => g.RearVideoPath != null)
+                .Select(g => Path.GetFileName(g.RearVideoPath)!)
+                .ToList();
+
+            //フォルダ文字列の取得箇所
+            var win = new DashcamPairListWindow(option.RootPath, DashcamFileScanner.FolderName(CurrentEventFolder), availableRear)
+            {
+                Owner = Window.GetWindow(this)
+            };
+            win.ShowDialog();
+        }
+
         private void RefreshDriveList()
         {
             string? selectedPath = (DriveCombo.SelectedItem as DriveOrFolderOption)?.RootPath;

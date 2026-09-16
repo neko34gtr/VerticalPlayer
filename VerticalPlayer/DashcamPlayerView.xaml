@@ -45,6 +45,8 @@
                           DisplayMemberPath="DisplayName" SelectionChanged="DriveCombo_SelectionChanged"/>
                 <Button x:Name="RefreshDrivesButton" Content="⟳" Width="28" Style="{StaticResource IconBtn}"
                         Click="RefreshDrivesButton_Click" ToolTip="ドライブ一覧を更新" Margin="0,0,16,0"/>
+                <Button x:Name="PairListButton" Content="ペア一覧" Style="{StaticResource SecondaryBtn}"
+                        Click="PairListButton_Click" ToolTip="SD_DBLIST.DBのFront/Rear組み合わせを確認・編集" Margin="0,0,16,0"/>
 
                 <CheckBox x:Name="RearLinkedCheck" Content="リア追従" IsChecked="True" Style="{StaticResource ModernCheck}"
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"

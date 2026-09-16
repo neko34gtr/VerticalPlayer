@@ -19,14 +19,19 @@ namespace VerticalPlayer.Dashcam
     /// <summary>
     /// [ROOT]/NORMAL/{Timestamp}_front.mp4 等のディレクトリ構造を走査し、
     /// Front/Rear動画とNMEAをタイムスタンプでペアリングする。
-    /// 実機のFront/Rearファイル名は完全に同一タイムスタンプにはならず、数秒（実測2〜3秒）
-    /// ズレて記録される仕様のため、ファイル名キーの完全一致ではなく、タイムスタンプの
-    /// 許容誤差内での最近傍マッチングでペアリングする。
+    /// 実機のFront/Rearファイル名は完全に同一タイムスタンプにはならず、記録が非連動のため
+    /// 数秒〜数十秒単位でズレることがある仕様のため、ファイル名キーの完全一致ではなく、
+    /// タイムスタンプの許容誤差内での最近傍マッチングでペアリングする。
+    ///
+    /// SDカードのファイル構造は書き込まれた後は基本的に変化しない(静的)ため、一度計算した
+    /// Front→Rearの組み合わせはDashcamPairDatabase(SD_DBLIST.DB)へ保存し、次回以降の同じ
+    /// ドライブ/フォルダのスキャンでは、DBに無い(＝新規追加された)Frontファイルだけを対象に
+    /// 最近傍探索を行う（既知のFrontは探索を省略し、DBの記録をそのまま使う）。
     /// </summary>
     public static class DashcamFileScanner
     {
         // Front/Rearのタイムスタンプが何秒までズレていれば同一録画とみなすか。
-        // 実機で確認できた最大ズレはいまのところ50秒程度のため、余裕を見て60秒とする
+        // 実機で確認できた最大ズレは50秒程度のため、余裕を見て60秒とする
         // （録画間隔は約2分あるため誤マッチのリスクは無い）。
         private const int PairToleranceSeconds = 60;
 
@@ -39,7 +44,7 @@ namespace VerticalPlayer.Dashcam
             new(@"(?<y>\d{4})(?<mo>\d{2})(?<d>\d{2})[_-]?(?<h>\d{2})(?<mi>\d{2})(?<s>\d{2})",
                 RegexOptions.Compiled);
 
-        private static string FolderName(DashcamEventFolder folder) => folder switch
+        public static string FolderName(DashcamEventFolder folder) => folder switch
         {
             DashcamEventFolder.Normal => "NORMAL",
             DashcamEventFolder.Manual => "MANUAL",
@@ -73,7 +78,7 @@ namespace VerticalPlayer.Dashcam
                     TryAddItem(items, path, isVideo: false);
             }
 
-            return PairItems(items);
+            return PairItems(items, rootDir, sub);
         }
 
         private sealed class ScannedItem
@@ -112,11 +117,32 @@ namespace VerticalPlayer.Dashcam
             });
         }
 
-        private static List<DashcamMediaGroup> PairItems(List<ScannedItem> items)
+        /// <summary>クラスタの代表ファイル名（DBのキーに使う。動画があれば動画、無ければNMEA）。</summary>
+        private static string GetPrimaryFileName(Cluster c)
+        {
+            var video = c.Items.FirstOrDefault(i => i.IsVideo);
+            string path = video?.Path ?? c.Items[0].Path;
+            return Path.GetFileName(path);
+        }
+
+        private static string? TryGetVolumeLabel(string driveRoot)
+        {
+            try
+            {
+                var di = new DriveInfo(driveRoot);
+                return di.IsReady ? di.VolumeLabel : null;
+            }
+            catch
+            {
+                return null; // ドライブレターでない任意フォルダパスの場合はここに来る（想定内）
+            }
+        }
+
+        private static List<DashcamMediaGroup> PairItems(List<ScannedItem> items, string driveRoot, string folderInfo)
         {
             // タイムスタンプが解析できた項目とできなかった項目を分ける。
             // 解析できなかった項目は最近傍マッチングができないため、従来通り
-            // ファイル名キーの完全一致でペアリングする（フォールバック）。
+            // ファイル名キーの完全一致でペアリングする（フォールバック。DB対象外）。
             var withTs = items.Where(i => i.Timestamp.HasValue).ToList();
             var withoutTs = items.Where(i => !i.Timestamp.HasValue).ToList();
 
@@ -127,25 +153,20 @@ namespace VerticalPlayer.Dashcam
             // この段階ではまだ完全一致でまとめてよい。
             var frontClusters = ClusterByKey(withTs.Where(i => i.IsFront));
             var rearClusters = ClusterByKey(withTs.Where(i => !i.IsFront));
-
-            // Frontを時刻順に並べ、それぞれ許容誤差内で最も時刻が近い未使用のRearを貪欲にマッチングする
             frontClusters.Sort((a, b) => DateTime.Compare(a.Timestamp, b.Timestamp));
-            var usedRear = new bool[rearClusters.Count];
+
+            var rearByFileName = new Dictionary<string, Cluster>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in rearClusters)
+                rearByFileName[GetPrimaryFileName(r)] = r;
+
+            string? volumeLabel = TryGetVolumeLabel(driveRoot);
+            var known = DashcamPairDatabase.LoadMapping(driveRoot, folderInfo);
+            var usedRearFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var newlyComputed = new List<(string front, string? rear)>();
 
             foreach (var front in frontClusters)
             {
-                int bestIdx = -1;
-                double bestDiffSec = double.MaxValue;
-                for (int i = 0; i < rearClusters.Count; i++)
-                {
-                    if (usedRear[i]) continue;
-                    double diffSec = Math.Abs((rearClusters[i].Timestamp - front.Timestamp).TotalSeconds);
-                    if (diffSec <= PairToleranceSeconds && diffSec < bestDiffSec)
-                    {
-                        bestDiffSec = diffSec;
-                        bestIdx = i;
-                    }
-                }
+                string frontFileName = GetPrimaryFileName(front);
 
                 var group = new DashcamMediaGroup
                 {
@@ -155,49 +176,89 @@ namespace VerticalPlayer.Dashcam
                 foreach (var item in front.Items)
                     ApplyItem(group, item);
 
-                if (bestIdx >= 0)
+                if (known.TryGetValue(frontFileName, out var knownRearFileName))
                 {
-                    usedRear[bestIdx] = true;
-                    foreach (var item in rearClusters[bestIdx].Items)
-                        ApplyItem(group, item);
-                    DashcamPlayErrorLogger.Log($"[Pair OK] Front={front.Key} Rear={rearClusters[bestIdx].Key} diff={bestDiffSec:F1}s");
+                    // DB既知: 記録済みのRearファイル名が今回のスキャンにも実在すればそのまま使う
+                    // （最近傍探索を省略）。knownがnull、またはファイルが実際には消えている場合は
+                    // Rear無しのまま（再探索はしない＝DBの当該行を消せば次回また探索される）。
+                    if (knownRearFileName != null
+                        && rearByFileName.TryGetValue(knownRearFileName, out var rearCluster)
+                        && !usedRearFileNames.Contains(knownRearFileName))
+                    {
+                        usedRearFileNames.Add(knownRearFileName);
+                        foreach (var item in rearCluster.Items)
+                            ApplyItem(group, item);
+                    }
                 }
                 else
                 {
-                    double closestAnyDiffSec = double.MaxValue;
-                    for (int i = 0; i < rearClusters.Count; i++)
+                    // DB未登録のFront（新規ファイル）だけ、従来通りタイムスタンプ最近傍で探索する
+                    Cluster? bestRear = null;
+                    double bestDiffSec = double.MaxValue;
+                    foreach (var r in rearClusters)
                     {
-                        if (usedRear[i]) continue;
-                        double d = Math.Abs((rearClusters[i].Timestamp - front.Timestamp).TotalSeconds);
-                        if (d < closestAnyDiffSec) closestAnyDiffSec = d;
+                        string rFileName = GetPrimaryFileName(r);
+                        if (usedRearFileNames.Contains(rFileName)) continue;
+                        double diffSec = Math.Abs((r.Timestamp - front.Timestamp).TotalSeconds);
+                        if (diffSec <= PairToleranceSeconds && diffSec < bestDiffSec)
+                        {
+                            bestDiffSec = diffSec;
+                            bestRear = r;
+                        }
                     }
-                    string detail = closestAnyDiffSec == double.MaxValue
-                        ? "候補となるRearが1件もありません"
-                        : $"最も近いRearとの差={closestAnyDiffSec:F1}s（許容誤差{PairToleranceSeconds}s超過）";
-                    DashcamPlayErrorLogger.Log($"[Pair NG] Front={front.Key} リアなし: {detail}");
+
+                    if (bestRear != null)
+                    {
+                        string bestRearFileName = GetPrimaryFileName(bestRear);
+                        usedRearFileNames.Add(bestRearFileName);
+                        foreach (var item in bestRear.Items)
+                            ApplyItem(group, item);
+                        newlyComputed.Add((frontFileName, bestRearFileName));
+                        DashcamPlayErrorLogger.Log($"[Pair OK] Front={front.Key} Rear={bestRear.Key} diff={bestDiffSec:F1}s");
+                    }
+                    else
+                    {
+                        double closestAnyDiffSec = double.MaxValue;
+                        foreach (var r in rearClusters)
+                        {
+                            string rFileName = GetPrimaryFileName(r);
+                            if (usedRearFileNames.Contains(rFileName)) continue;
+                            double d = Math.Abs((r.Timestamp - front.Timestamp).TotalSeconds);
+                            if (d < closestAnyDiffSec) closestAnyDiffSec = d;
+                        }
+                        string detail = closestAnyDiffSec == double.MaxValue
+                            ? "候補となるRearが1件もありません"
+                            : $"最も近いRearとの差={closestAnyDiffSec:F1}s（許容誤差{PairToleranceSeconds}s超過）";
+                        DashcamPlayErrorLogger.Log($"[Pair NG] Front={front.Key} リアなし: {detail}");
+                        newlyComputed.Add((frontFileName, null));
+                    }
                 }
 
                 groups.Add(group);
             }
 
+            if (newlyComputed.Count > 0)
+                DashcamPairDatabase.SaveMappingBatch(driveRoot, volumeLabel, folderInfo, newlyComputed);
+
             // どのFrontともマッチしなかったRear（Front無しの単独録画）もグループとして残す
-            for (int i = 0; i < rearClusters.Count; i++)
+            // （DBはFront軸のキー設計のため、こちらはDB非対象）
+            foreach (var r in rearClusters)
             {
-                if (usedRear[i]) continue;
-                var rear = rearClusters[i];
-                DashcamPlayErrorLogger.Log($"[Pair NG] Rear={rear.Key} に対応するFrontなし（単独扱い）");
+                string rFileName = GetPrimaryFileName(r);
+                if (usedRearFileNames.Contains(rFileName)) continue;
+                DashcamPlayErrorLogger.Log($"[Pair NG] Rear={r.Key} に対応するFrontなし（単独扱い）");
 
                 var group = new DashcamMediaGroup
                 {
-                    TimestampKey = rear.Key,
-                    Timestamp = rear.Timestamp
+                    TimestampKey = r.Key,
+                    Timestamp = r.Timestamp
                 };
-                foreach (var item in rear.Items)
+                foreach (var item in r.Items)
                     ApplyItem(group, item);
                 groups.Add(group);
             }
 
-            // タイムスタンプ解析不能な項目は、従来通りキー完全一致でペアリングする
+            // タイムスタンプ解析不能な項目は、従来通りキー完全一致でペアリングする（DB対象外）
             var fallback = new Dictionary<string, DashcamMediaGroup>(StringComparer.OrdinalIgnoreCase);
             foreach (var item in withoutTs)
             {
