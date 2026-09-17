@@ -502,19 +502,6 @@ namespace VerticalPlayer
             _dashcamWindowHeight = s.DashcamWindowHeight;
 
             // ── ドラレコモードのレジューム再生 ──
-            // 前回終了時にドラレコモードだった場合、モードごと・ドライブ・選択ファイル・
-            // 再生位置を復元する。ドライブが挿さっていない/該当ファイルが無い場合は
-            // TryResumeAsync側がfalseを返すだけで、通常モードのまま何も起きない。
-            if (s.DashcamWasActive)
-            {
-                EnterDashcamMode();
-                string? drivePath = s.DashcamLastDrivePath;
-                string? groupKey = s.DashcamLastGroupKey;
-                double pos = s.DashcamLastPosition;
-                string? eventFolder = s.DashcamLastEventFolder;
-                _ = DashcamView.TryResumeAsync(drivePath, groupKey, pos, eventFolder);
-            }
-            // ── ドラレコモードのレジューム再生 ──
             // 起動引数でフォルダが渡されている場合は、前回のドライブ・選択ファイル・再生位置の
             // 復元(レジューム経路)を完全にスキップし、渡されたフォルダを直接読み込む。
             // リア追従・リア表示・ズーム等のオプション/スイッチ類は、この上で既に
@@ -1402,11 +1389,13 @@ namespace VerticalPlayer
         private void Deinterlace_Changed(object sender, RoutedEventArgs e)
         {
             Player.Deinterlace = DeinterlaceCheck.IsChecked ?? false;
+            DashcamView.Deinterlace = DeinterlaceCheck.IsChecked ?? false; // ドラレコモード側のFront/Rearにも同じ設定を反映する
         }
 
         private void Denoise_Changed(object sender, RoutedEventArgs e)
         {
             Player.Denoise = DenoiseCheck.IsChecked ?? false;
+            DashcamView.Denoise = DenoiseCheck.IsChecked ?? false; // ドラレコモード側のFront/Rearにも同じ設定を反映する
 
             if (Player.Source != null)
             {
@@ -1431,6 +1420,7 @@ namespace VerticalPlayer
             // GPU Compute Shaderのみで完結する後段処理のため、デコードスレッドには一切触れない。
             // H/W・デノイズと違い再オープンは不要で、ライブに即時反映される。
             Player.DynamicContrast = DynamicContrastCheck.IsChecked ?? false;
+            DashcamView.DynamicContrast = DynamicContrastCheck.IsChecked ?? false; // ドラレコモード側のFront/Rearにも同じ設定を反映する
         }
 
         private async void SuperResolution_Changed(object sender, SelectionChangedEventArgs e)
@@ -1632,7 +1622,10 @@ namespace VerticalPlayer
         // fpsカウンタ表示
         // ─────────────────────────────────────────────────────────────────
         private void FpsCounter_Changed(object sender, RoutedEventArgs e)
-            => ActualFpsLabel.Visibility = (FpsCounterCheck.IsChecked == true) ? Visibility.Visible : Visibility.Collapsed;
+        {
+            ActualFpsLabel.Visibility = (FpsCounterCheck.IsChecked == true) ? Visibility.Visible : Visibility.Collapsed;
+            DashcamView.ShowFpsCounter = FpsCounterCheck.IsChecked == true; // ドラレコモード側にも同じ設定を反映する
+        }
 
         // ─────────────────────────────────────────────────────────────────
         // TensorRTキャッシュのバックアップ先

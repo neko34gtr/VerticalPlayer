@@ -59,6 +59,10 @@ namespace VerticalPlayer.Dashcam
         // 起動時レジューム用: MediaOpened後にシークすべき秒数（該当なければnull）
         private double? _pendingResumeSeconds;
 
+        // MediaInfoNativeでの詳細解析結果。MainWindow本体の_mediaInfoと同じ役割だが、
+        // ドラレコ側は音声がFrontのみのためFront基準でのみ解析する。
+        private MediaInfoNative? _mediaInfo;
+
         // レジューム処理中フラグ: 目的のドライブへ切り替わる前の一瞬だけ発生する空振りスキャンで
         // 「見つかりませんでした」警告を出さないようにするためのガード
         private bool _isResuming;
@@ -124,6 +128,53 @@ namespace VerticalPlayer.Dashcam
                 PlayerRear.HardwareAcceleration = value;
                 ReapplyDecodeModeToOpenFiles();
             }
+        }
+
+        /// <summary>ノイズリダクション。MainWindow本体のDenoiseCheckと共有する設定（AppSettings.Denoise）。
+        /// HW/SW切替と同じく再オープンでないと反映されないため、Reopenする。</summary>
+        public bool Denoise
+        {
+            get => PlayerFront.Denoise;
+            set
+            {
+                PlayerFront.Denoise = value;
+                PlayerRear.Denoise = value;
+                NdrStatusText.Text = value ? "NDR: ON" : "NDR: OFF";
+                ReapplyDecodeModeToOpenFiles();
+            }
+        }
+
+        /// <summary>ダイナミックコントラスト。MainWindow本体のDynamicContrastCheckと共有
+        /// する設定（AppSettings.DynamicContrast）。GPU後段処理のみのためライブ反映で再オープン不要。</summary>
+        public bool DynamicContrast
+        {
+            get => PlayerFront.DynamicContrast;
+            set
+            {
+                PlayerFront.DynamicContrast = value;
+                PlayerRear.DynamicContrast = value;
+                DcrStatusText.Text = value ? "DCR: ON" : "DCR: OFF";
+            }
+        }
+
+        /// <summary>デインターレース。MainWindow本体のDeinterlaceCheckと共有する設定。
+        /// MainWindow側もライブ反映（再オープンなし）のためこちらも合わせる。</summary>
+        public bool Deinterlace
+        {
+            get => PlayerFront.Deinterlace;
+            set
+            {
+                PlayerFront.Deinterlace = value;
+                PlayerRear.Deinterlace = value;
+                DeintStatusText.Text = value ? "De-int: ON" : "De-int: OFF";
+            }
+        }
+
+        /// <summary>fpsカウンタ表示。MainWindow本体のFpsCounterCheck(AppSettings.ShowFpsCounter)と共有。</summary>
+        public bool ShowFpsCounter
+        {
+            get => FpsText.Visibility == Visibility.Visible;
+            set => FpsText.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private void ReapplyDecodeModeToOpenFiles()
@@ -631,6 +682,10 @@ namespace VerticalPlayer.Dashcam
             _consecutiveFrontFailures = 0;
             PlayerFront.ResetDnnEngineForNewFile();
 
+            // 動画詳細情報の取得と表示（MainWindow.Player_MediaOpenedと同じ仕組み）
+            if (PlayerFront.Source?.LocalPath != null)
+                AnalyzeAndShowMediaInfo(PlayerFront.Source.LocalPath);
+
             var duration = PlayerFront.NaturalDuration.HasTimeSpan
                 ? PlayerFront.NaturalDuration.TimeSpan
                 : TimeSpan.Zero;
@@ -682,6 +737,57 @@ namespace VerticalPlayer.Dashcam
                 _ = RefreshMapBufferAsync(_currentFrontGroup);
 
             SchedulePrefetchIfNeeded();
+        }
+
+        // MediaInfoNative で詳細解析。MainWindow.AnalyzeAndShowMediaInfoと同じ仕組み。
+        // 音声はFrontのみのため、Front基準でのみ解析する。
+        private void AnalyzeAndShowMediaInfo(string path)
+        {
+            try
+            {
+                var mi = new MediaInfoNative(path);
+                if (!mi.Success)
+                {
+                    DashcamPlayErrorLogger.Log($"[MediaInfo] failed for {path}");
+                    _mediaInfo?.Dispose();
+                    _mediaInfo = null;
+                    UpdateCodecStatusBar();
+                    return;
+                }
+
+                _mediaInfo?.Dispose();
+                _mediaInfo = mi;
+                UpdateCodecStatusBar();
+            }
+            catch (Exception ex)
+            {
+                DashcamPlayErrorLogger.Log($"[MediaInfo] EXCEPTION: {ex.Message}");
+            }
+        }
+
+        // コントロールバーにMainWindow本体と同じコーデック略称を表示する。
+        // AnalyzeAndShowMediaInfoの解析が終わるたびに呼ばれる。
+        private void UpdateCodecStatusBar()
+        {
+            if (_mediaInfo == null || !_mediaInfo.Success)
+            {
+                VideoCodecLabel.Text = "";
+                AudioCodecLabel.Text = "";
+                AudioChannelLabel.Text = "";
+                return;
+            }
+
+            VideoCodecLabel.Text = _mediaInfo.VideoCodec ?? "";
+            AudioCodecLabel.Text = _mediaInfo.AudioCodec ?? "";
+            int ch = _mediaInfo.AudioChannelCount;
+            AudioChannelLabel.Text = ch switch
+            {
+                1 => "1.0",
+                2 => "2.0",
+                6 => "5.1",
+                8 => "7.1",
+                _ => ch > 0 ? $"{ch}ch" : ""
+            };
         }
 
         private void PlayerRear_MediaOpened(object sender, RoutedEventArgs e)
