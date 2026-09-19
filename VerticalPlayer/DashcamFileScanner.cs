@@ -229,7 +229,7 @@ namespace VerticalPlayer.Dashcam
                         string detail = closestAnyDiffSec == double.MaxValue
                             ? "候補となるRearが1件もありません"
                             : $"最も近いRearとの差={closestAnyDiffSec:F1}s（許容誤差{PairToleranceSeconds}s超過）";
-                        DashcamPlayErrorLogger.Log($"[Pair NG] Front={front.Key} リアなし: {detail}");
+                        //DashcamPlayErrorLogger.Log($"[Pair NG] Front={front.Key} リアなし: {detail}");
                         newlyComputed.Add((frontFileName, null));
                     }
                 }
@@ -246,7 +246,7 @@ namespace VerticalPlayer.Dashcam
             {
                 string rFileName = GetPrimaryFileName(r);
                 if (usedRearFileNames.Contains(rFileName)) continue;
-                DashcamPlayErrorLogger.Log($"[Pair NG] Rear={r.Key} に対応するFrontなし（単独扱い）");
+                //DashcamPlayErrorLogger.Log($"[Pair NG] Rear={r.Key} に対応するFrontなし（単独扱い）");
 
                 var group = new DashcamMediaGroup
                 {

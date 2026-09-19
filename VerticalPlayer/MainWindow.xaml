@@ -1032,6 +1032,9 @@
                                     <CheckBox x:Name="AutoPlayNextCheck" Content="次ファイル自動再生"
                                               Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
                                               Checked="AutoPlayNext_Changed" Unchecked="AutoPlayNext_Changed"/>
+                                    <CheckBox x:Name="DisableAutoResumeCheck" Content="起動時のレジューム自動再生を無効化"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
+                                              Checked="DisableAutoResume_Changed" Unchecked="DisableAutoResume_Changed"/>
                                     <CheckBox x:Name="FpsCounterCheck" Content="fpsカウンタ表示"
                                               Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
                                               Checked="FpsCounter_Changed" Unchecked="FpsCounter_Changed"/>

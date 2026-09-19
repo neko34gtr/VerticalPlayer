@@ -35,16 +35,20 @@ namespace VerticalPlayer.Media
     /// <summary>
     /// System.Windows.Controls.MediaElement とほぼ同じ表面API（Source/Volume/SpeedRatio/Position/
     /// NaturalDuration/NaturalVideoWidth/NaturalVideoHeight/LoadedBehavior/Play/Pause/Stop/
-    /// MediaOpened/MediaEnded/MediaFailed）を持つ、FFmpeg.AutoGen(映像) + MediaElement(音声) の
-    /// ハイブリッド構成コントロール。
+    /// MediaOpened/MediaEnded/MediaFailed）を持つ、FFmpeg.AutoGenによる映像・音声フル自前デコード
+    /// コントロール。
     ///
-    /// 【設計】
-    /// - 表示される映像：FFmpeg.AutoGenでデコードした frame を WriteableBitmap に描画（AVEngine）。
-    /// - 音声・シーク・速度制御・マスタークロック：非表示の System.Windows.Controls.MediaElement
-    ///   （_audio、Visibility=Collapsed）をそのまま流用。実績のあるMediaElementの音声パイプラインを
-    ///   信頼し、自前の音声デコード/NAudio同期は行わない（破綻リスクが高いため撤去）。
-    /// - _audio.Position を約50msごとにポーリングして AVEngine.SetExternalClock() へ渡し、
-    ///   映像フレームの表示タイミングをそれに追従させる（早ければ待つ、40ms以上遅れたら間引く）。
+    /// 【設計・経緯】
+    /// - 従来は映像をAVEngine（FFmpeg.AutoGen）、音声を非表示の System.Windows.Controls.MediaElement
+    ///   （_audio）という「同じファイルを別々に開く」ハイブリッド構成だった。この二重オープンが
+    ///   SDカード等の低速メディアでI/O競合を起こし、「起動直後の数百ms〜数秒、音声が出ずマスター
+    ///   クロックが進まないため映像もカクつく」不具合の根本原因だった（2026年trace.log解析で特定）。
+    /// - 対応として、AVEngine自身が音声ストリームもデコードし、IAudioOutput（現在はVortice.XAudio2
+    ///   実装）へ直接出力する構成に変更した。_audioは廃止し、同じファイルを開くのはAVEngine一本だけ
+    ///   になった。マスタークロックはAVEngine内部でXAudio2の実再生位置（SamplesPlayed）から
+    ///   直接算出するため、本クラス側からの外部クロック push（旧SetExternalClockポーリング）も不要。
+    /// - Position/Volume/SpeedRatioはAVEngineへの薄い委譲となり、Positionの即時性（Seek直後の
+    ///   シークバー表示等）のためだけにローカルにも値をキャッシュする。
     ///
     /// 内部の映像表示は Image(+WriteableBitmap) のみで完結しているため、WPFのLayoutTransform/
     /// RenderTransform（既存のPlayerRotation等）はそのまま従来通り効く。ネイティブ子ウィンドウを
@@ -60,17 +64,6 @@ namespace VerticalPlayer.Media
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center
         };
-        private readonly MediaElement _audio = new()
-        {
-            LoadedBehavior = MediaState.Manual,
-            Visibility = Visibility.Collapsed,
-            Width = 0,
-            Height = 0
-        };
-        //private readonly DispatcherTimer _clockTimer = new(DispatcherPriority.Send)
-        //{
-        //    Interval = TimeSpan.FromMilliseconds(50)
-        //};
 
         private readonly AVEngine _engine;
         private readonly GpuFramePresenter _gpuPresenter = new();
@@ -84,6 +77,11 @@ namespace VerticalPlayer.Media
         public bool IsGpuPresenterAvailable => _gpuPresenter.IsAvailable;
         private Uri? _source;
         private bool _isPlaying;
+        private double _volume = 1.0;
+        private double _speedRatio = 1.0;
+        // Position取得の即時性のためのローカルキャッシュ。Seek直後はここへ即座に楽観値を入れ、
+        // 通常再生中はOnRenderingで毎フレームAVEngineの実クロックへ追従させる。
+        private double _positionSeconds;
 
         public static readonly RoutedEvent MediaOpenedEvent = EventManager.RegisterRoutedEvent(
             nameof(MediaOpened), RoutingStrategy.Bubble, typeof(RoutedEventHandler), typeof(FfmpegMediaElement));
@@ -291,6 +289,12 @@ namespace VerticalPlayer.Media
             set { _aspectMode = value; RecomputeLayout(); }
         }
 
+        /// <summary>falseにすると、以後のSource設定でAVEngineが音声ストリームを一切開かず
+        /// XAudio2エンジンも作成しない。サムネイル生成専用インスタンス等、音声が最初から
+        /// 不要な用途向け（Sourceを高頻度で切り替える場合、毎回フルの音声エンジンを
+        /// 作って捨てるのは無駄が大きく、負荷の原因にもなるため）。既定はtrue。</summary>
+        public bool AudioEnabled { get; set; } = true;
+
         public Uri? Source
         {
             get => _source;
@@ -299,12 +303,11 @@ namespace VerticalPlayer.Media
                 _source = value;
                 if (value != null)
                 {
-                    _audio.Source = value;
-                    _engine.Open(value);
+                    _positionSeconds = 0;
+                    _engine.Open(value, AudioEnabled);
                 }
                 else
                 {
-                    _audio.Source = null;
                     _engine.Stop();
                 }
             }
@@ -314,28 +317,31 @@ namespace VerticalPlayer.Media
 
         public double Volume
         {
-            get => _audio.Volume;
-            set => _audio.Volume = value;
+            get => _volume;
+            set
+            {
+                _volume = value;
+                _engine.SetVolume(value);
+            }
         }
 
         public double SpeedRatio
         {
-            get => _audio.SpeedRatio;
+            get => _speedRatio;
             set
             {
-                _audio.SpeedRatio = value;
+                _speedRatio = value;
                 _engine.SetSpeedRatio(value);
             }
         }
 
         public TimeSpan Position
         {
-            get => _audio.Position;
+            get => TimeSpan.FromSeconds(_positionSeconds);
             set
             {
-                _audio.Position = value;
+                _positionSeconds = value.TotalSeconds; // Seek完了を待たずシークバー等へ即時反映する楽観値
                 _engine.Seek(value);
-                _engine.SetExternalClock(value.TotalSeconds, _isPlaying);
             }
         }
 
@@ -352,15 +358,12 @@ namespace VerticalPlayer.Media
         public FfmpegMediaElement()
         {
             _root.Children.Add(_image);
-            _root.Children.Add(_audio);
             Child = _root;
 
             _engine = new AVEngine(Dispatcher);
             _engine.Opened += OnEngineOpened;
             _engine.Failed += OnEngineFailed;
-
-            _audio.MediaEnded += (s, e) => RaiseEvent(new RoutedEventArgs(MediaEndedEvent, this));
-            _audio.MediaFailed += (s, e) => RaiseEvent(new FfmpegMediaFailedEventArgs(MediaFailedEvent, this, e.ErrorException));
+            _engine.EndOfStream += () => RaiseEvent(new RoutedEventArgs(MediaEndedEvent, this));
 
             CompositionTarget.Rendering += OnRendering;
 
@@ -375,7 +378,10 @@ namespace VerticalPlayer.Media
             if (!_isPlaying) return;
             try
             {
-                _engine.SetExternalClock(_audio.Position.TotalSeconds, _isPlaying);
+                // 従来は_audio.PositionをAVEngineへpushしていたが、AVEngine自身がXAudio2の実再生
+                // 位置から内部でマスタークロックを算出するようになったため、ここではUI表示用に
+                // pullするだけでよい（push不要）。
+                _positionSeconds = _engine.GetCurrentPositionSeconds();
             }
             catch { }
         }
@@ -395,10 +401,10 @@ namespace VerticalPlayer.Media
                 _gpuPresenter.SetSuperResolution(1f);
 
             // デコード準備が実際に整ったこの時点でクロックを再アンカーする。
-            // Source設定直後にPosition/Playが呼ばれた場合、デコード開始が間に合わず
-            // マスタークロックだけ先に進んでしまい、シーク直後に大量フレームドロップが
-            // 起きる問題への対策。
-            _engine.SetExternalClock(_audio.Position.TotalSeconds, _isPlaying);
+            // Open()時点で_extBaseSeconds=0/_extPlaying=falseに既にリセットされており、
+            // 再生開始（Play）は音声デバイスの実位置から改めてAVEngine内部で再アンカーされる
+            // ため、ここで外部から値を渡す必要はない（従来は_audio.Positionを読んでいたが
+            // _audio自体が無くなったため撤去）。
             RaiseEvent(new RoutedEventArgs(MediaOpenedEvent, this));
             RecomputeLayout();
         }
@@ -521,35 +527,31 @@ namespace VerticalPlayer.Media
         public void Play()
         {
             _isPlaying = true;
-            _audio.Play();
+            Trace("[DIAG] Play() called");
             _engine.Play();
-            _engine.SetExternalClock(_audio.Position.TotalSeconds, true);
         }
 
         public void Pause()
         {
             _isPlaying = false;
-            _audio.Pause();
             _engine.Pause();
-            _engine.SetExternalClock(_audio.Position.TotalSeconds, false);
         }
 
         public void Stop()
         {
             _isPlaying = false;
-            _audio.Stop();
             _engine.Stop();
             NaturalDuration = Duration.Automatic;
             NaturalVideoWidth = 0;
             NaturalVideoHeight = 0;
         }
 
-        /// <summary>コマ送り/戻し専用。音声の再生（Play/Pause）には一切触れず、
+        /// <summary>コマ送り/戻し専用。音声の再生には一切触れず、
         /// 映像デコードだけを指定位置へシークして1フレーム表示する。
-        /// 音声再生を伴わないため、これまでの「シーク直後に音声が実時間で進み続け
-        /// クロックの目標が逃げる」系の不具合を構造的に回避できる。
-        /// Position（_audio.Position）はシークバー/時刻表示の整合のためだけに更新し、
-        /// 実際の音の再生は行わない（Pause状態のまま位置だけ動かす）。</summary>
+        /// AVEngine.Play(withAudio: false)により、Seek()自体が持つ「キャッチアップ完了まで
+        /// クロックを凍結する」仕組みだけで動く（音声再生を伴わないため、これまでの
+        /// 「シーク直後に音声が実時間で進み続けクロックの目標が逃げる」系の不具合を
+        /// 構造的に回避できる）。</summary>
         public async Task<bool> StepToVideoOnlyAsync(TimeSpan target, int timeoutMs = 500)
         {
             var tcs = new TaskCompletionSource<bool>();
@@ -561,10 +563,9 @@ namespace VerticalPlayer.Media
             _engine.FrameDisplayed += OnFrame;
             try
             {
-                _audio.Position = target; // 音は出さず位置だけ合わせる
-                _engine.SetExternalClock(targetSec, false);
+                _positionSeconds = targetSec; // シークバー/時刻表示の整合のためだけ
                 _engine.Seek(target);
-                _engine.Play(); // 映像デコードのみ再開（_audio.Play()は呼ばない）
+                _engine.Play(withAudio: false); // 映像デコードのみ再開
                 var completed = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
                 return completed == tcs.Task;
             }
@@ -578,7 +579,7 @@ namespace VerticalPlayer.Media
         /// <summary>シークバードラッグ中の軽量プレビュー専用。目標フレームへの正確な追いつきは
         /// 行わず、直近のキーフレームへ即シークしてそのまま最初の1枚を表示する
         /// （低遅延優先、精度は犠牲）。ドラッグ終了時はStepToVideoOnlyAsyncで正確な1枚に
-        /// 合わせ直すこと。StepToVideoOnlyAsyncと同様、音声のPlay/Pauseには一切触れない。</summary>
+        /// 合わせ直すこと。StepToVideoOnlyAsyncと同様、音声再生には一切触れない。</summary>
         public async Task FastSeekPreviewAsync(TimeSpan target, int timeoutMs = 300)
         {
             var tcs = new TaskCompletionSource<bool>();
@@ -586,11 +587,10 @@ namespace VerticalPlayer.Media
             _engine.FrameDisplayed += OnFrame;
             try
             {
-                _audio.Position = target; // シークバー/時刻表示の整合のためだけ
+                _positionSeconds = target.TotalSeconds; // シークバー/時刻表示の整合のためだけ
                 _engine.FastSeekPreview = true;
-                _engine.SetExternalClock(target.TotalSeconds, false);
                 _engine.Seek(target);
-                _engine.Play();
+                _engine.Play(withAudio: false);
                 await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
             }
             finally

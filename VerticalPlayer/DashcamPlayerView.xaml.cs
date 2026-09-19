@@ -243,6 +243,11 @@ namespace VerticalPlayer.Dashcam
             PlayerFront.PacketPrefetch = true;
             PlayerRear.PacketPrefetch = true;
 
+            // サムネイル生成専用（音は絶対に鳴らさない）。Source切り替えのたびにフルの
+            // XAudio2エンジンを作って捨てるのは無駄が大きく、ファイル一覧を高速に舐める
+            // サムネイル生成では短時間に何十回も発生するため、音声エンジン自体を作らせない。
+            ThumbCapturePlayer.AudioEnabled = false;
+
             // ハードウェアデコード(D3D11VA、非対応/失敗時は自動でSWへフォールバック)・
             // ノイズリダクション・ダイナミックコントラストも、MainWindow本体の既定(true)に
             // 合わせてドラレコ側でも既定ONにする。デインターレースはMainWindow本体と同じく
@@ -281,7 +286,24 @@ namespace VerticalPlayer.Dashcam
             _syncTimer.Start();
         }
 
-        private void DashcamPlayerView_Loaded(object sender, RoutedEventArgs e) => RefreshDriveList();
+        private void DashcamPlayerView_Loaded(object sender, RoutedEventArgs e)
+        {
+            // 初回Loaded時点ではRestoreSettings側のレジューム(TryResumeAsync)/起動引数の
+            // フォルダ直接読み込みがまだ完了していない場合がある。この状態でRefreshDriveList()が
+            // 先頭ドライブ（C:等、通常は録画データが無い）を自動選択してスキャンしてしまうと、
+            // 後から正しいドライブへ選び直されても「対応する動画が見つかりませんでした」警告が
+            // 誤って一瞬表示される（通常の動画ファイル引数起動でこのダイアログが出る不具合の原因）。
+            // レジューム処理中と同じ扱いにして、この自動選択によるスキャンでは警告を出さない。
+            _isResuming = true;
+            try
+            {
+                RefreshDriveList();
+            }
+            finally
+            {
+                _isResuming = false;
+            }
+        }
 
         // ---- 左サイドバー: マウスオーバーで展開 ----
 

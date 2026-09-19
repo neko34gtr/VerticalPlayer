@@ -12,6 +12,7 @@ using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using VerticalPlayer; // IAudioOutput / XAudio2AudioOutput
 
 namespace VerticalPlayer.Media
 {
@@ -37,13 +38,34 @@ namespace VerticalPlayer.Media
         public event Action<List<double>>? ChaptersLoaded;
         /// <summary>1フレームが実際にWritePixelsされた直後、そのフレームの再生時刻(秒)を伴って発火。UIスレッドで発火。</summary>
         public event Action<double>? FrameDisplayed;
+        /// <summary>ファイル終端まで再生し終えたことを通知（UIスレッドで発火）。従来 _audio.MediaEnded
+        /// が担っていた役割を、音声も含めて自前でデコードするようになった本クラス側で肩代わりする。</summary>
+        public event Action? EndOfStream;
 
         private readonly Dispatcher _ui;
         private int _generation;
 
+        // ── 音声出力（IAudioOutput経由）。従来は上位のFfmpegMediaElementが同じファイルを
+        // WPF MediaElementで別途開いて音声再生していたが、SDカード等でのI/O競合が起動直後の
+        // 無音・カクつきの根本原因だったため、AVEngine自身が音声もデコードしてここへ直接出力する。
+        // 現在はXAudio2AudioOutput固定だが、将来WASAPI実装に差し替えられるようIAudioOutput
+        // 経由でのみ扱う。出力フォーマットは常に48kHz/stereo/Float32に固定し、swresampleで
+        // 変換する（デバイス側の対応フォーマットを気にしなくてよいようにするため）。
+        private const int AudioOutSampleRate = 48000;
+        private const int AudioOutChannels = 2;
+
         private Thread? _decodeThread;
         private volatile bool _paused = true;
+        private volatile bool _audioDesired = true; // false時はPlay()中でも音声を出さない（コマ送り/プレビュー用）
+        private double _volume = 1.0;
         private double _speedRatio = 1.0;
+        /// <summary>音声ストリームの最初のフレームの実pts（秒）。AAC等はエンコーダ遅延で
+        /// 最初のフレームのptsが0でないことがあり、これを無視して「最初に送ったサンプル=
+        /// コンテンツ時刻0」として扱うと、音声だけ最初からその分オフセットしたまま
+        /// 1倍速で進み続ける（内部クロックの整合性チェックには出ない、コンテンツそのものの
+        /// ズレ）。AudioDecodeLoopが(再)開始時に最初のフレームのptsをここへ書き込み、
+        /// メインループの再アンカー時にaudioOutput.GetPositionSeconds()へ加算する。</summary>
+        private double _audioContentOffsetSeconds;
 
         /// <summary>次にOpen()する際にハードウェアデコードを試みるかどうか。</summary>
         public bool HardwareAccelRequested { get; set; }
@@ -68,6 +90,11 @@ namespace VerticalPlayer.Media
         /// <summary>Demuxスレッドが_demuxInterruptFlagを検知し、av_read_frame/av_seek_frame
         /// を同時に叩かない安全な待機状態に入ったことをメインスレッドへ知らせる確認応答。</summary>
         private volatile int _demuxAcked;
+
+        /// <summary>Seek時、AudioDecodeLoopがactx（AVCodecContext*）へ同時アクセスしないよう
+        /// 一時停止させるためのハンドシェイク。仕組みは_demuxInterruptFlag/_demuxAckedと同じ。</summary>
+        private volatile int _audioSeekInterruptFlag;
+        private volatile int _audioSeekAcked;
 
         /// <summary>Demuxスレッドが積んだ1パケット分のラッパー。AVPacket*はジェネリック型
         /// 引数に使えないためIntPtrで保持する。</summary>
@@ -371,6 +398,14 @@ namespace VerticalPlayer.Media
 
         public void SetSpeedRatio(double ratio) => _speedRatio = Math.Clamp(ratio, 0.1, 4.0);
 
+        /// <summary>音量 0.0〜1.0。実際の反映はデコードスレッド側で毎ループIAudioOutputへ適用する
+        /// （IAudioOutputインスタンスはデコードスレッドのローカル変数のため、ここでは値の保持のみ）。</summary>
+        public void SetVolume(double volume) => _volume = Math.Clamp(volume, 0.0, 1.0);
+
+        /// <summary>現在のマスタークロック秒数を外部（FfmpegMediaElement）へ公開する。
+        /// シークバー表示等、UIスレッドからの参照用。</summary>
+        public double GetCurrentPositionSeconds() => GetMasterClockSec();
+
         public void SetEffects(double contrast, double saturation, double gamma)
         {
             _contrast = Math.Clamp(contrast, -1, 1);
@@ -412,12 +447,17 @@ namespace VerticalPlayer.Media
         // ─────────────────────────────────────────────────────────────
         // Open / Stop
         // ─────────────────────────────────────────────────────────────
-        public void Open(Uri source)
+        /// <summary>wantAudio=falseの場合、音声ストリームを一切開かず、XAudio2エンジンも
+        /// 作成しない（サムネイル生成用の専用プレイヤー等、音声が最初から不要な用途向け。
+        /// Source設定のたびに毎回フルのXAudio2エンジンを作って捨てるのは無駄が大きく、
+        /// 短時間に大量オープンする用途では負荷の原因にもなるため）。</summary>
+        public void Open(Uri source, bool wantAudio = true)
         {
             Stop();
 
             int myGen = Interlocked.Increment(ref _generation);
             _paused = true;
+            _audioDesired = true;
             _extBaseSeconds = 0;
             _extClock.Restart();
             _extPlaying = false;
@@ -427,7 +467,7 @@ namespace VerticalPlayer.Media
             bool wantHw = HardwareAccelRequested;
             bool wantDenoise = DenoiseRequested;
             bool wantPrefetch = PrefetchEnabled;
-            var t = new Thread(() => OpenAndRun(source.LocalPath, myGen, wantHw, wantDenoise, wantPrefetch))
+            var t = new Thread(() => OpenAndRun(source.LocalPath, myGen, wantHw, wantDenoise, wantPrefetch, wantAudio))
             {
                 IsBackground = true,
                 Name = "AVEngine-VideoDecode"
@@ -458,9 +498,13 @@ namespace VerticalPlayer.Media
             }
         }
 
-        public void Play()
+        /// <summary>withAudio=falseの場合、映像デコードは再開するが音声は一切出さない
+        /// （コマ送り/シークバードラッグ中のプレビュー専用。FfmpegMediaElement.StepToVideoOnlyAsync/
+        /// FastSeekPreviewAsyncから使われる）。</summary>
+        public void Play(bool withAudio = true)
         {
-            Trace("AVEngine.Play() paused=false");
+            Trace($"AVEngine.Play() paused=false withAudio={withAudio}");
+            _audioDesired = withAudio;
             _paused = false;
         }
 
@@ -504,7 +548,7 @@ namespace VerticalPlayer.Media
         // ─────────────────────────────────────────────────────────────
         // デコードスレッド本体（映像のみ）
         // ─────────────────────────────────────────────────────────────
-        private void OpenAndRun(string path, int myGen, bool wantHw, bool wantDenoise, bool wantPrefetch)
+        private void OpenAndRun(string path, int myGen, bool wantHw, bool wantDenoise, bool wantPrefetch, bool wantAudio = true)
         {
             AVFormatContext* fmt = null;
             AVCodecContext* vctx = null;
@@ -518,6 +562,26 @@ namespace VerticalPlayer.Media
             AVFrame* swFrame = null;
             AVFrame* rgbFrame = null;
             byte* rgbBuffer = null;
+
+            // ── 音声デコード（今回追加）──
+            // 音声トラックが無い/オープンに失敗した場合でも致命的エラーにはせず、
+            // 音声無しの映像として通常通り再生を続ける（actx/swr/audioOutputがnullのまま）。
+            // 【今回修正】当初は映像デコードと同じループ内で音声パケットも処理していたが、
+            // 映像側の待機（Thread.Sleep、最大200ms/フレーム）と同じスレッドを共有するため、
+            // 映像が待っている間は音声パケットが一切処理されずXAudio2側のバッファが枯渇し、
+            // 「無音→映像1コマ進む→音がまとめて鳴る」を繰り返す不具合になっていた。
+            // 音声デコード＋swresample＋IAudioOutput送出は専用スレッド（AudioDecodeLoop）に
+            // 分離し、映像の待機処理と完全に非同期で回す。
+            AVCodecContext* actx = null;
+            SwrContext* swr = null;
+            int audioIdx = -1;
+            AVFrame* audioFrame = null;
+            IAudioOutput? audioOutput = null;
+            bool audioRunning = false; // Start()/Pause()の二重呼び出し防止用ローカルフラグ
+            double lastAnchoredAudioPos = double.NaN; // 音声位置が変化した時だけ再アンカーするための直近値
+            Channel<DemuxedPacket>? audioPktChannel = null;
+            Thread? audioDecodeThread = null;
+            bool audioDecodeJoinedCleanly = true;
 
             // ── Stage1: パケット先読み（wantPrefetch時のみ使用） ──
             int[] interruptFlagArr = new int[1]; // pin留めしてネイティブへポインタを渡す
@@ -535,6 +599,30 @@ namespace VerticalPlayer.Media
             AVFilterContext* bufferSinkCtx = null;
             int filterW = -1, filterH = -1;
             AVPixelFormat filterFmt = AVPixelFormat.AV_PIX_FMT_NONE;
+
+            void PauseAudioDecodeForSeek()
+            {
+                if (actx == null || audioDecodeThread == null) return;
+                _audioSeekInterruptFlag = 1;
+                var ackSw = Stopwatch.StartNew();
+                while (_audioSeekAcked == 0 && audioDecodeThread.IsAlive && ackSw.ElapsedMilliseconds < 2000)
+                    Thread.Sleep(1);
+                if (_audioSeekAcked == 0)
+                    Trace($"Seek: AudioDecodeThreadが応答しないため音声flushを断念（映像優先で続行）");
+            }
+
+            void ResumeAudioDecodeAfterSeek()
+            {
+                if (audioPktChannel != null)
+                {
+                    while (audioPktChannel.Reader.TryRead(out var staleA))
+                    {
+                        var sap = (AVPacket*)staleA.PktPtr;
+                        if (sap != null) ffmpeg.av_packet_free(&sap);
+                    }
+                }
+                _audioSeekInterruptFlag = 0;
+            }
 
             void FreeDenoiseFilter()
             {
@@ -650,6 +738,92 @@ namespace VerticalPlayer.Media
 
                 Trace($"Opened(gen={myGen}): {path} {w}x{h} dur={duration} mode={modeLabel}");
 
+                // ── 音声ストリームのオープン（今回追加）──
+                // 映像と同じfmtから音声の最適ストリームを探す。失敗しても致命的にはしない。
+                // wantAudio=falseの場合はこのブロック自体を丸ごとスキップする
+                // （サムネイル生成用プレイヤー等、音声が最初から不要な用途でXAudio2エンジンを
+                // 作らずに済ませるため。audioIdxは-1のままとなり、Demux側もvideoIdxのみ拾う）。
+                if (wantAudio)
+                {
+                    try
+                    {
+                        AVCodec* acodec = null;
+                        audioIdx = ffmpeg.av_find_best_stream(fmt, AVMediaType.AVMEDIA_TYPE_AUDIO, -1, videoIdx, &acodec, 0);
+                        if (audioIdx >= 0 && acodec != null)
+                        {
+                            actx = ffmpeg.avcodec_alloc_context3(acodec);
+                            ffmpeg.avcodec_parameters_to_context(actx, fmt->streams[audioIdx]->codecpar);
+                            if (ffmpeg.avcodec_open2(actx, acodec, null) == 0)
+                            {
+                                swr = ffmpeg.swr_alloc();
+                                AVChannelLayout inLayout = actx->ch_layout;
+                                AVChannelLayout outLayout;
+                                ffmpeg.av_channel_layout_default(&outLayout, AudioOutChannels);
+                                var swrLocal = swr;
+                                int swrRet = ffmpeg.swr_alloc_set_opts2(&swrLocal, &outLayout, AVSampleFormat.AV_SAMPLE_FMT_FLT,
+                                    AudioOutSampleRate, &inLayout, actx->sample_fmt, actx->sample_rate, 0, null);
+                                swr = swrLocal;
+                                if (swrRet == 0 && swr != null && ffmpeg.swr_init(swr) == 0)
+                                {
+                                    audioFrame = ffmpeg.av_frame_alloc();
+                                    audioOutput = new XAudio2AudioOutput();
+                                    audioOutput.Open(AudioOutSampleRate, AudioOutChannels);
+                                    Trace($"Audio(gen={myGen}): opened idx={audioIdx} srcRate={actx->sample_rate} -> {AudioOutSampleRate}Hz/{AudioOutChannels}ch");
+
+                                    // 音声パケットは専用チャンネル経由で専用スレッドへ渡す（映像の
+                                    // 待機処理と非同期化するため）。書き込みはこのOpenAndRunスレッド
+                                    // のみ（prefetch有無どちらの経路でも、パケット取り出し自体は
+                                    // このスレッドで行うため SingleWriter=true でよい）。
+                                    audioPktChannel = Channel.CreateBounded<DemuxedPacket>(new BoundedChannelOptions(256)
+                                    {
+                                        FullMode = BoundedChannelFullMode.Wait,
+                                        SingleReader = true,
+                                        SingleWriter = true,
+                                    });
+                                    var adActx = actx;
+                                    var adSwr = swr;
+                                    var adFrame = audioFrame;
+                                    var adOutput = audioOutput;
+                                    var adChannel = audioPktChannel;
+                                    double adTimeBase = ffmpeg.av_q2d(fmt->streams[audioIdx]->time_base);
+                                    _audioContentOffsetSeconds = 0;
+                                    _audioSeekInterruptFlag = 0;
+                                    _audioSeekAcked = 0;
+                                    audioDecodeThread = new Thread(() => AudioDecodeLoop(adActx, adSwr, adFrame, adOutput, adChannel, myGen, adTimeBase))
+                                    {
+                                        IsBackground = true,
+                                        Name = "AVEngine-AudioDecode"
+                                    };
+                                    audioDecodeThread.Start();
+                                }
+                                else
+                                {
+                                    Trace($"Audio(gen={myGen}): swr_alloc_set_opts2/swr_init failed ({swrRet}) - 音声無しで続行");
+                                    if (swr != null) { var s2 = swr; ffmpeg.swr_free(&s2); swr = null; }
+                                }
+                            }
+                            else
+                            {
+                                Trace($"Audio(gen={myGen}): avcodec_open2 failed - 音声無しで続行");
+                                if (actx != null) { var a2 = actx; ffmpeg.avcodec_free_context(&a2); actx = null; }
+                            }
+                        }
+                        else
+                        {
+                            Trace($"Audio(gen={myGen}): 音声ストリーム無し");
+                        }
+                    }
+                    catch (Exception exAudio)
+                    {
+                        Trace($"Audio(gen={myGen}): open exception - 音声無しで続行: {exAudio.Message}");
+                    }
+                }
+                else
+                {
+                    Trace($"Audio(gen={myGen}): wantAudio=falseのためスキップ（音声無しで続行）");
+                }
+
+
                 pkt = ffmpeg.av_packet_alloc();
                 frame = ffmpeg.av_frame_alloc();
                 swFrame = ffmpeg.av_frame_alloc();
@@ -669,6 +843,31 @@ namespace VerticalPlayer.Media
 
                 byte[] managedBuf = new byte[bufSize];
 
+                // ── 起動時「無音/カクつき」切り分け用の診断トレース ──
+                // このOpen世代で最初の1フレームだけ、デコード完了時刻・実描画時刻をtrace.logへ記録する。
+                // 原因切り分けが済んだら削除してよい。
+                bool diagFirstDecodeLogged = false;
+                bool diagFirstDisplayLogged = false;
+
+                // ── クロックペース切り分け用の周期診断（今回追加）──
+                // audioOutputの実再生位置(=マスタークロック)が壁時計と同じ速さで進んでいるか、
+                // 大量ドロップが起きていないかを1秒おきにtrace.logへ出す。原因切り分けが済んだら削除可。
+                var diagWallSw = Stopwatch.StartNew();
+                double diagLastLoggedWall = 0;
+                int diagDropCount = 0;
+                int diagShowCount = 0;
+                int diagAudioForwardBlockMs = 0; // audioPktChannel満杯によるメインループ側の足止め(ms相当)
+                // ── Seek直後の低fps原因切り分け用（今回追加）──
+                // HW転送・sws_scale・Marshal.Copyそれぞれに実際どれだけ時間がかかっているかを
+                // 1秒ごとに積算し、平均msで出す。「クロックは正しいのにshowsが低い」原因が
+                // どの段階にあるかをここで特定する。
+                long diagHwTransferTicks = 0;
+                long diagScaleTicks = 0;
+                long diagCopyTicks = 0;
+                int diagFrameProcCount = 0;
+                double diagLastLoggedFrameStats = 0;
+                int diagWaitMsSum = 0; // 映像ペーシング待機(diff>0時のSleep)の累積ms
+
                 // ── Stage1: パケット先読みスレッド起動（wantPrefetch時のみ） ──
                 if (wantPrefetch)
                 {
@@ -685,7 +884,15 @@ namespace VerticalPlayer.Media
                     var demuxFmt = fmt;
                     var demuxChannel = pktChannel;
                     int demuxVideoIdx = videoIdx;
-                    demuxThread = new Thread(() => DemuxPrefetchLoop(demuxFmt, demuxVideoIdx, myGen, demuxChannel))
+                    int demuxAudioIdx = audioIdx;
+                    var demuxAudioChannel = audioPktChannel; // 今回修正: 音声パケットはDemuxスレッドから
+                                                             // 直接audioPktChannelへ渡す。従来はメインループ（映像デコードループ）経由で
+                                                             // 中継していたが、映像側のペーシングSleep（最大200ms/フレーム）で同じスレッドが
+                                                             // 頻繁に止まるため、その間ずっと音声パケットも運ばれず、結果的に「3秒おきに
+                                                             // まとめて音声が届く→XAudio2が残り時間ずっと無音で干上がる→マスタークロックが
+                                                             // 進まない→映像がさらに待つ」という自己増殖ループになっていた。Demuxスレッドは
+                                                             // 映像の待機とは無関係に走り続けるため、ここで直接振り分ければ解消する。
+                    demuxThread = new Thread(() => DemuxPrefetchLoop(demuxFmt, demuxVideoIdx, demuxAudioIdx, myGen, demuxChannel, demuxAudioChannel))
                     {
                         IsBackground = true,
                         Name = "AVEngine-Demux"
@@ -743,11 +950,27 @@ namespace VerticalPlayer.Media
                                     long tsP = (long)(target / ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base));
                                     ffmpeg.av_seek_frame(fmt, videoIdx, tsP, ffmpeg.AVSEEK_FLAG_BACKWARD);
                                     ffmpeg.avcodec_flush_buffers(vctx);
+                                    PauseAudioDecodeForSeek();
+                                    if (actx != null) ffmpeg.avcodec_flush_buffers(actx);
+
+                                    //audioOutput?.Flush(); // ← ここでフラッシュしているが、タイミングや内部状態のクリアが不十分
+                                    // ── 改善: シーク時にオーディオのバッファをフラッシュし、音声オフセットをターゲット秒数で強制固定 ──
+                                    audioOutput?.Flush();
+                                    _audioContentOffsetSeconds = target; // ターゲット秒数でオフセットを強制固定
+
+                                    ResumeAudioDecodeAfterSeek();
+                                    audioRunning = false;
+                                    lastAnchoredAudioPos = double.NaN;
                                     _catchingUpAfterSeek = true;
                                     _extBaseSeconds = target;
                                     _extClock.Restart();
                                     _extPlaying = false;
                                     FreeDenoiseFilter();
+
+                                    //自前改善ポイント
+                                    // ── 追加: シーク先のターゲット秒数を音声オフセットとして強制設定 ──
+                                    _audioContentOffsetSeconds = target;
+
                                     Trace($"Seek -> {target:F2}s (prefetch)");
                                 }
 
@@ -758,6 +981,12 @@ namespace VerticalPlayer.Media
                                 long ts = (long)(target / ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base));
                                 ffmpeg.av_seek_frame(fmt, videoIdx, ts, ffmpeg.AVSEEK_FLAG_BACKWARD);
                                 ffmpeg.avcodec_flush_buffers(vctx);
+                                PauseAudioDecodeForSeek();
+                                if (actx != null) ffmpeg.avcodec_flush_buffers(actx);
+                                audioOutput?.Flush();
+                                ResumeAudioDecodeAfterSeek();
+                                audioRunning = false;
+                                lastAnchoredAudioPos = double.NaN;
                                 _catchingUpAfterSeek = true;
                                 // シーク要求から実際にここへ到達するまでの間（HW/SW切替時の
                                 // コーデック再初期化のように時間がかかるケースがある）に、
@@ -776,8 +1005,58 @@ namespace VerticalPlayer.Media
 
                     if (_paused)
                     {
+                        if (audioRunning)
+                        {
+                            audioOutput?.Pause();
+                            audioRunning = false;
+                            // 一時停止した瞬間の位置でクロックを凍結する（凍結しないと
+                            // Stopwatchベースの外挿だけが実時間で進み続けてしまう）。
+                            SetExternalClock(GetMasterClockSec(), false);
+                        }
                         Thread.Sleep(10);
                         continue;
+                    }
+
+                    if (!_audioDesired && audioRunning)
+                    {
+                        // コマ送り/プレビュー中など、映像デコードは進めるが音声は出さない指定。
+                        audioOutput?.Pause();
+                        audioRunning = false;
+                    }
+
+                    if (_audioDesired && audioOutput != null && audioOutput.IsActive)
+                    {
+                        if (!audioRunning)
+                        {
+                            audioOutput.Start();
+                            audioRunning = true;
+                        }
+                        audioOutput.SetVolume(_volume);
+                        audioOutput.SetSpeedRatio(_speedRatio);
+
+                        // 音声デバイスの実再生位置が実際に進んだ時だけマスタークロックを
+                        // 再アンカーする。【今回修正1】無条件に毎ループ再アンカーしていると、
+                        // ファイル終盤など音声トラックが映像より先に尽きて無音になった区間で、
+                        // 変化していない同じ位置に何度も再アンカーし続けることになり、
+                        // Stopwatchの外挿が毎回ゼロにリセットされてクロックが完全に停止して
+                        // しまっていた（映像側はptsに対してmasterが遅れ続けるためfpsが低下する）。
+                        // 位置が変化した時だけ再アンカーすれば、音声が途切れた瞬間から自動的に
+                        // Stopwatchでの実時間外挿へフォールバックし、映像のペースが崩れない。
+                        // 【今回修正2】SetFrequencyRatioで速度を変えた際、XAudio2のSamplesPlayedが
+                        // 「コンテンツ時間」と「実時間（wall-clock）」のどちらでカウントされるか
+                        // 未確定なため、等倍速(1.0)以外では音声位置からの再アンカーをやめ、
+                        // Stopwatch×speedRatioの外挿のみでマスタークロックを進める
+                        // （スロー/早送り中に映像が音声に引きずられて同期崩壊するのを防ぐ）。
+                        // 等倍速へ戻れば通常通り音声位置への再アンカーが再開され、自己修復する。
+                        if (Math.Abs(_speedRatio - 1.0) < 0.001)
+                        {
+                            double curAudioPos = audioOutput.GetPositionSeconds() + _audioContentOffsetSeconds;
+                            if (curAudioPos != lastAnchoredAudioPos)
+                            {
+                                SetExternalClock(curAudioPos, true);
+                                lastAnchoredAudioPos = curAudioPos;
+                            }
+                        }
                     }
 
                     if (wantPrefetch && pktChannel != null)
@@ -788,6 +1067,8 @@ namespace VerticalPlayer.Media
                             {
                                 _paused = true;
                                 Trace($"DecodeLoop(gen={myGen}): end of stream (prefetch)");
+                                int eofGen1 = myGen;
+                                _ui.BeginInvoke(new Action(() => { if (eofGen1 == _generation) EndOfStream?.Invoke(); }));
                             }
                             continue;
                         }
@@ -799,6 +1080,8 @@ namespace VerticalPlayer.Media
                         {
                             _paused = true;
                             Trace($"DecodeLoop(gen={myGen}): end of stream");
+                            int eofGen2 = myGen;
+                            _ui.BeginInvoke(new Action(() => { if (eofGen2 == _generation) EndOfStream?.Invoke(); }));
                             continue;
                         }
                     }
@@ -809,6 +1092,12 @@ namespace VerticalPlayer.Media
                         {
                             while (myGen == _generation && ffmpeg.avcodec_receive_frame(vctx, frame) == 0)
                             {
+                                if (!diagFirstDecodeLogged)
+                                {
+                                    Trace($"[DIAG] first frame decoded (gen={myGen})");
+                                    diagFirstDecodeLogged = true;
+                                }
+
                                 // pts/diff の判定は sws_scale・HW転送より先に行う。シーク直後の
                                 // キャッチアップ中は大量のフレームを drop することになるため、
                                 // 捨てるフレームに対して毎回スケーリング処理を行うのは無駄が
@@ -825,11 +1114,25 @@ namespace VerticalPlayer.Media
                                 if (diff > 0.001)
                                 {
                                     int waitMs = (int)Math.Min(diff * 1000, 200);
-                                    if (waitMs > 0) Thread.Sleep(waitMs);
+                                    if (waitMs > 0)
+                                    {
+                                        Thread.Sleep(waitMs);
+                                        diagWaitMsSum += waitMs; // 今回追加: 映像ペーシング待機の累積(ms)
+                                    }
                                 }
                                 else if (diff < -0.04)
                                 {
                                     drop = true;
+                                }
+
+                                if (drop) diagDropCount++; else diagShowCount++;
+                                if (diagWallSw.Elapsed.TotalSeconds - diagLastLoggedWall >= 1.0)
+                                {
+                                    Trace($"[DIAG] wall={diagWallSw.Elapsed.TotalSeconds:F2}s master={master:F2}s audioPos={(audioOutput != null ? audioOutput.GetPositionSeconds() + _audioContentOffsetSeconds : 0):F2}s rawAudioPos={audioOutput?.GetPositionSeconds():F2}s contentOffset={_audioContentOffsetSeconds:F3}s pts={ptsSeconds:F2}s drops={diagDropCount} shows={diagShowCount} speed={_speedRatio:F2} audioForwardBlockMs={diagAudioForwardBlockMs}");
+                                    diagLastLoggedWall = diagWallSw.Elapsed.TotalSeconds;
+                                    diagDropCount = 0;
+                                    diagShowCount = 0;
+                                    diagAudioForwardBlockMs = 0;
                                 }
 
                                 // シークバードラッグ中の軽量プレビュー：追いつき前の最初の1枚を
@@ -842,8 +1145,15 @@ namespace VerticalPlayer.Media
                                     // [原因究明用ログ] シーク/再オープン直後のキャッチアップ中のみ発生（通常再生時は
                                     // 到達しない）。まとまった枚数が短時間に出る前提のログなので、通常再生中に
                                     // 出続けている場合はキャッチアップが終わらない不具合を疑うこと。
-                                    Trace($"Frame dropped (behind {(-diff) * 1000:F0}ms) pts={ptsSeconds:F3}");
-                                    Thread.Sleep(1); // 大量ドロップ時にデコーダ/GPUを連続で叩き過ぎないようにする
+                                    //Trace($"Frame dropped (behind {(-diff) * 1000:F0}ms) pts={ptsSeconds:F3}");
+                                    //Thread.Sleep(1); // 大量ドロップ時にデコーダ/GPUを連続で叩き過ぎないようにする
+                                    //continue;
+                                    // ↑上3行をコメントアウトして、pts判定直後にcontinueするように変更。ドロップフレームの
+                                    // シーク直後のキャッチアップ中はスリープを挟まず一気に消化する
+                                    if (!_catchingUpAfterSeek)
+                                    {
+                                        Thread.Sleep(1);
+                                    }
                                     continue;
                                 }
 
@@ -873,6 +1183,7 @@ namespace VerticalPlayer.Media
                                 AVFrame* srcFrame = frame;
                                 if (hwActive)
                                 {
+                                    long tHw0 = Stopwatch.GetTimestamp();
                                     ffmpeg.av_frame_unref(swFrame);
                                     if (ffmpeg.av_hwframe_transfer_data(swFrame, frame, 0) < 0)
                                     {
@@ -880,6 +1191,7 @@ namespace VerticalPlayer.Media
                                         continue;
                                     }
                                     srcFrame = swFrame;
+                                    diagHwTransferTicks += Stopwatch.GetTimestamp() - tHw0;
                                 }
 
                                 // ── ノイズリダクション（段階3）──
@@ -914,8 +1226,10 @@ namespace VerticalPlayer.Media
                                     Trace($"sws_getContext created srcFmt={(AVPixelFormat)srcFrame->format}");
                                 }
 
+                                long tScale0 = Stopwatch.GetTimestamp();
                                 ffmpeg.sws_scale(sws, srcFrame->data, srcFrame->linesize, 0, h,
                                     rgbFrame->data, rgbFrame->linesize);
+                                diagScaleTicks += Stopwatch.GetTimestamp() - tScale0;
 
                                 if (filteredFrame != null)
                                 {
@@ -924,7 +1238,22 @@ namespace VerticalPlayer.Media
                                 }
 
                                 int stride = rgbFrame->linesize[0];
+                                long tCopy0 = Stopwatch.GetTimestamp();
                                 System.Runtime.InteropServices.Marshal.Copy((IntPtr)rgbFrame->data[0], managedBuf, 0, bufSize);
+                                diagCopyTicks += Stopwatch.GetTimestamp() - tCopy0;
+                                diagFrameProcCount++;
+
+                                if (diagWallSw.Elapsed.TotalSeconds - diagLastLoggedFrameStats >= 1.0 && diagFrameProcCount > 0)
+                                {
+                                    double toMs = 1000.0 / Stopwatch.Frequency;
+                                    Trace($"[DIAG-Frame] frames={diagFrameProcCount} avgHwTransferMs={(diagHwTransferTicks * toMs / diagFrameProcCount):F2} avgScaleMs={(diagScaleTicks * toMs / diagFrameProcCount):F2} avgCopyMs={(diagCopyTicks * toMs / diagFrameProcCount):F2} waitMsSum={diagWaitMsSum}");
+                                    diagLastLoggedFrameStats = diagWallSw.Elapsed.TotalSeconds;
+                                    diagHwTransferTicks = 0;
+                                    diagScaleTicks = 0;
+                                    diagCopyTicks = 0;
+                                    diagFrameProcCount = 0;
+                                    diagWaitMsSum = 0;
+                                }
 
                                 if (_deinterlaceEnabled)
                                     ApplyDeinterlaceBlend(managedBuf, w, h, stride);
@@ -1136,6 +1465,11 @@ namespace VerticalPlayer.Media
                                             GpuPresenter?.EnsureSize(frameW, frameH);
                                             GpuPresenter?.Present(localBuf, frameW, frameH, frameStride);
                                             FrameDisplayed?.Invoke(shownPts);
+                                            if (!diagFirstDisplayLogged)
+                                            {
+                                                Trace($"[DIAG] first frame displayed (gen={frameGen}) pts={shownPts:F3}");
+                                                diagFirstDisplayLogged = true;
+                                            }
                                         }
                                         catch (Exception ex)
                                         {
@@ -1144,6 +1478,26 @@ namespace VerticalPlayer.Media
                                     }));
                                 }
                             }
+                        }
+                    }
+                    else if (pkt->stream_index == audioIdx && audioPktChannel != null)
+                    {
+                        // デコード自体はAudioDecodeLoop（専用スレッド）で行う。ここでは
+                        // パケットの所有権をそちらへ渡すだけ（映像の待機処理と非同期化）。
+                        AVPacket* apkt = ffmpeg.av_packet_alloc();
+                        ffmpeg.av_packet_move_ref(apkt, pkt);
+                        var aitem = new DemuxedPacket((IntPtr)apkt);
+                        while (!audioPktChannel.Writer.TryWrite(aitem))
+                        {
+                            if (myGen != _generation)
+                            {
+                                var ap = apkt;
+                                ffmpeg.av_packet_free(&ap);
+                                break;
+                            }
+                            diagAudioForwardBlockMs++; // 今回追加: audioPktChannelが満杯でメインループが
+                                                       // ブロックしている時間(ms相当)を計測する診断用
+                            Thread.Sleep(1);
                         }
                     }
 
@@ -1200,6 +1554,25 @@ namespace VerticalPlayer.Media
                     }
                 }
 
+                // ── 音声デコードスレッドの停止・後始末（今回追加）──
+                // actx/swr/audioFrame/audioOutputを解放する前に、AudioDecodeThreadが確実に
+                // それらへアクセスしなくなったことを保証する（use-after-free防止）。
+                if (audioDecodeThread != null)
+                {
+                    audioDecodeJoinedCleanly = audioDecodeThread.Join(5000);
+                    if (!audioDecodeJoinedCleanly)
+                        Trace($"AudioDecodeLoop(gen={myGen}): 5000ms待っても終了しなかった - リーク疑いあり、音声リソースの解放をスキップ（クラッシュ回避優先）");
+                }
+                if (audioPktChannel != null)
+                {
+                    audioPktChannel.Writer.TryComplete();
+                    while (audioPktChannel.Reader.TryRead(out var leftoverA))
+                    {
+                        var lap = (AVPacket*)leftoverA.PktPtr;
+                        if (lap != null) ffmpeg.av_packet_free(&lap);
+                    }
+                }
+
                 FreeDenoiseFilter();
                 if (rgbBuffer != null) ffmpeg.av_free(rgbBuffer);
                 if (frame != null) { var f2 = frame; ffmpeg.av_frame_free(&f2); }
@@ -1207,6 +1580,20 @@ namespace VerticalPlayer.Media
                 if (rgbFrame != null) { var f3 = rgbFrame; ffmpeg.av_frame_free(&f3); }
                 if (pkt != null) { var p2 = pkt; ffmpeg.av_packet_free(&p2); }
                 if (sws != null) ffmpeg.sws_freeContext(sws);
+
+                // ── 音声関連の後始末（今回追加）──
+                if (audioDecodeJoinedCleanly)
+                {
+                    try { audioOutput?.Dispose(); } catch { }
+                    if (audioFrame != null) { var af = audioFrame; ffmpeg.av_frame_free(&af); }
+                    if (swr != null) { var s3 = swr; ffmpeg.swr_free(&s3); }
+                    if (actx != null) { var a3 = actx; ffmpeg.avcodec_free_context(&a3); }
+                }
+                else
+                {
+                    Trace($"DecodeThread(gen={myGen}): AudioDecodeThread未終了のため音声リソースの解放を見送り（意図的リーク、クラッシュ回避優先）");
+                }
+
                 // hw_device_ctx は avcodec_free_context() が内部で解放するため、
                 // ここで自分で av_buffer_unref すると二重解放になり
                 // ExecutionEngineException（ネイティブ側のメモリ破壊）の原因になる
@@ -1223,11 +1610,154 @@ namespace VerticalPlayer.Media
             }
         }
 
+        // ── 音声デコード専用スレッド本体（今回追加）──
+        // audioPktChannelから音声パケットを取り出し、デコード→swresample→IAudioOutputへの
+        // 送出までをこのスレッド内だけで完結させる。映像デコードループ側のThread.Sleep
+        // （フレーム待機）とは完全に非同期なため、映像が待っている間も音声は途切れない。
+        // actx/swrへのアクセスはこのスレッドと、Seek時のPauseAudioDecodeForSeek/
+        // ResumeAudioDecodeAfterSeekハンドシェイク経由のメインスレッドだけに限定している
+        // （AVCodecContext/SwrContextはスレッドセーフではないため）。
+        private void AudioDecodeLoop(AVCodecContext* actx, SwrContext* swr, AVFrame* audioFrame,
+            IAudioOutput audioOutput, Channel<DemuxedPacket> channel, int myGen, double audioTimeBase)
+        {
+            byte[]? convBuf = null;
+            float[]? floatBuf = null;
+            AVPacket* localPkt = ffmpeg.av_packet_alloc();
+            var diagSw = Stopwatch.StartNew();
+            double diagLastLogged = 0;
+            int diagPacketsProcessed = 0;
+            long diagSubmitTicksSum = 0;
+            bool needOffsetCapture = true; // 今回追加: (再)開始後、最初のフレームの実ptsを捕捉する
+            bool forceOffsetRecapture = false; // 今回追加: ボイス再作成時、seekのターゲット固定とは
+                                               // 別に「本当に実ptsで取り直す」ことを明示するフラグ
+            try
+            {
+                while (myGen == _generation)
+                {
+                    if (_audioSeekInterruptFlag != 0)
+                    {
+                        _audioSeekAcked = 1;
+                        while (myGen == _generation && _audioSeekInterruptFlag != 0)
+                            Thread.Sleep(1);
+                        _audioSeekAcked = 0;
+                        needOffsetCapture = true; // Seek後の最初のフレームでオフセットを取り直す
+                        continue;
+                    }
+
+                    if (!channel.Reader.TryRead(out var item))
+                    {
+                        if (channel.Reader.Completion.IsCompleted) break;
+                        Thread.Sleep(2);
+                        continue;
+                    }
+
+                    AVPacket* src = (AVPacket*)item.PktPtr;
+                    ffmpeg.av_packet_move_ref(localPkt, src);
+                    ffmpeg.av_packet_free(&src);
+                    diagPacketsProcessed++;
+
+                    if (ffmpeg.avcodec_send_packet(actx, localPkt) == 0)
+                    {
+                        while (myGen == _generation && ffmpeg.avcodec_receive_frame(actx, audioFrame) == 0)
+                        {
+                            if (needOffsetCapture)
+                            {
+                                // このフレームがXAudio2へ送る最初のサンプルになる時点で、
+                                // GetPositionSeconds()はまだ0（このフレーム分もこれから送出する
+                                // ため）。よってこのフレームの実pts＝コンテンツ上の開始オフセット
+                                // として、以降ずっとこの分を加算する。
+                                // 初回オープン時（_audioContentOffsetSecondsがまだ0の場合）、または
+                                // ボイス再作成直後（forceOffsetRecapture）は音声の実ptsから取得し、
+                                // 通常のシーク後の場合はメインスレッド側（Seekで設定したターゲット秒数）を維持する
+                                if (_audioContentOffsetSeconds == 0.0 || forceOffsetRecapture)
+                                {
+                                    long rawPts = audioFrame->pts != ffmpeg.AV_NOPTS_VALUE ? audioFrame->pts : audioFrame->best_effort_timestamp;
+                                    _audioContentOffsetSeconds = rawPts != ffmpeg.AV_NOPTS_VALUE ? rawPts * audioTimeBase : 0.0;
+                                    forceOffsetRecapture = false;
+                                }
+                                needOffsetCapture = false;
+                            }
+                            // withAudio:false（コマ送り/シークバードラッグ中のプレビュー）中は
+                            // ボイスがStart()されないため、送出し続けるとXAudio2側のキューが
+                            // 溜まる一方になり、前回追加したキュー上限バックプレッシャー
+                            // （58個で最大500ms待機）に毎回引っかかって音声デコードスレッド全体が
+                            // 止まってしまう。Seek時の音声スレッド一時停止ハンドシェイクも巻き添えで
+                            // 遅延し、「シーク中/ドラッグ中に映像が追従しない」不具合の原因になっていた。
+                            // 音声が実際に鳴らない間は送出自体をスキップする。
+                            if (audioOutput.IsActive && _audioDesired)
+                            {
+                                int outSamples = ffmpeg.swr_get_out_samples(swr, audioFrame->nb_samples);
+                                if (outSamples > 0)
+                                {
+                                    int outBufSize = outSamples * AudioOutChannels * sizeof(float);
+                                    if (convBuf == null || convBuf.Length < outBufSize)
+                                        convBuf = new byte[outBufSize];
+
+                                    int converted;
+                                    fixed (byte* pOut = convBuf)
+                                    {
+                                        byte* outPtr = pOut;
+                                        converted = ffmpeg.swr_convert(swr, &outPtr, outSamples,
+                                            audioFrame->extended_data, audioFrame->nb_samples);
+                                    }
+
+                                    if (converted > 0)
+                                    {
+                                        int floatCount = converted * AudioOutChannels;
+                                        if (floatBuf == null || floatBuf.Length < floatCount)
+                                            floatBuf = new float[floatCount];
+                                        System.Buffer.BlockCopy(convBuf, 0, floatBuf, 0, floatCount * sizeof(float));
+                                        long t0 = Stopwatch.GetTimestamp();
+                                        audioOutput.SubmitSamples(floatBuf, converted);
+                                        if (audioOutput.ConsumeRecreated())
+                                        {
+                                            needOffsetCapture = true;
+                                            forceOffsetRecapture = true; // seekのターゲット固定を上書きしてでも実ptsで取り直す
+                                        }
+                                        diagSubmitTicksSum += Stopwatch.GetTimestamp() - t0;
+                                    }
+                                }
+                            }
+                            ffmpeg.av_frame_unref(audioFrame);
+                        }
+                    }
+                    ffmpeg.av_packet_unref(localPkt);
+
+                    if (diagSw.Elapsed.TotalSeconds - diagLastLogged >= 1.0)
+                    {
+                        double submitMs = diagSubmitTicksSum * 1000.0 / Stopwatch.Frequency;
+                        int backlog = -1;
+                        try { backlog = channel.Reader.Count; } catch { }
+                        Trace($"[DIAG-Audio] wall={diagSw.Elapsed.TotalSeconds:F2}s packets={diagPacketsProcessed} backlog={backlog} submitTotalMs={submitMs:F1}");
+                        diagLastLogged = diagSw.Elapsed.TotalSeconds;
+                        diagPacketsProcessed = 0;
+                        diagSubmitTicksSum = 0;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace($"AudioDecodeLoop(gen={myGen}) error: {ex.Message}");
+            }
+            finally
+            {
+                if (localPkt != null) { var lp = localPkt; ffmpeg.av_packet_free(&lp); }
+                Trace($"AudioDecodeLoop(gen={myGen}) exited");
+            }
+        }
+
         // ── Stage1: パケット先読みスレッド本体 ──
-        // av_read_frameをこの専用スレッドで回し、videoIdxに一致するパケットだけを
-        // Channelへ積む。fmtへアクセスするのはこのスレッドと、メインループのSeek処理
-        // ブロック（ハンドシェイク経由でのみ）だけであることを前提にしている。
-        private void DemuxPrefetchLoop(AVFormatContext* fmt, int videoIdx, int myGen, Channel<DemuxedPacket> channel)
+        // av_read_frameをこの専用スレッドで回し、videoIdx/audioIdxに一致するパケットだけを
+        // それぞれの専用Channelへ積む。fmtへアクセスするのはこのスレッドと、メインループの
+        // Seek処理ブロック（ハンドシェイク経由でのみ）だけであることを前提にしている。
+        // 【今回修正】当初は音声パケットも映像と同じchannelへ積み、メインループ（映像デコード
+        // ループ）側で音声用channelへ中継していたが、映像側のペーシングSleep（最大200ms/フレーム）
+        // で同じスレッドが頻繁に止まるため、その間ずっと音声パケットも運ばれず、結果的に
+        // 「数秒おきに音声がまとめて届く→XAudio2が残り時間ずっと無音で干上がる→音声由来の
+        // マスタークロックが進まない→映像がさらに待つ」という自己増殖ループになっていた。
+        // Demuxスレッドは映像の待機とは無関係に走り続けるため、ここで直接振り分ける。
+        private void DemuxPrefetchLoop(AVFormatContext* fmt, int videoIdx, int audioIdx, int myGen,
+            Channel<DemuxedPacket> videoChannel, Channel<DemuxedPacket>? audioChannel)
         {
             try
             {
@@ -1257,11 +1787,17 @@ namespace VerticalPlayer.Media
                         }
                         // 本当のEOF、またはI/Oエラー
                         Trace($"DemuxPrefetch(gen={myGen}): end of stream/error rr={rr}");
-                        channel.Writer.TryComplete();
+                        videoChannel.Writer.TryComplete();
+                        audioChannel?.Writer.TryComplete();
                         return;
                     }
 
-                    if (p->stream_index != videoIdx)
+                    Channel<DemuxedPacket>? destChannel =
+                        p->stream_index == videoIdx ? videoChannel :
+                        p->stream_index == audioIdx ? audioChannel :
+                        null;
+
+                    if (destChannel == null)
                     {
                         ffmpeg.av_packet_free(&p);
                         continue;
@@ -1269,7 +1805,7 @@ namespace VerticalPlayer.Media
 
                     var item = new DemuxedPacket((IntPtr)p);
                     bool droppedForSeek = false;
-                    while (!channel.Writer.TryWrite(item))
+                    while (!destChannel.Writer.TryWrite(item))
                     {
                         if (myGen != _generation)
                         {
@@ -1292,7 +1828,8 @@ namespace VerticalPlayer.Media
             catch (Exception ex)
             {
                 Trace($"DemuxPrefetch(gen={myGen}) error: {ex}");
-                try { channel.Writer.TryComplete(ex); } catch { }
+                try { videoChannel.Writer.TryComplete(ex); } catch { }
+                try { audioChannel?.Writer.TryComplete(ex); } catch { }
             }
             finally
             {

@@ -50,6 +50,11 @@ namespace VerticalPlayer
         public double DashcamWindowWidth { get; set; }
         public double DashcamWindowHeight { get; set; }
         public bool DashcamWasActive { get; set; }
+        /// <summary>trueの場合、起動時のレジューム自動再生（通常モードの前回ファイル復元、
+        /// ドラレコモードのTryResumeAsync）を両方ともスキップする。ログ採取時など、
+        /// 起動のたびに前回状態が勝手に再生されると検証の邪魔になるための逃げ道。
+        /// 起動引数でファイル/フォルダが明示的に渡された場合はこの設定に関係なく従来通り開く。</summary>
+        public bool DisableAutoResume { get; set; }
         public string? DashcamLastDrivePath { get; set; }
         public string? DashcamLastGroupKey { get; set; }
         public double DashcamLastPosition { get; set; }
@@ -432,6 +437,7 @@ namespace VerticalPlayer
             AlwaysOnTopCheck.IsChecked = s.AlwaysOnTop;
             this.Topmost = s.AlwaysOnTop;
             AutoPlayNextCheck.IsChecked = s.AutoPlayNext;
+            DisableAutoResumeCheck.IsChecked = s.DisableAutoResume;
             FitWindowToVideoCheck.IsChecked = s.FitWindowToVideo;
             DnnFastBuildCheck.IsChecked = s.DnnFastBuild;
             Player.DnnFastBuild = s.DnnFastBuild;
@@ -515,7 +521,7 @@ namespace VerticalPlayer
             // 前回終了時にドラレコモードだった場合、モードごと・ドライブ・選択ファイル・
             // 再生位置を復元する。ドライブが挿さっていない/該当ファイルが無い場合は
             // TryResumeAsync側がfalseを返すだけで、通常モードのまま何も起きない。
-            else if (s.DashcamWasActive)
+            else if (s.DashcamWasActive && !s.DisableAutoResume)
             {
                 EnterDashcamMode();
                 string? drivePath = s.DashcamLastDrivePath;
@@ -532,7 +538,7 @@ namespace VerticalPlayer
             // ── 前回ファイル復元 ──
             // ドラレコモードとして復元した場合、および起動引数でフォルダが渡された場合は、
             // 通常モードの最後のファイルを裏で開く必要はない
-            if (_startupFolderArg == null && !s.DashcamWasActive && !string.IsNullOrEmpty(s.LastFilePath) && File.Exists(s.LastFilePath))
+            if (_startupFolderArg == null && !s.DisableAutoResume && !s.DashcamWasActive && !string.IsNullOrEmpty(s.LastFilePath) && File.Exists(s.LastFilePath))
             {
                 LoadVideo(s.LastFilePath, s.LastPosition);
             }
@@ -560,6 +566,7 @@ namespace VerticalPlayer
                 WindowHeight = _isDashcamMode ? _preDashcamHeight : this.Height,
                 AlwaysOnTop = this.Topmost,
                 AutoPlayNext = AutoPlayNextCheck.IsChecked ?? true,
+                DisableAutoResume = DisableAutoResumeCheck.IsChecked ?? false,
                 FitWindowToVideo = FitWindowToVideoCheck.IsChecked ?? true,
                 DnnFastBuild = DnnFastBuildCheck.IsChecked ?? false,
 
@@ -1681,6 +1688,7 @@ namespace VerticalPlayer
         }
 
         private void AutoPlayNext_Changed(object sender, RoutedEventArgs e) { /* Player_MediaEndedで都度参照するのみ */ }
+        private void DisableAutoResume_Changed(object sender, RoutedEventArgs e) { /* 次回起動時のRestoreSettingsで参照するのみ */ }
 
         // 切替時点で既にビルド済みのエンジンには影響しない（次回、解像度が変わって
         // 再ビルドが走る時から新しい設定が使われる）。ビルド速度優先(FastBuild)か
