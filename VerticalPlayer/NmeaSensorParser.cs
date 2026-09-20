@@ -42,6 +42,18 @@ namespace VerticalPlayer.Dashcam
         // 暫定スケール（実データで静止時ベクトル長≒1.0を確認済み）: 加速度生値 → G
         private const double AccelRawToG = 1.0 / 1000.0;
 
+        // ---- 測位復帰直後の速度過渡値の補正 ----
+        // トンネル脱出などで未測位→測位に戻った直後、GPSの位置ジャンプに引きずられて
+        // 速度が数秒かけて収束する過渡値（例: 80km/h走行中に 153→119→94→86→79）が記録される。
+        // 収束後の安定値へ置き換える。ただし加速度が実際の減速/加速を示している場合は
+        // 実挙動とみなして補正しない（急ブレーキ・事故の記録を消さないため）。
+        private const double SettleScanSeconds = 15.0;        // 復帰点から収束点を探す最大時間
+        private const double SettleStableSeconds = 3.0;       // 「安定」とみなす継続時間
+        private const double SettleStableToleranceKmh = 4.0;  // 安定窓内の速度変動の許容幅
+        private const double SettleMinDeviationKmh = 15.0;    // 収束値からのズレがこれ未満なら補正不要
+        private const double SettleImuMinShiftG = 0.10;       // 加速度平均の変化がこれ未満なら実加減速なしとみなす下限
+        private const double SettleImuExpectedRatio = 0.4;    // 速度変化から期待される加減速Gに対する比率
+
         /// <summary>
         /// NMEA(実体は独自バイナリ)ファイルをパースする。
         /// </summary>
@@ -86,6 +98,26 @@ namespace VerticalPlayer.Dashcam
 
             DateTime baseTime = startTimeHint ?? DateTime.UnixEpoch;
 
+            // 速度（未測位は0）。測位復帰直後の過渡値はここで補正する。
+            var speeds = new double[raw.Count];
+            var hasFixArr = new bool[raw.Count];
+            var axG = new double[raw.Count];
+            var ayG = new double[raw.Count];
+            var azG = new double[raw.Count];
+            for (int i = 0; i < raw.Count; i++)
+            {
+                hasFixArr[i] = raw[i].hasFix;
+                speeds[i] = raw[i].hasFix ? raw[i].field1 * SpeedRawToKmh : 0;
+                axG[i] = raw[i].ax * AccelRawToG;
+                ayG[i] = raw[i].ay * AccelRawToG;
+                azG[i] = raw[i].az * AccelRawToG;
+            }
+            double secPerRecord = videoDurationHint.HasValue && raw.Count > 1
+                ? videoDurationHint.Value.TotalSeconds / (raw.Count - 1)
+                : 0.1;
+            if (secPerRecord > 0)
+                CorrectReacquisitionSpeedTransient(hasFixArr, speeds, axG, ayG, azG, secPerRecord);
+
             for (int i = 0; i < raw.Count; i++)
             {
                 var r = raw[i];
@@ -105,7 +137,7 @@ namespace VerticalPlayer.Dashcam
                     offset = TimeSpan.FromMilliseconds(i * 100);
                 }
 
-                double speedKmh = r.hasFix ? r.field1 * SpeedRawToKmh : 0;
+                double speedKmh = speeds[i];
                 double ax = r.ax * AccelRawToG;
                 double ay = r.ay * AccelRawToG;
                 double az = r.az * AccelRawToG;
@@ -128,6 +160,83 @@ namespace VerticalPlayer.Dashcam
             }
 
             return frames;
+        }
+
+        /// <summary>
+        /// 未測位→測位に戻った直後の速度過渡値を、収束後の安定値へ置き換える（速度のみ。位置・加速度は触らない）。
+        /// 対象は復帰点から最大SettleScanSeconds秒の範囲だけで、測位継続中の通常走行区間は一切変更しない。
+        /// </summary>
+        private static void CorrectReacquisitionSpeedTransient(
+            bool[] hasFix, double[] speed, double[] axG, double[] ayG, double[] azG, double secPerRecord)
+        {
+            int n = speed.Length;
+            int scanMax = Math.Max(1, (int)Math.Round(SettleScanSeconds / secPerRecord));
+            int stableLen = Math.Max(2, (int)Math.Round(SettleStableSeconds / secPerRecord));
+
+            for (int k = 1; k < n; k++)
+            {
+                if (!hasFix[k] || hasFix[k - 1]) continue; // 未測位→測位の遷移点のみ
+
+                // 収束点s: 以降stableLen件がすべて測位中で、速度変動が許容幅以内になる最初の位置
+                int limit = Math.Min(k + scanMax, n - stableLen);
+                int s = -1;
+                for (int c = k; c <= limit; c++)
+                {
+                    if (!hasFix[c]) break;
+                    if (IsStableWindow(hasFix, speed, c, stableLen)) { s = c; break; }
+                }
+                if (s <= k) continue; // 収束点が見つからない、または復帰直後から安定している
+
+                double vStable = 0;
+                for (int j = s; j < s + stableLen; j++) vStable += speed[j];
+                vStable /= stableLen;
+
+                double maxDev = 0;
+                for (int j = k; j < s; j++)
+                    maxDev = Math.Max(maxDev, Math.Abs(speed[j] - vStable));
+                if (maxDev < SettleMinDeviationKmh) continue;
+
+                // 加速度の裏取り: 速度変化が本物なら、その区間の加速度ベクトル平均は収束後から
+                // 速度変化に見合う量だけ変化しているはず（軸割り当てが未確定でも使えるようベクトル差で判定）
+                double shiftG = MeanVectorDistance(axG, ayG, azG, k, s, s, s + stableLen);
+                double durationSec = Math.Max((s - k) * secPerRecord, 1.0);
+                double expectedG = (maxDev / 3.6) / durationSec / 9.80665;
+                if (shiftG >= Math.Max(SettleImuMinShiftG, SettleImuExpectedRatio * expectedG))
+                    continue; // 実際の加減速あり → 補正しない
+
+                for (int j = k; j < s; j++)
+                    speed[j] = vStable;
+            }
+        }
+
+        private static bool IsStableWindow(bool[] hasFix, double[] speed, int start, int len)
+        {
+            if (start + len > speed.Length) return false;
+            double min = double.MaxValue, max = double.MinValue;
+            for (int j = start; j < start + len; j++)
+            {
+                if (!hasFix[j]) return false;
+                if (speed[j] < min) min = speed[j];
+                if (speed[j] > max) max = speed[j];
+            }
+            return max - min <= SettleStableToleranceKmh;
+        }
+
+        /// <summary>区間[aFrom,aTo)と区間[bFrom,bTo)の3軸加速度の平均ベクトル同士の距離(G)。</summary>
+        private static double MeanVectorDistance(double[] x, double[] y, double[] z, int aFrom, int aTo, int bFrom, int bTo)
+        {
+            static (double, double, double) Mean(double[] px, double[] py, double[] pz, int from, int to)
+            {
+                double sx = 0, sy = 0, sz = 0;
+                for (int j = from; j < to; j++) { sx += px[j]; sy += py[j]; sz += pz[j]; }
+                int cnt = Math.Max(1, to - from);
+                return (sx / cnt, sy / cnt, sz / cnt);
+            }
+
+            var (ax, ay, az) = Mean(x, y, z, aFrom, aTo);
+            var (bx, by, bz) = Mean(x, y, z, bFrom, bTo);
+            double dx = ax - bx, dy = ay - by, dz = az - bz;
+            return Math.Sqrt(dx * dx + dy * dy + dz * dz);
         }
 
         private static bool IsAllZero(ReadOnlySpan<byte> span)

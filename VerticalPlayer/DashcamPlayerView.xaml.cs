@@ -88,6 +88,13 @@ namespace VerticalPlayer.Dashcam
 
         // リア(PiP)ドラッグ移動・リサイズ用状態
         private bool _pipUserPositioned;
+        // リアPiPの位置（映像エリアの空き領域に対する比率0..1、-1=未設定＝既定の左下配置）。
+        // 比率で持つのはウィンドウ/フロント倍率が変わっても相対位置を保つため（永続化対象）。
+        private double _pipRatioX = -1;
+        private double _pipRatioY = -1;
+        /// <summary>リア倍率の最小値（＝従来のPiP既定サイズ220×124 ÷ リア映像1920×1080 ≒ 0.115）。
+        /// AppSettings.DashcamRearZoomScaleの既定値と揃えること。</summary>
+        public const double DefaultRearZoomScale = 0.115;
         private Point? _pipDragStart;
         private Point? _pipDragStartPos;
         private Point? _pipResizeStart;
@@ -213,6 +220,59 @@ namespace VerticalPlayer.Dashcam
         {
             get => RearVisibleCheck.IsChecked == true;
             set => RearVisibleCheck.IsChecked = value;
+        }
+
+        /// <summary>リア(PiP)の表示倍率（永続化対象）。リア映像の等倍(オリジナル)を1.0とした縮小倍率で、
+        /// 1.0=オリジナル(最大)。最小は従来のPiP既定サイズ相当(DefaultRearZoomScale)。</summary>
+        public double RearZoomScale
+        {
+            get => RearZoomCombo.SelectedItem is ComboBoxItem ci && double.TryParse((string)ci.Tag, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : DefaultRearZoomScale;
+            set
+            {
+                // 保存値が現在の選択肢と完全一致しない場合（選択肢を変更した後など）は最寄りの項目を選ぶ
+                ComboBoxItem? best = null;
+                double bestDiff = double.MaxValue;
+                foreach (var obj in RearZoomCombo.Items)
+                {
+                    if (obj is ComboBoxItem ci && double.TryParse((string)ci.Tag, System.Globalization.CultureInfo.InvariantCulture, out var v))
+                    {
+                        double diff = Math.Abs(v - value);
+                        if (diff < bestDiff) { bestDiff = diff; best = ci; }
+                    }
+                }
+                if (best != null) RearZoomCombo.SelectedItem = best;
+            }
+        }
+
+        /// <summary>車速OSDの表示ON/OFF（永続化対象。AppSettings.EnableOSDと対応）。</summary>
+        public bool SpeedOsdEnabled
+        {
+            get => SpeedOsdCheck.IsChecked == true;
+            set => SpeedOsdCheck.IsChecked = value;
+        }
+
+        /// <summary>リア(PiP)の水平位置（永続化対象）。映像エリアの空き幅に対する比率0..1、-1=未設定(既定の左下)。</summary>
+        public double RearPipPosX
+        {
+            get => _pipRatioX;
+            set
+            {
+                _pipRatioX = double.IsNaN(value) || value < 0 ? -1 : Math.Min(1, value);
+                _pipUserPositioned = _pipRatioX >= 0 && _pipRatioY >= 0;
+                ApplyRearPipLayout();
+            }
+        }
+
+        /// <summary>リア(PiP)の垂直位置（永続化対象）。映像エリアの空き高さに対する比率0..1、-1=未設定(既定の左下)。</summary>
+        public double RearPipPosY
+        {
+            get => _pipRatioY;
+            set
+            {
+                _pipRatioY = double.IsNaN(value) || value < 0 ? -1 : Math.Min(1, value);
+                _pipUserPositioned = _pipRatioX >= 0 && _pipRatioY >= 0;
+                ApplyRearPipLayout();
+            }
         }
 
         public double ZoomScale
@@ -883,6 +943,7 @@ namespace VerticalPlayer.Dashcam
         {
             PlayerRear.ResetDnnEngineForNewFile();
             _rearAvailable = true;
+            ApplyRearPipLayout(); // 「オリジナル」倍率はリア映像の実サイズで再計算する
             UpdateRearPipVisibility();
             if (_wantsPlaying)
                 PlayerRear.Play();
@@ -1061,6 +1122,7 @@ namespace VerticalPlayer.Dashcam
             _isPlaying = false;
             _wantsPlaying = false;
             PlayPauseButton.Content = "▶";
+            UpdateSpeedOsd(null);
             CurrentFileChanged?.Invoke(null);
         }
 
@@ -1078,15 +1140,105 @@ namespace VerticalPlayer.Dashcam
             bool show = RearVisibleCheck.IsChecked == true && _rearAvailable;
             RearPipBorder.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
 
+            // リア倍率の設定UIは「リア表示スイッチがON」の間だけ出す（リアが今再生可能かは問わない）
+            if (RearZoomPanel != null)
+                RearZoomPanel.Visibility = RearVisibleCheck.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+
             if (show && _wantsPlaying)
                 PlayerRear.Play();
         }
-        private void RearPipCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+        private void RearPipCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => ApplyRearPipLayout();
+
+        /// <summary>リア倍率(リア映像の等倍を1.0とした縮小倍率)に応じたPiPサイズを返す。映像エリアより大きくなる場合は
+        /// 縦横比を保って収まるよう縮小する（「オリジナル」も映像エリアに入らなければ収まる最大サイズになる）。</summary>
+        private Size CalcRearPipSize(double scale)
         {
-            if (_pipUserPositioned) return; // ユーザーが一度でも動かしたら自動追従はやめる
-            Canvas.SetLeft(RearPipBorder, 12);
-            Canvas.SetTop(RearPipBorder, Math.Max(0, RearPipCanvas.ActualHeight - RearPipBorder.Height - 12));
+            double nw = PlayerRear.NaturalVideoWidth;
+            double nh = PlayerRear.NaturalVideoHeight;
+            if (nw <= 0 || nh <= 0) { nw = 1920; nh = 1080; } // リア未オープン時の暫定値（オープン後に再計算される）
+            if (scale <= 0.0) scale = DefaultRearZoomScale;
+
+            double w = nw * scale;
+            double h = nh * scale;
+
+            double cw = RearPipCanvas.ActualWidth, ch = RearPipCanvas.ActualHeight;
+            if (cw > 0 && ch > 0)
+            {
+                double f = Math.Min(1.0, Math.Min(cw / w, ch / h));
+                w *= f;
+                h *= f;
+            }
+            return new Size(w, h);
         }
+
+        /// <summary>サイズと位置を保存済みの倍率・比率から組み立て直す（Canvasのサイズ確定時、リアオープン時、復元時）。</summary>
+        private void ApplyRearPipLayout()
+        {
+            if (RearPipBorder == null || RearPipCanvas == null || PlayerRear == null) return;
+            double cw = RearPipCanvas.ActualWidth, ch = RearPipCanvas.ActualHeight;
+            if (cw <= 0 || ch <= 0) return; // まだレイアウト前。SizeChangedで再度呼ばれる
+
+            var sz = CalcRearPipSize(RearZoomScale);
+            RearPipBorder.Width = sz.Width;
+            RearPipBorder.Height = sz.Height;
+
+            double freeW = Math.Max(0, cw - sz.Width);
+            double freeH = Math.Max(0, ch - sz.Height);
+            if (_pipUserPositioned && _pipRatioX >= 0 && _pipRatioY >= 0)
+            {
+                Canvas.SetLeft(RearPipBorder, _pipRatioX * freeW);
+                Canvas.SetTop(RearPipBorder, _pipRatioY * freeH);
+            }
+            else
+            {
+                Canvas.SetLeft(RearPipBorder, Math.Min(12, freeW));
+                Canvas.SetTop(RearPipBorder, Math.Max(0, ch - sz.Height - 12));
+            }
+        }
+
+        /// <summary>リア倍率コンボ変更時: サイズだけ差し替える（位置は左上を維持しつつ映像エリア内へ収める）。</summary>
+        private void ApplyRearPipSize()
+        {
+            if (RearPipBorder == null || RearPipCanvas == null || PlayerRear == null) return;
+            double cw = RearPipCanvas.ActualWidth, ch = RearPipCanvas.ActualHeight;
+            if (cw <= 0 || ch <= 0)
+            {
+                var early = CalcRearPipSize(RearZoomScale);
+                RearPipBorder.Width = early.Width;
+                RearPipBorder.Height = early.Height;
+                return;
+            }
+
+            double curLeft = Canvas.GetLeft(RearPipBorder);
+            double curTop = Canvas.GetTop(RearPipBorder);
+            if (!_pipUserPositioned || double.IsNaN(curLeft) || double.IsNaN(curTop))
+            {
+                ApplyRearPipLayout();
+                return;
+            }
+
+            var sz = CalcRearPipSize(RearZoomScale);
+            RearPipBorder.Width = sz.Width;
+            RearPipBorder.Height = sz.Height;
+            Canvas.SetLeft(RearPipBorder, Math.Clamp(curLeft, 0, Math.Max(0, cw - sz.Width)));
+            Canvas.SetTop(RearPipBorder, Math.Clamp(curTop, 0, Math.Max(0, ch - sz.Height)));
+            UpdateRearPipRatiosFromCurrent();
+        }
+
+        /// <summary>現在のPiP位置を空き領域に対する比率として記録する（永続化用）。</summary>
+        private void UpdateRearPipRatiosFromCurrent()
+        {
+            double left = Canvas.GetLeft(RearPipBorder);
+            double top = Canvas.GetTop(RearPipBorder);
+            if (double.IsNaN(left) || double.IsNaN(top)) return;
+
+            double freeW = RearPipCanvas.ActualWidth - RearPipBorder.Width;
+            double freeH = RearPipCanvas.ActualHeight - RearPipBorder.Height;
+            _pipRatioX = freeW > 1 ? Math.Clamp(left / freeW, 0, 1) : 0;
+            _pipRatioY = freeH > 1 ? Math.Clamp(top / freeH, 0, 1) : 0;
+        }
+
+        private void RearZoomCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => ApplyRearPipSize();
 
         private void RearPipBorder_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
@@ -1116,6 +1268,7 @@ namespace VerticalPlayer.Dashcam
 
         private void RearPipBorder_MouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
+            if (_pipDragStart != null) UpdateRearPipRatiosFromCurrent();
             _pipDragStart = null;
             _pipDragStartPos = null;
             RearPipBorder.ReleaseMouseCapture();
@@ -1147,6 +1300,22 @@ namespace VerticalPlayer.Dashcam
             _pipResizeStart = null;
             _pipResizeStartSize = null;
             RearPipResizeGrip.ReleaseMouseCapture();
+
+            // グリップでの自由リサイズは、離した時点で最寄りのリア倍率プリセットへ揃える
+            // （倍率と永続化の値を常にプリセット1つに保つため）
+            ComboBoxItem? best = null;
+            double bestDiff = double.MaxValue;
+            foreach (var item in RearZoomCombo.Items.OfType<ComboBoxItem>())
+            {
+                if (!double.TryParse((string)item.Tag, System.Globalization.CultureInfo.InvariantCulture, out var s)) continue;
+                double diff = Math.Abs(CalcRearPipSize(s).Width - RearPipBorder.Width);
+                if (diff < bestDiff) { bestDiff = diff; best = item; }
+            }
+            if (best == null) return;
+            if (ReferenceEquals(RearZoomCombo.SelectedItem, best))
+                ApplyRearPipSize(); // 同じ倍率のままでもサイズを揃え直す
+            else
+                RearZoomCombo.SelectedItem = best; // SelectionChanged経由でApplyRearPipSize
         }
 
         private void RearLinkedCheck_Changed(object sender, RoutedEventArgs e)
@@ -1332,6 +1501,149 @@ namespace VerticalPlayer.Dashcam
             SeekPreviewPopup.HorizontalOffset = Math.Clamp(x - halfW, 0, Math.Max(0, width - halfW * 2));
         }
 
+        // ---- フルスクリーン（MainWindowから切替。プレイヤーは同一インスタンスのまま表示だけ切り替える）----
+        //  ・ツールバー/左右サイドバーを隠し、映像を全面に広げる。
+        //  ・加速度チャート(＋速度/加速度HUD)は映像下部へ半透明で重ねる（常時表示）。
+        //  ・再生コントロールバーはマウスを動かすと現れ、再生中に無操作が続くと隠れる（一時停止中は出しっぱなし）。
+
+        private bool _isFullScreen;
+        private DispatcherTimer? _fsControlsTimer;
+        private Point _fsLastMousePos;
+        private long _fsLastActivityTick;
+        private double _fsControlsHideDelaySec = 2.5;
+        private Brush? _fsSavedControlBarBackground;
+
+        public bool IsFullScreen => _isFullScreen;
+
+        /// <summary>再生/一時停止のトグル（フルスクリーン中のSpaceキー等、外部から呼ぶ用）。</summary>
+        public void TogglePlayPause()
+        {
+            if (PlayerFront.Source == null) return;
+            PlayPauseButton_Click(this, new RoutedEventArgs());
+        }
+
+        public void SetFullScreen(bool on, double controlsHideDelaySec = 2.5)
+        {
+            if (_isFullScreen == on) return;
+            _isFullScreen = on;
+
+            if (on)
+            {
+                _fsControlsHideDelaySec = controlsHideDelaySec > 0 ? controlsHideDelaySec : 2.5;
+
+                ToolbarBar.Visibility = Visibility.Collapsed;
+                LeftSidebarHost.Visibility = Visibility.Collapsed;
+                LeftSidebarColumn.Width = new GridLength(0);
+                RightSidebarHost.Visibility = Visibility.Collapsed;
+                RightSidebarColumnDef.Width = new GridLength(0);
+
+                // 映像を全行にまたがらせ、下段(コントロールバー/チャート)を映像の上へ重ねる
+                Grid.SetRow(MainRowGrid, 0);
+                Grid.SetRowSpan(MainRowGrid, 4);
+
+                _fsSavedControlBarBackground = ControlBar.Background;
+                ControlBar.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(0xB0, 0x0F, 0x16, 0x23));
+                ChartStrip.Opacity = 0.75;
+
+                _fsLastMousePos = System.Windows.Input.Mouse.GetPosition(this);
+                _fsLastActivityTick = Environment.TickCount64;
+                ControlBar.Visibility = Visibility.Visible;
+
+                PreviewMouseMove += FullScreen_PreviewMouseMove;
+                _fsControlsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+                _fsControlsTimer.Tick += FullScreenControlsTimer_Tick;
+                _fsControlsTimer.Start();
+            }
+            else
+            {
+                PreviewMouseMove -= FullScreen_PreviewMouseMove;
+                _fsControlsTimer?.Stop();
+                _fsControlsTimer = null;
+
+                ToolbarBar.Visibility = Visibility.Visible;
+                LeftSidebarHost.Visibility = Visibility.Visible;
+                LeftSidebarColumn.Width = new GridLength(16);
+                LeftSidebarHost_MouseLeave(this, null!); // 折りたたみ状態(幅16px)へ戻す
+                RightSidebarHost.Visibility = Visibility.Visible;
+                RightSidebarColumnDef.Width = new GridLength(_mapHorizontal ? 420 : 260);
+
+                Grid.SetRow(MainRowGrid, 1);
+                Grid.SetRowSpan(MainRowGrid, 1);
+
+                ControlBar.Visibility = Visibility.Visible;
+                if (_fsSavedControlBarBackground != null)
+                    ControlBar.Background = _fsSavedControlBarBackground;
+                ChartStrip.Opacity = 1.0;
+            }
+        }
+
+        private void FullScreen_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            // カーソルを隠した/レイアウト変化で発生する「位置が変わらない合成MouseMove」は活動とみなさない
+            var p = e.GetPosition(this);
+            if (Math.Abs(p.X - _fsLastMousePos.X) < 2 && Math.Abs(p.Y - _fsLastMousePos.Y) < 2) return;
+            _fsLastMousePos = p;
+            _fsLastActivityTick = Environment.TickCount64;
+            ControlBar.Visibility = Visibility.Visible;
+        }
+
+        private void FullScreenControlsTimer_Tick(object? sender, EventArgs e)
+        {
+            if (!_isFullScreen) return;
+
+            // 一時停止中・操作中(マウスがバー上/ドラッグ中)は出しっぱなし
+            if (!_isPlaying || ControlBar.IsMouseOver || System.Windows.Input.Mouse.Captured != null)
+            {
+                ControlBar.Visibility = Visibility.Visible;
+                return;
+            }
+
+            if (Environment.TickCount64 - _fsLastActivityTick >= (long)(_fsControlsHideDelaySec * 1000))
+                ControlBar.Visibility = Visibility.Collapsed;
+        }
+
+        // ---- 車速OSD ----
+
+        private DashcamSensorFrame? _lastOsdFrame;
+
+        private void SpeedOsdCheck_Changed(object sender, RoutedEventArgs e) => UpdateSpeedOsd(_lastOsdFrame);
+
+        private void VideoArea_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateSpeedOsdFontSize();
+
+        /// <summary>文字サイズを映像エリアの高さの約9%に追従させる（数値本体。単位は40%）。</summary>
+        private void UpdateSpeedOsdFontSize()
+        {
+            if (SpeedOsdText == null || VideoArea == null) return;
+            double h = VideoArea.ActualHeight;
+            if (h <= 0) return;
+            double size = Math.Max(24, h * 0.09);
+            SpeedOsdText.FontSize = size;
+            SpeedOsdUnit.FontSize = size * 0.4;
+        }
+
+        /// <summary>現在フレームの走行速度をOSDへ反映する。未測位(トンネル内等)は「--」、
+        /// センサーデータが無い/OSDがOFFの間は非表示。</summary>
+        private void UpdateSpeedOsd(DashcamSensorFrame? frame)
+        {
+            _lastOsdFrame = frame;
+            if (SpeedOsd == null) return; // InitializeComponent中のCheckedイベント対策
+
+            if (!SpeedOsdEnabled || frame == null)
+            {
+                SpeedOsd.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            string text = frame.HasGpsFix ? Math.Round(frame.SpeedKmh).ToString("0") : "--";
+            if (SpeedOsdValue.Text != text)
+                SpeedOsdValue.Text = text;
+            if (SpeedOsd.Visibility != Visibility.Visible)
+            {
+                UpdateSpeedOsdFontSize();
+                SpeedOsd.Visibility = Visibility.Visible;
+            }
+        }
+
         // ---- HUD更新（Frontの実フレーム表示に同期。FrameDisplayedはAction<double>で秒単位pts） ----
 
         private void OnFrontFrameDisplayed(double ptsSeconds)
@@ -1341,6 +1653,7 @@ namespace VerticalPlayer.Dashcam
             var pos = TimeSpan.FromSeconds(ptsSeconds);
             var frame = DashcamSensorLookup.FindNearest(_sensorFrames, pos);
             Hud.UpdateFrame(frame); // Hud側は速度・加速度3軸のみ表示する想定（日時/緯度経度は下記の地図上パネルへ分離）
+            UpdateSpeedOsd(frame);
             if (frame != null)
             {
                 GeoDateTimeText.Text = frame.Timestamp.ToString("yyyy/MM/dd HH:mm:ss");
@@ -1498,6 +1811,7 @@ namespace VerticalPlayer.Dashcam
         {
             if (_mapHorizontal == horizontal) return;
             _mapHorizontal = horizontal;
+            if (_isFullScreen) return; // フルスクリーン中は右サイドバー0幅のまま。復帰時に_mapHorizontalから戻す
             RightSidebarColumnDef.Width = new GridLength(horizontal ? 420 : 260);
         }
 

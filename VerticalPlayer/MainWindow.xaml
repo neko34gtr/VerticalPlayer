@@ -444,7 +444,7 @@
     </Window.Resources>
 
     <!-- ========== ウィンドウシェル ========== -->
-    <Border Background="{StaticResource BgDeep}" CornerRadius="14"
+    <Border x:Name="WindowShell" Background="{StaticResource BgDeep}" CornerRadius="14"
             BorderBrush="#1E2D45" BorderThickness="1">
         <Border.Effect>
             <DropShadowEffect Color="#000000" BlurRadius="32" ShadowDepth="0" Opacity="0.7"/>

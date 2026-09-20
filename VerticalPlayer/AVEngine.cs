@@ -67,6 +67,13 @@ namespace VerticalPlayer.Media
         /// メインループの再アンカー時にaudioOutput.GetPositionSeconds()へ加算する。</summary>
         private double _audioContentOffsetSeconds;
 
+        /// <summary>音声ストリームを実際に開けているか（Open時にfalseへ戻し、音声デコードスレッド起動時にtrue）。</summary>
+        private volatile bool _hasAudioStream;
+
+        /// <summary>直近にデコードした（表示対象の）映像フレームのpts秒。映像のみ再生(Play(false))から
+        /// 音声付き再生(Play(true))へ切り替える際、映像位置へ音声を揃え直すための再シーク先に使う。</summary>
+        private double _lastShownPtsSeconds = -1;
+
         /// <summary>次にOpen()する際にハードウェアデコードを試みるかどうか。</summary>
         public bool HardwareAccelRequested { get; set; }
 
@@ -463,6 +470,8 @@ namespace VerticalPlayer.Media
             _extPlaying = false;
             _catchingUpAfterSeek = false;
             _desiredPlaying = false;
+            _hasAudioStream = false;
+            _lastShownPtsSeconds = -1;
 
             bool wantHw = HardwareAccelRequested;
             bool wantDenoise = DenoiseRequested;
@@ -504,7 +513,27 @@ namespace VerticalPlayer.Media
         public void Play(bool withAudio = true)
         {
             Trace($"AVEngine.Play() paused=false withAudio={withAudio}");
+            bool wasVideoOnly = !_audioDesired;
             _audioDesired = withAudio;
+
+            // 映像のみ(Play(false))の間、音声デコードスレッドは音声パケットを読み捨てたまま
+            // Demux先読み分（約3秒）だけ映像より先へ進んでしまう。そのまま音声を有効に戻すと
+            // 音声が映像より約3秒先から鳴り始め、映像が約50フレームを捨てて追いつくまで
+            // カクつく（レジューム直後・ドラッグシーク直後の症状）。音声ありへ戻る瞬間に
+            // 直近の映像位置へ再シークして、映像・音声を同じ位置から始め直す。
+            // 音声ストリームが無いエンジン、および別のシークが未消化の場合は何もしない。
+            if (withAudio && wasVideoOnly && _hasAudioStream)
+            {
+                double pos = _lastShownPtsSeconds;
+                lock (_seekLock)
+                {
+                    if (pos >= 0 && _pendingSeekSeconds < 0)
+                    {
+                        _pendingSeekSeconds = pos;
+                        Trace($"AVEngine.Play(): 映像のみ→音声ありへの切替のため映像位置{pos:F3}sへ再シークして音声を揃える");
+                    }
+                }
+            }
             _paused = false;
         }
 
@@ -795,6 +824,7 @@ namespace VerticalPlayer.Media
                                         Name = "AVEngine-AudioDecode"
                                     };
                                     audioDecodeThread.Start();
+                                    _hasAudioStream = true;
                                 }
                                 else
                                 {
@@ -1297,6 +1327,7 @@ namespace VerticalPlayer.Media
                                 int frameW = w, frameH = h;
                                 int frameStride = stride;
                                 double shownPts = ptsSeconds;
+                                _lastShownPtsSeconds = ptsSeconds;
 
                                 // DNN超解像（段階6）：EnsureEngine（初回はTensorRTエンジンの
                                 // 実ビルドが走り数十秒かかることがある）を絶対にデコードスレッド上で

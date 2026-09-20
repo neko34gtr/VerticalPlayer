@@ -29,7 +29,7 @@
         <!-- ========== 録画フォルダ種別・ドライブ選択・オプションバー ========== -->
         <!-- 「読み込む」ボタンは廃止。イベント種別/ドライブいずれかの選択が変わったら自動で
              読み込み直す（選択のたびに毎回ボタンを押す導線が無駄との指摘のため）。 -->
-        <Border Grid.Row="0" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
+        <Border x:Name="ToolbarBar" Grid.Row="0" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
             <StackPanel Orientation="Horizontal" Margin="8,6">
                 <TextBlock Text="フォルダ" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="4,0,6,0"/>
                 <ComboBox x:Name="EventFolderCombo" Width="100" Margin="0,0,4,0" Style="{StaticResource ModernCombo}"
@@ -52,7 +52,7 @@
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
                           Checked="RearLinkedCheck_Changed" Unchecked="RearLinkedCheck_Changed" Margin="0,0,16,0"/>
 
-                <TextBlock Text="表示倍率" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBlock Text="フロント倍率" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <ComboBox x:Name="ZoomCombo" Width="90" SelectionChanged="ZoomCombo_SelectionChanged" Margin="0,0,16,0"
                           Style="{StaticResource ModernCombo}">
                     <ComboBoxItem Content="0.25x" Tag="0.25"/>
@@ -63,6 +63,26 @@
                     <ComboBoxItem Content="3x" Tag="3"/>
                     <ComboBoxItem Content="4x" Tag="4"/>
                 </ComboBox>
+
+                <!-- リア倍率: リア表示スイッチがONの間だけ表示（コードビハインドのUpdateRearPipVisibilityで切替）。
+                     Tagはリア映像の等倍(オリジナル)を1.0とした縮小倍率。最大=オリジナル(映像エリアに収まる範囲)、
+                     最小0.115=従来のPiP既定サイズ(220x124)。中間値は暫定 -->
+                <StackPanel x:Name="RearZoomPanel" Orientation="Horizontal" Visibility="Collapsed">
+                    <TextBlock Text="リア倍率" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <ComboBox x:Name="RearZoomCombo" Width="90" SelectionChanged="RearZoomCombo_SelectionChanged" Margin="0,0,16,0"
+                              Style="{StaticResource ModernCombo}">
+                        <ComboBoxItem Content="0.11x" Tag="0.115" IsSelected="True"/>
+                        <ComboBoxItem Content="0.25x" Tag="0.25"/>
+                        <ComboBoxItem Content="0.5x" Tag="0.5"/>
+                        <ComboBoxItem Content="オリジナル" Tag="1"/>
+                    </ComboBox>
+                </StackPanel>
+
+                <!-- 車速OSD（映像右上に走行速度を大きく表示）。AppSettings.EnableOSDで永続化 -->
+                <CheckBox x:Name="SpeedOsdCheck" Content="車速OSD" IsChecked="True" Style="{StaticResource ModernCheck}"
+                          Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
+                          Checked="SpeedOsdCheck_Changed" Unchecked="SpeedOsdCheck_Changed" Margin="0,0,16,0"
+                          ToolTip="映像の右上に走行速度を大きく表示"/>
 
                 <CheckBox x:Name="DnnEnabledCheck" Content="AI推論(超解像)" Style="{StaticResource ModernCheck}"
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
@@ -75,7 +95,7 @@
              （Grid.Row="3"）に固定表示する。一方「日時」「緯度/経度」は従来通り地図の上に
              独立して表示する（チャート横のHudには詰め込まない）。地図の向き(縦/横/自動)は
              右サイドバーの列幅にのみ影響し、この日時/緯度経度パネルの位置には影響しない。 -->
-        <Grid Grid.Row="1">
+        <Grid x:Name="MainRowGrid" Grid.Row="1">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="LeftSidebarColumn" Width="16"/>
                 <ColumnDefinition Width="*"/>
@@ -99,7 +119,7 @@
                          「一度もホバーしていないと自動スクロールが効かない」不具合の原因に
                          なっていたため）。表示上はホストのWidth=16px＋ClipToBounds=Trueで
                          十分隠れるので、中身は常にVisible/レイアウト済みのまま持っておく。 -->
-                    <Grid x:Name="SidebarContent" Opacity="0">
+                    <Grid x:Name="SidebarContent">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
@@ -121,7 +141,7 @@
             </Border>
 
             <!-- 映像エリア -->
-            <Grid Grid.Column="1" Background="Black">
+            <Grid x:Name="VideoArea" Grid.Column="1" Background="Black" SizeChanged="VideoArea_SizeChanged">
                 <!-- フロント（メイン） -->
                 <media:FfmpegMediaElement x:Name="PlayerFront"
                               UseGpuPresenter="True"
@@ -159,12 +179,24 @@
                         </Grid>
                     </Border>
                 </Canvas>
+
+                <!-- 車速OSD: 数値を大きく、単位は小さく。文字サイズは映像エリアの高さに追従（VideoArea_SizeChanged）。
+                     クリックはすべて下のPiP/映像へ素通しする -->
+                <Border x:Name="SpeedOsd" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,10,20,0"
+                        IsHitTestVisible="False" Visibility="Collapsed">
+                    <TextBlock x:Name="SpeedOsdText" Foreground="#00FF00" FontWeight="Bold" FontSize="48">
+                        <TextBlock.Effect>
+                            <DropShadowEffect Color="Black" BlurRadius="8" ShadowDepth="2" Opacity="0.95"/>
+                        </TextBlock.Effect>
+                        <Run x:Name="SpeedOsdValue" Text="--"/><Run x:Name="SpeedOsdUnit" Text=" km/h" FontSize="20"/>
+                    </TextBlock>
+                </Border>
             </Grid>
 
             <!-- 右サイドバー: 上段=日時・緯度経度（常時固定表示）、下段=走行軌跡マップ。
                  列幅(RightSidebarColumnDef)だけを地図の向き(縦/横/自動)に応じて
                  ApplyMapOrientationが調整する（狭め=縦長ルート向き／広め=横長ルート向き）。 -->
-            <Grid Grid.Column="2">
+            <Grid x:Name="RightSidebarHost" Grid.Column="2">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
@@ -186,7 +218,7 @@
         <!-- ========== コントロールバー ========== -->
         <!-- 旧シークバーはAccelChart側へ統合したため、ここには代わりにデコード/画質処理/fpsの
              状態表示を並べる（要望「シークバーがあった箇所にデコード:HW等の表示を移動」）。 -->
-        <Border Grid.Row="2" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0">
+        <Border x:Name="ControlBar" Grid.Row="2" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
@@ -239,7 +271,7 @@
              常にこの右隣に固定表示し、高さもチャートと同じ130に揃えている。日時・緯度経度は
              ここには置かず、上の地図パネル側に表示する（詰め込みすぎて速度表示が途切れていた
              不具合への対応）。 -->
-        <Grid Grid.Row="3">
+        <Grid x:Name="ChartStrip" Grid.Row="3">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="145"/>

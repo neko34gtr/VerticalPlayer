@@ -363,14 +363,22 @@ namespace VerticalPlayer.Media
             _engine = new AVEngine(Dispatcher);
             _engine.Opened += OnEngineOpened;
             _engine.Failed += OnEngineFailed;
-            _engine.EndOfStream += () => RaiseEvent(new RoutedEventArgs(MediaEndedEvent, this));
+            _engine.EndOfStream += () =>
+            {
+                PlaybackPowerGuard.SetPlaying(this, false); // 再生終端に達したらスリープ抑制の対象から外す
+                RaiseEvent(new RoutedEventArgs(MediaEndedEvent, this));
+            };
 
             CompositionTarget.Rendering += OnRendering;
 
             // クライアント領域サイズが変わるたびに再フィット計算（黒帯なしレイアウトの追従）
             this.SizeChanged += (s, e) => RecomputeLayout();
             this.Loaded += (s, e) => RecomputeLayout();
-            this.Unloaded += (s, e) => CompositionTarget.Rendering -= OnRendering;
+            this.Unloaded += (s, e) =>
+            {
+                CompositionTarget.Rendering -= OnRendering;
+                PlaybackPowerGuard.SetPlaying(this, false);
+            };
         }
 
         private void OnRendering(object? sender, EventArgs e)
@@ -527,6 +535,7 @@ namespace VerticalPlayer.Media
         public void Play()
         {
             _isPlaying = true;
+            PlaybackPowerGuard.SetPlaying(this, true);
             Trace("[DIAG] Play() called");
             _engine.Play();
         }
@@ -534,12 +543,14 @@ namespace VerticalPlayer.Media
         public void Pause()
         {
             _isPlaying = false;
+            PlaybackPowerGuard.SetPlaying(this, false);
             _engine.Pause();
         }
 
         public void Stop()
         {
             _isPlaying = false;
+            PlaybackPowerGuard.SetPlaying(this, false);
             _engine.Stop();
             NaturalDuration = Duration.Automatic;
             NaturalVideoWidth = 0;

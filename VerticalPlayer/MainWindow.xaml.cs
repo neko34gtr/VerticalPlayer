@@ -47,6 +47,19 @@ namespace VerticalPlayer
         public bool DashcamRearLinked { get; set; } = true;
         public bool DashcamRearVisible { get; set; } = true;
         public double DashcamZoomScale { get; set; } = 2.0;
+        /// <summary>リア(PiP)の表示倍率。リア映像の等倍(オリジナル)を1.0とした縮小倍率。既定は最小(従来のPiP既定サイズ)。</summary>
+        public double DashcamRearZoomScale { get; set; } = 0.115;
+        /// <summary>リア(PiP)の位置。映像エリアの空き領域に対する比率0..1、-1=未設定(既定の左下)。</summary>
+        public double DashcamRearPipX { get; set; } = -1;
+        public double DashcamRearPipY { get; set; } = -1;
+
+        // ── 再生まわりの追加機能 ──
+        /// <summary>ドラレコモードの車速OSD（映像右上の走行速度表示）のON/OFF。</summary>
+        public bool EnableOSD { get; set; } = true;
+        /// <summary>再生中、無操作でマウスカーソルを隠すまでの時間(秒)。0以下で無効。</summary>
+        public double CursorHideDelaySec { get; set; } = 2.5;
+        /// <summary>再生中のスリープ(画面オフ/システムスリープ)防止。</summary>
+        public bool EnableSleepPrevention { get; set; } = true;
         public double DashcamWindowWidth { get; set; }
         public double DashcamWindowHeight { get; set; }
         public bool DashcamWasActive { get; set; }
@@ -216,6 +229,8 @@ namespace VerticalPlayer
         private double _prevVolume = 0.7;
         private bool _isPlaying = false;
         private double _currentRotation = 0;
+        private bool _enableSleepPrevention = true;
+        private double _cursorHideDelaySec = 2.5;
 
         // ── ドラレコモード ──
         private bool _isDashcamMode;
@@ -404,6 +419,7 @@ namespace VerticalPlayer
                 }
                 catch { /* 壊れていたらデフォルト */ }
             }
+            ApplyPlaybackComfortSettings(_enableSleepPrevention, _cursorHideDelaySec); // 設定ファイル無し/破損時は既定値
             CenterOnScreen();
             // 設定ファイルが無い(初回起動等)場合でも、起動引数でフォルダが渡されていれば
             // ドラレコモードへ直接入る。
@@ -412,6 +428,15 @@ namespace VerticalPlayer
                 EnterDashcamMode();
                 DashcamView.LoadFolderDirect(_startupFolderArg);
             }
+        }
+
+        /// <summary>再生中のスリープ防止とカーソル自動隠蔽を有効化する（アプリ全体で共通）。</summary>
+        private void ApplyPlaybackComfortSettings(bool sleepPrevention, double cursorHideDelaySec)
+        {
+            _enableSleepPrevention = sleepPrevention;
+            _cursorHideDelaySec = cursorHideDelaySec;
+            VerticalPlayer.Media.PlaybackPowerGuard.Enabled = sleepPrevention;
+            VerticalPlayer.Media.CursorAutoHider.Start(cursorHideDelaySec);
         }
 
         private void RestoreSettings(AppSettings s)
@@ -504,6 +529,11 @@ namespace VerticalPlayer
             DashcamView.RearLinked = s.DashcamRearLinked;
             DashcamView.RearVisible = s.DashcamRearVisible;
             DashcamView.ZoomScale = s.DashcamZoomScale;
+            DashcamView.RearZoomScale = s.DashcamRearZoomScale;
+            DashcamView.RearPipPosX = s.DashcamRearPipX;
+            DashcamView.RearPipPosY = s.DashcamRearPipY;
+            DashcamView.SpeedOsdEnabled = s.EnableOSD;
+            ApplyPlaybackComfortSettings(s.EnableSleepPrevention, s.CursorHideDelaySec);
             _dashcamWindowWidth = s.DashcamWindowWidth;
             _dashcamWindowHeight = s.DashcamWindowHeight;
 
@@ -549,6 +579,9 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
+            if (_isDashcamFullScreen) ExitDashcamFullScreen(); // 全画面のままのサイズ/位置を設定へ保存しないよう先に戻す
+            VerticalPlayer.Media.CursorAutoHider.Stop();
+            VerticalPlayer.Media.PlaybackPowerGuard.Shutdown();
             _mediaInfo?.Dispose();
             // RAMディスク運用のtrtcacheを、使われていれば永続バックアップへコピー
             Player.BackupDnnTrtCache();
@@ -574,6 +607,12 @@ namespace VerticalPlayer
                 DashcamRearLinked = DashcamView.RearLinked,
                 DashcamRearVisible = DashcamView.RearVisible,
                 DashcamZoomScale = DashcamView.ZoomScale,
+                DashcamRearZoomScale = DashcamView.RearZoomScale,
+                DashcamRearPipX = DashcamView.RearPipPosX,
+                DashcamRearPipY = DashcamView.RearPipPosY,
+                EnableOSD = DashcamView.SpeedOsdEnabled,
+                CursorHideDelaySec = _cursorHideDelaySec,
+                EnableSleepPrevention = _enableSleepPrevention,
                 DashcamWindowWidth = _isDashcamMode ? this.Width : _dashcamWindowWidth,
                 DashcamWindowHeight = _isDashcamMode ? this.Height : _dashcamWindowHeight,
                 DashcamWasActive = _isDashcamMode,
@@ -1842,6 +1881,7 @@ namespace VerticalPlayer
         private void ExitDashcamMode()
         {
             if (!_isDashcamMode) return;
+            if (_isDashcamFullScreen) ExitDashcamFullScreen(); // 通常モードのウィンドウ状態へ戻してから抜ける
             _isDashcamMode = false;
 
             DashcamView.StopPlayback();
@@ -1872,6 +1912,7 @@ namespace VerticalPlayer
         private void DashcamView_RequestWindowFit(double videoWidthPx, double videoHeightPx)
         {
             if (!_isDashcamMode) return;
+            if (_isDashcamFullScreen) return; // 全画面中はウィンドウをモニタ全体に固定
 
             const double leftSidebarWidth = 16; // 通常は折りたたみ状態（ホバー時のみ220pxへ一時的に拡張）
             const double rightSidebarWidth = 260;
@@ -1925,6 +1966,14 @@ namespace VerticalPlayer
                 return;
             }
 
+            // ドラレコ全画面中: Escで復帰、Spaceで再生/一時停止（他のキーは通常プレイヤー用のため無効化）
+            if (_isDashcamFullScreen)
+            {
+                if (e.Key == Key.Escape) { ExitDashcamFullScreen(); e.Handled = true; }
+                else if (e.Key == Key.Space) { DashcamView.TogglePlayPause(); e.Handled = true; }
+                return;
+            }
+
             switch (e.Key)
             {
                 case Key.Escape:
@@ -1969,6 +2018,10 @@ namespace VerticalPlayer
 
         private void ToggleFullScreen()
         {
+            // ドラレコモードでは別ウィンドウは作らず、ドラレコ画面ごとボーダレス全画面へ切り替える
+            // （プレイヤーインスタンス＝D3D11VAのHWデコード状態をそのまま保持するため）
+            if (_isDashcamMode) { ToggleDashcamFullScreen(); return; }
+
             Trace($"ToggleFullScreen called. Source={Player.Source}");
             if (Player.Source == null) { Trace("ToggleFullScreen: no source, abort"); return; }
 
@@ -2025,6 +2078,136 @@ namespace VerticalPlayer
             {
                 Trace($"ToggleFullScreen EXCEPTION: {ex}");
             }
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // ドラレコモード専用フルスクリーン（ボーダレス。モニタ全体を覆う）
+        // ─────────────────────────────────────────────────────────────────
+        private bool _isDashcamFullScreen;
+        private WindowState _fsPrevWindowState;
+        private Rect _fsPrevBounds;
+        private bool _fsPrevTopmost;
+        private ResizeMode _fsPrevResizeMode;
+        private CornerRadius _fsPrevCorner;
+        private Thickness _fsPrevBorderThickness;
+        private System.Windows.Media.Effects.Effect? _fsPrevShellEffect;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FsRect { public int Left, Top, Right, Bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FsMonitorInfo
+        {
+            public int cbSize;
+            public FsRect rcMonitor;
+            public FsRect rcWork;
+            public uint dwFlags;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern bool GetMonitorInfo(IntPtr hMonitor, ref FsMonitorInfo lpmi);
+
+        private void ToggleDashcamFullScreen()
+        {
+            if (_isDashcamFullScreen) ExitDashcamFullScreen();
+            else EnterDashcamFullScreen();
+        }
+
+        /// <summary>ウィンドウが乗っているモニタ全体の矩形(WPF単位)を返す。取得失敗時はプライマリ画面。</summary>
+        private Rect GetCurrentMonitorBounds()
+        {
+            try
+            {
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+                var hMon = MonitorFromWindow(hwnd, 2 /* MONITOR_DEFAULTTONEAREST */);
+                var mi = new FsMonitorInfo { cbSize = Marshal.SizeOf<FsMonitorInfo>() };
+                if (hMon != IntPtr.Zero && GetMonitorInfo(hMon, ref mi))
+                {
+                    var dpi = VisualTreeHelper.GetDpi(this);
+                    return new Rect(
+                        mi.rcMonitor.Left / dpi.DpiScaleX,
+                        mi.rcMonitor.Top / dpi.DpiScaleY,
+                        (mi.rcMonitor.Right - mi.rcMonitor.Left) / dpi.DpiScaleX,
+                        (mi.rcMonitor.Bottom - mi.rcMonitor.Top) / dpi.DpiScaleY);
+                }
+            }
+            catch { /* 下のフォールバックへ */ }
+            return new Rect(0, 0, SystemParameters.PrimaryScreenWidth, SystemParameters.PrimaryScreenHeight);
+        }
+
+        private void EnterDashcamFullScreen()
+        {
+            if (_isDashcamFullScreen || !_isDashcamMode) return;
+
+            // 復帰用に現在の状態を退避
+            _fsPrevWindowState = this.WindowState;
+            _fsPrevBounds = this.WindowState == WindowState.Normal
+                ? new Rect(this.Left, this.Top, this.Width, this.Height)
+                : this.RestoreBounds;
+            _fsPrevTopmost = this.Topmost;
+            _fsPrevResizeMode = this.ResizeMode;
+            _fsPrevCorner = WindowShell.CornerRadius;
+            _fsPrevBorderThickness = WindowShell.BorderThickness;
+            _fsPrevShellEffect = WindowShell.Effect;
+
+            var rc = GetCurrentMonitorBounds();
+
+            _resizingProgrammatically = true;
+            try
+            {
+                this.WindowState = WindowState.Normal;
+                this.ResizeMode = ResizeMode.NoResize;
+                this.Topmost = true;
+                this.Left = rc.Left;
+                this.Top = rc.Top;
+                this.Width = rc.Width;
+                this.Height = rc.Height;
+            }
+            finally { _resizingProgrammatically = false; }
+
+            // 角丸・枠・ドロップシャドウ・タイトルバーを外し、ドラレコ画面を全行にまたがらせる
+            WindowShell.CornerRadius = new CornerRadius(0);
+            WindowShell.BorderThickness = new Thickness(0);
+            WindowShell.Effect = null;
+            TitleBar.Visibility = Visibility.Collapsed;
+            Grid.SetRow(DashcamView, 0);
+            Grid.SetRowSpan(DashcamView, 3);
+
+            _isDashcamFullScreen = true;
+            DashcamView.SetFullScreen(true, _cursorHideDelaySec);
+        }
+
+        private void ExitDashcamFullScreen()
+        {
+            if (!_isDashcamFullScreen) return;
+            _isDashcamFullScreen = false;
+
+            DashcamView.SetFullScreen(false);
+
+            Grid.SetRow(DashcamView, 1);
+            Grid.SetRowSpan(DashcamView, 2);
+            TitleBar.Visibility = Visibility.Visible;
+            WindowShell.CornerRadius = _fsPrevCorner;
+            WindowShell.BorderThickness = _fsPrevBorderThickness;
+            WindowShell.Effect = _fsPrevShellEffect;
+
+            _resizingProgrammatically = true;
+            try
+            {
+                this.Topmost = _fsPrevTopmost;
+                this.ResizeMode = _fsPrevResizeMode;
+                this.WindowState = WindowState.Normal;
+                this.Left = _fsPrevBounds.Left;
+                this.Top = _fsPrevBounds.Top;
+                this.Width = _fsPrevBounds.Width;
+                this.Height = _fsPrevBounds.Height;
+                if (_fsPrevWindowState == WindowState.Maximized)
+                    this.WindowState = WindowState.Maximized;
+            }
+            finally { _resizingProgrammatically = false; }
         }
 
         // FullScreenWindowから隣接ファイルパスを取得
