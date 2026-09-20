@@ -1966,11 +1966,13 @@ namespace VerticalPlayer
                 return;
             }
 
-            // ドラレコ全画面中: Escで復帰、Spaceで再生/一時停止（他のキーは通常プレイヤー用のため無効化）
+            // ドラレコ全画面中: Escで復帰、Spaceで再生/一時停止、Mで地図・日時オーバーレイの表示切替
+            // （他のキーは通常プレイヤー用のため無効化）
             if (_isDashcamFullScreen)
             {
                 if (e.Key == Key.Escape) { ExitDashcamFullScreen(); e.Handled = true; }
                 else if (e.Key == Key.Space) { DashcamView.TogglePlayPause(); e.Handled = true; }
+                else if (e.Key == Key.M) { DashcamView.ToggleFullScreenMapOverlay(); e.Handled = true; }
                 return;
             }
 

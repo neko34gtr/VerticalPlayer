@@ -87,6 +87,20 @@ namespace VerticalPlayer.Dashcam
         private bool _thumbnailWorkerRunning;
 
         // リア(PiP)ドラッグ移動・リサイズ用状態
+        // ---- リア時刻ベース同期用 ----
+        // Front/Rearのファイル名タイムスタンプは実際の録画開始時刻（実測: 名前+120秒≒最終書込時刻）だが、
+        // リアはFrontと位相が異なる（リアの再起動等で0〜100秒超ずれる）。「同名ペア＝同時開始」と
+        // みなす従来方式ではずれるため、絶対時刻で対応付ける:
+        //   T = Front開始時刻 + Front再生位置、 リア再生位置 = T − リアclip開始時刻
+        private sealed record RearClip(DateTime Start, string FilePath);
+        private List<RearClip> _rearTimeline = new();
+        private string? _currentRearClipPath;        // 時刻ベースで読み込み中のリアclip（独立選択中はnull）
+        private DateTime _currentRearClipStart;
+        private string? _rearExhaustedPath;          // 想定より早く終了したclip（同じclipを再読込しない）
+        private string? _rearFailedPath;             // 開けなかったclip（同上）
+        private DateTime? _frontStart;               // 現在のFrontファイルの開始時刻
+        private const double RearClipMaxSeconds = 121; // 1clipの最大長(2分)＋余裕
+
         private bool _pipUserPositioned;
         // リアPiPの位置（映像エリアの空き領域に対する比率0..1、-1=未設定＝既定の左下配置）。
         // 比率で持つのはウィンドウ/フロント倍率が変わっても相対位置を保つため（永続化対象）。
@@ -204,7 +218,7 @@ namespace VerticalPlayer.Dashcam
                 if (wasPlaying) PlayerFront.Play();
             }
 
-            bool rearActive = _currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null);
+            bool rearActive = HasActiveRear();
             if (rearActive && PlayerRear.Source != null)
             {
                 var pos = PlayerRear.Position;
@@ -419,17 +433,154 @@ namespace VerticalPlayer.Dashcam
                 return;
             }
 
-            var availableRear = _rearGroups
-                .Where(g => g.RearVideoPath != null)
-                .Select(g => Path.GetFileName(g.RearVideoPath)!)
-                .ToList();
+            var rows = BuildPairOverlapRows();
+            if (rows.Count == 0)
+            {
+                AppMessageBox.Show(Window.GetWindow(this), "Front/Rearのファイルが見つかりません。",
+                    "ペア一覧", MessageBoxButton.OK, MessageBoxImage.Information, isDarkMode: true);
+                return;
+            }
 
-            //フォルダ文字列の取得箇所
-            var win = new DashcamPairListWindow(option.RootPath, DashcamFileScanner.FolderName(CurrentEventFolder), availableRear)
+            const string note = "ファイル名の時刻から算出したFront/Rearの対応です（1本=最大2分と仮定した推定）。" +
+                "FrontとRearは録画開始の位相がずれているため1対1にはならず、Frontに対して重なるRear、" +
+                "Rearに対して重なるFrontを、重なる区間ごとに1行で表示します。「ずれ」はRear開始−Front開始(秒)、" +
+                "「区間」はその行が占める各ファイル内の位置です。表示専用で、再生は同じ時刻情報で自動的に同期します。";
+
+            var win = new DashcamPairListWindow(rows, note)
             {
                 Owner = Window.GetWindow(this)
             };
             win.ShowDialog();
+        }
+
+        private const double PairListClipSeconds = 120; // 1ファイルの公称長(2分)
+
+        /// <summary>FrontとRearのファイル名時刻から、重なる区間ごとの対応行（n対n）を算出する。
+        /// 1ファイルの終端は「次のファイルの開始」と「開始+2分」のうち早い方とみなす。</summary>
+        private List<DashcamPairListWindow.PairOverlapRow> BuildPairOverlapRows()
+        {
+            var fronts = _frontGroups
+                .Select(g => (name: g.FrontVideoPath != null ? Path.GetFileName(g.FrontVideoPath) : null,
+                              start: ParseFileStamp(g.FrontVideoPath) ?? g.Timestamp))
+                .Where(x => x.name != null && x.start != null)
+                .Select(x => (name: x.name!, start: x.start!.Value))
+                .OrderBy(x => x.start)
+                .ToList();
+            var rears = _rearTimeline
+                .Select(c => (name: Path.GetFileName(c.FilePath), start: c.Start))
+                .ToList();
+
+            DateTime EndOf(List<(string name, DateTime start)> list, int i)
+            {
+                DateTime end = list[i].start.AddSeconds(PairListClipSeconds);
+                if (i + 1 < list.Count && list[i + 1].start < end) end = list[i + 1].start;
+                return end;
+            }
+
+            // 重なり(front idx, rear idx, 開始, 終了)を全列挙
+            var overlaps = new List<(int f, int r, DateTime s, DateTime e)>();
+            for (int i = 0; i < fronts.Count; i++)
+            {
+                DateTime fs = fronts[i].start, fe = EndOf(fronts, i);
+                for (int j = 0; j < rears.Count; j++)
+                {
+                    if (rears[j].start >= fe) break;
+                    DateTime re = EndOf(rears, j);
+                    DateTime s = fs > rears[j].start ? fs : rears[j].start;
+                    DateTime e = fe < re ? fe : re;
+                    if ((e - s).TotalSeconds > 0.5)
+                        overlaps.Add((i, j, s, e));
+                }
+            }
+
+            static string Pos(TimeSpan ts) => $"{(int)ts.TotalMinutes}:{ts.Seconds:00}";
+            static string RangeText(DateTime origin, DateTime s, DateTime e) => $"{Pos(s - origin)} – {Pos(e - origin)}";
+            static string Clock(DateTime dt) => dt.ToString("HH:mm:ss");
+
+            var rows = new List<DashcamPairListWindow.PairOverlapRow>();
+
+            foreach (var (f, r, s, e) in overlaps)
+            {
+                double offset = (rears[r].start - fronts[f].start).TotalSeconds;
+                rows.Add(new DashcamPairListWindow.PairOverlapRow
+                {
+                    Kind = DashcamPairListWindow.RowKind.Overlap,
+                    FrontFileName = fronts[f].name,
+                    FrontStartText = Clock(fronts[f].start),
+                    RearFileName = rears[r].name,
+                    RearStartText = Clock(rears[r].start),
+                    OffsetText = ((int)Math.Round(offset)).ToString("+0;-0;0"),
+                    FrontRangeText = RangeText(fronts[f].start, s, e),
+                    RearRangeText = RangeText(rears[r].start, s, e),
+                    FrontStart = fronts[f].start,
+                    RearStart = rears[r].start,
+                    SpanStart = s,
+                });
+            }
+
+            // Frontのうち、Rearが無い区間
+            for (int i = 0; i < fronts.Count; i++)
+            {
+                DateTime fs = fronts[i].start, fe = EndOf(fronts, i);
+                DateTime cursor = fs;
+                foreach (var o in overlaps.Where(o => o.f == i).OrderBy(o => o.s))
+                {
+                    if ((o.s - cursor).TotalSeconds > 0.5)
+                        rows.Add(new DashcamPairListWindow.PairOverlapRow
+                        {
+                            Kind = DashcamPairListWindow.RowKind.FrontOnly,
+                            FrontFileName = fronts[i].name,
+                            FrontStartText = Clock(fs),
+                            FrontRangeText = RangeText(fs, cursor, o.s),
+                            FrontStart = fs,
+                            SpanStart = cursor,
+                        });
+                    if (o.e > cursor) cursor = o.e;
+                }
+                if ((fe - cursor).TotalSeconds > 0.5)
+                    rows.Add(new DashcamPairListWindow.PairOverlapRow
+                    {
+                        Kind = DashcamPairListWindow.RowKind.FrontOnly,
+                        FrontFileName = fronts[i].name,
+                        FrontStartText = Clock(fs),
+                        FrontRangeText = RangeText(fs, cursor, fe),
+                        FrontStart = fs,
+                        SpanStart = cursor,
+                    });
+            }
+
+            // Rearのうち、Frontが無い区間
+            for (int j = 0; j < rears.Count; j++)
+            {
+                DateTime rs = rears[j].start, re = EndOf(rears, j);
+                DateTime cursor = rs;
+                foreach (var o in overlaps.Where(o => o.r == j).OrderBy(o => o.s))
+                {
+                    if ((o.s - cursor).TotalSeconds > 0.5)
+                        rows.Add(new DashcamPairListWindow.PairOverlapRow
+                        {
+                            Kind = DashcamPairListWindow.RowKind.RearOnly,
+                            RearFileName = rears[j].name,
+                            RearStartText = Clock(rs),
+                            RearRangeText = RangeText(rs, cursor, o.s),
+                            RearStart = rs,
+                            SpanStart = cursor,
+                        });
+                    if (o.e > cursor) cursor = o.e;
+                }
+                if ((re - cursor).TotalSeconds > 0.5)
+                    rows.Add(new DashcamPairListWindow.PairOverlapRow
+                    {
+                        Kind = DashcamPairListWindow.RowKind.RearOnly,
+                        RearFileName = rears[j].name,
+                        RearStartText = Clock(rs),
+                        RearRangeText = RangeText(rs, cursor, re),
+                        RearStart = rs,
+                        SpanStart = cursor,
+                    });
+            }
+
+            return rows;
         }
 
         private void RefreshDriveList()
@@ -513,6 +664,7 @@ namespace VerticalPlayer.Dashcam
             _groups = DashcamFileScanner.Scan(rootPath, folder);
             _frontGroups = _groups.Where(g => g.HasFront).ToList();
             _rearGroups = _groups.Where(g => g.HasRear).ToList();
+            BuildRearTimeline();
 
             FrontList.ItemsSource = _frontGroups;
             RearList.ItemsSource = _rearGroups;
@@ -696,6 +848,171 @@ namespace VerticalPlayer.Dashcam
             return await innerTask;
         }
 
+        // ---- リア時刻ベース同期 ----
+
+        private static DateTime? ParseFileStamp(string? path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            string name = Path.GetFileName(path);
+            if (name.Length >= 14 && DateTime.TryParseExact(name.AsSpan(0, 14), "yyyyMMddHHmmss",
+                    System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var dt))
+                return dt;
+            return null;
+        }
+
+        /// <summary>録画フォルダ内の全リアファイルを開始時刻順の連続タイムラインとして構築する。
+        /// ペアリング(近傍マッチ/DB)の結果には依存しない。</summary>
+        private void BuildRearTimeline()
+        {
+            var clips = new Dictionary<string, RearClip>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var g in _groups)
+            {
+                var st = ParseFileStamp(g.RearVideoPath);
+                if (st != null && g.RearVideoPath != null) clips[g.RearVideoPath] = new RearClip(st.Value, g.RearVideoPath);
+            }
+
+            var dirs = _groups
+                .SelectMany(g => new[] { g.FrontVideoPath, g.RearVideoPath })
+                .Where(p => !string.IsNullOrEmpty(p))
+                .Select(p => Path.GetDirectoryName(p!))
+                .Where(d => !string.IsNullOrEmpty(d))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var dir in dirs)
+            {
+                try
+                {
+                    foreach (var f in Directory.EnumerateFiles(dir!, "*_Rear.MP4"))
+                    {
+                        var st = ParseFileStamp(f);
+                        if (st != null) clips[f] = new RearClip(st.Value, f);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DashcamPlayErrorLogger.Log($"[RearTimeline] {dir} の列挙に失敗: {ex.Message}");
+                }
+            }
+
+            _rearTimeline = clips.Values.OrderBy(c => c.Start).ThenBy(c => c.FilePath, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        /// <summary>時刻tを含むリアclipを返す（無ければnull＝リアの録画が無い区間）。
+        /// clipの終端は「次のclipの開始」または開始+2分のうち早い方とみなす。</summary>
+        private RearClip? FindRearClipAt(DateTime t)
+        {
+            var tl = _rearTimeline;
+            int lo = 0, hi = tl.Count - 1, idx = -1;
+            while (lo <= hi)
+            {
+                int mid = (lo + hi) / 2;
+                if (tl[mid].Start <= t) { idx = mid; lo = mid + 1; }
+                else hi = mid - 1;
+            }
+            if (idx < 0) return null;
+
+            var c = tl[idx];
+            DateTime endEst = c.Start.AddSeconds(RearClipMaxSeconds);
+            if (idx + 1 < tl.Count && tl[idx + 1].Start < endEst) endEst = tl[idx + 1].Start;
+            if (t >= endEst) return null;
+            if (string.Equals(c.FilePath, _rearExhaustedPath, StringComparison.OrdinalIgnoreCase)) return null;
+            if (string.Equals(c.FilePath, _rearFailedPath, StringComparison.OrdinalIgnoreCase)) return null;
+            return c;
+        }
+
+        private bool UseTimeAlignedRear => RearLinked && _frontStart != null && _rearTimeline.Count > 0;
+
+        /// <summary>いまリア側を操作すべき状態か（Play/Pause/シーク/DNN等の対象にするか）。</summary>
+        private bool HasActiveRear()
+        {
+            if (!RearLinked) return _currentRearGroup != null;
+            if (UseTimeAlignedRear) return _currentRearClipPath != null;
+            return _currentFrontGroup?.HasRear == true;
+        }
+
+        /// <summary>現在のFront時刻から読み込むべきリアclipを決め、違っていれば読み込み直す。
+        /// Front切替後もリアの現clipが引き続きTを含むなら再読込せず、そのまま再生し続ける。</summary>
+        private void ReconcileRear()
+        {
+            if (!UseTimeAlignedRear) return;
+
+            var t = _frontStart!.Value + PlayerFront.Position;
+            var clip = FindRearClipAt(t);
+            if (clip == null)
+            {
+                if (_currentRearClipPath != null) StopRearForGap();
+                return;
+            }
+
+            if (string.Equals(clip.FilePath, _currentRearClipPath, StringComparison.OrdinalIgnoreCase)) return;
+            LoadRearClip(clip, t);
+        }
+
+        private void LoadRearClip(RearClip clip, DateTime t)
+        {
+            DashcamPlayErrorLogger.Log($"[RearClip] T={t:HH:mm:ss.f} → {Path.GetFileName(clip.FilePath)} 位置={(t - clip.Start).TotalSeconds:F1}s " +
+                $"(直前={Path.GetFileName(_currentRearClipPath) ?? "(なし)"})");
+
+            _currentRearClipPath = clip.FilePath;
+            _currentRearClipStart = clip.Start;
+            _currentRearGroup = _rearGroups.FirstOrDefault(g => string.Equals(g.RearVideoPath, clip.FilePath, StringComparison.OrdinalIgnoreCase));
+            _rearResyncWatch.Reset();
+            _rearSettleSamplePending = false;
+
+            _rearAvailable = false; // 新しいSourceが実際に開き終わるまでは「表示可能」とみなさない
+            UpdateRearPipVisibility();
+            PlayerRear.Stop();
+            PlayerRear.Source = new Uri(clip.FilePath);
+
+            SetListSelection(RearList, _currentRearGroup, scrollToTop: false);
+            if (_currentRearGroup != null)
+                ScrollSelectedToTop(RearList, _rearGroups.IndexOf(_currentRearGroup));
+        }
+
+        /// <summary>リアの録画が無い区間: リアを止めてPiPを黙って隠す（スイッチ自体は触らない）。</summary>
+        private void StopRearForGap()
+        {
+            PlayerRear.Stop();
+            _currentRearClipPath = null;
+            _currentRearGroup = null;
+            _rearAvailable = false;
+            UpdateRearPipVisibility();
+            SetListSelection(RearList, null, scrollToTop: false);
+        }
+
+        /// <summary>Front位置frontPosに対応するリア位置へ合わせる（シーク確定時）。</summary>
+        private async Task SeekRearToFrontPositionAsync(TimeSpan frontPos)
+        {
+            _rearExhaustedPath = null; // シークで時刻が飛ぶため、終了扱い/失敗扱いは解除する
+            _rearFailedPath = null;
+            _rearResyncWatch.Reset();
+            _rearSettleSamplePending = false;
+
+            if (UseTimeAlignedRear)
+            {
+                var t = _frontStart!.Value + frontPos;
+                var clip = FindRearClipAt(t);
+                if (clip == null)
+                {
+                    if (_currentRearClipPath != null) StopRearForGap();
+                    return;
+                }
+
+                if (!string.Equals(clip.FilePath, _currentRearClipPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    LoadRearClip(clip, t); // 開き終わり(MediaOpened)で位置を合わせる
+                    return;
+                }
+                await PlayerRear.StepToVideoOnlyAsync(t - clip.Start, timeoutMs: 2000);
+                return;
+            }
+
+            if (HasActiveRear())
+                await PlayerRear.StepToVideoOnlyAsync(frontPos, timeoutMs: 2000);
+        }
+
         // ---- リスト選択の同期補助 ----
 
         /// <summary>選択イベント(再生開始)を発火させずにリストの選択項目だけを設定する。</summary>
@@ -770,6 +1087,9 @@ namespace VerticalPlayer.Dashcam
         private void PlayFrontGroup(DashcamMediaGroup group)
         {
             _currentFrontGroup = group;
+            _frontStart = ParseFileStamp(group.FrontVideoPath) ?? group.Timestamp;
+            _rearExhaustedPath = null;
+            _rearFailedPath = null;
             _rearResyncWatch.Reset(); // 新しいファイルでは再同期の状態を初期化する
             _rearSettleSamplePending = false;
             CurrentFileChanged?.Invoke(Path.GetFileName(group.FrontVideoPath) ?? group.TimestampKey);
@@ -782,8 +1102,17 @@ namespace VerticalPlayer.Dashcam
                 PlayerFront.Source = new Uri(group.FrontVideoPath);
             }
 
-            if (RearLinked)
+            // リア連動の診断ログ（「次のシーンでフロントだけ切り替わりリアが付いて来ない」調査用）
+            DashcamPlayErrorLogger.Log($"[Scene] Front={group.TimestampKey} 開始={_frontStart:HH:mm:ss} RearLinked={RearLinked} 時刻同期={UseTimeAlignedRear} HasRear={group.HasRear} " +
+                $"RearPath={group.RearVideoPath ?? "(なし)"} 直前のリア={_currentRearGroup?.TimestampKey ?? "(null)"}");
+
+            if (UseTimeAlignedRear)
             {
+                ReconcileRear(); // 絶対時刻でリアclipを選ぶ（現clipが引き続きTを含むなら再読込しない）
+            }
+            else if (RearLinked)
+            {
+                // 時刻が取れない場合のフォールバック（従来のグループ単位の追従）
                 if (group.HasRear)
                 {
                     PlayRearGroup(group, keepListSelectionOnly: true); // 内部でRearListの選択色も更新される
@@ -806,6 +1135,7 @@ namespace VerticalPlayer.Dashcam
         private void PlayRearGroup(DashcamMediaGroup group, bool keepListSelectionOnly = false)
         {
             _currentRearGroup = group;
+            _currentRearClipPath = null; // 独立選択/フォールバックでは時刻ベースの管理から外す
             _wantsPlaying = true; // 独立選択(リア追従OFF時)から呼ばれた場合もここで意図をセットする
             _rearAvailable = false; // 新しいSourceが実際に開き終わるまでは「表示可能」とみなさない
             UpdateRearPipVisibility();
@@ -941,7 +1271,24 @@ namespace VerticalPlayer.Dashcam
 
         private void PlayerRear_MediaOpened(object sender, RoutedEventArgs e)
         {
+            DashcamPlayErrorLogger.Log($"[RearOpened] Rear={_currentRearGroup?.TimestampKey ?? "(null)"} wantsPlaying={_wantsPlaying} " +
+                $"Front位置={PlayerFront.Position.TotalSeconds:F2}s Rear映像={PlayerRear.NaturalVideoWidth}x{PlayerRear.NaturalVideoHeight}");
             PlayerRear.ResetDnnEngineForNewFile();
+
+            // 時刻ベース同期: リアclipがFrontより前から始まっている/Front再生が進んでいる場合は、
+            // 現在のFront時刻に対応する位置から始める（開き終わりまでにFrontが進んだ分も含む）
+            if (RearLinked && _frontStart != null && _currentRearClipPath != null)
+            {
+                var desired = (_frontStart.Value + PlayerFront.Position) - _currentRearClipStart;
+                if (desired > TimeSpan.FromMilliseconds(300))
+                {
+                    var target = desired + _rearSeekLead;
+                    if (PlayerRear.NaturalDuration.HasTimeSpan && target > PlayerRear.NaturalDuration.TimeSpan)
+                        target = PlayerRear.NaturalDuration.TimeSpan;
+                    PlayerRear.Position = target;
+                }
+            }
+
             _rearAvailable = true;
             ApplyRearPipLayout(); // 「オリジナル」倍率はリア映像の実サイズで再計算する
             UpdateRearPipVisibility();
@@ -971,6 +1318,8 @@ namespace VerticalPlayer.Dashcam
             // 単に「今は表示できるものが無い」状態にしてPiPを黙って隠すだけにする。
             DashcamPlayErrorLogger.Log($"[MediaFailed] Rear={_currentRearGroup?.TimestampKey ?? "(null)"}");
             PlayerRear.Stop();
+            _rearFailedPath = _currentRearClipPath; // 時刻ベース同期で同じclipを読み直し続けないよう記録
+            _currentRearClipPath = null;
             _currentRearGroup = null;
             _rearAvailable = false;
             UpdateRearPipVisibility();
@@ -1021,7 +1370,13 @@ namespace VerticalPlayer.Dashcam
 
         private void PlayerRear_MediaEnded(object sender, RoutedEventArgs e)
         {
-            if (RearLinked) return;
+            DashcamPlayErrorLogger.Log($"[RearEnded] Rear={_currentRearGroup?.TimestampKey ?? "(null)"} RearLinked={RearLinked} Front位置={PlayerFront.Position.TotalSeconds:F2}s");
+            if (RearLinked)
+            {
+                // 追従中: 次のclipへの切替は時刻ベース(ReconcileRear)が行う。終了したclipは再読込しない
+                _rearExhaustedPath = _currentRearClipPath;
+                return;
+            }
             if (_currentRearGroup is null) return;
             int idx = _rearGroups.IndexOf(_currentRearGroup);
             if (idx < 0)
@@ -1068,7 +1423,7 @@ namespace VerticalPlayer.Dashcam
             else
             {
                 PlayerFront.Play();
-                if (_currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null)) PlayerRear.Play();
+                if (HasActiveRear()) PlayerRear.Play();
                 PlayPauseButton.Content = "⏸";
                 _wantsPlaying = true;
             }
@@ -1119,6 +1474,7 @@ namespace VerticalPlayer.Dashcam
         {
             PlayerFront.Stop();
             PlayerRear.Stop();
+            _currentRearClipPath = null;
             _isPlaying = false;
             _wantsPlaying = false;
             PlayPauseButton.Content = "▶";
@@ -1326,8 +1682,18 @@ namespace VerticalPlayer.Dashcam
 
             // リアリストは追従ON/OFFに関わらず常に選択可能にする（手動選択のしやすさのため）。
 
-            if (RearLinked && _currentFrontGroup?.HasRear == true)
+            if (!RearLinked) return;
+
+            if (UseTimeAlignedRear)
+            {
+                _rearExhaustedPath = null;
+                _rearFailedPath = null;
+                ReconcileRear();
+            }
+            else if (_currentFrontGroup?.HasRear == true)
+            {
                 PlayRearGroup(_currentFrontGroup);
+            }
         }
 
         private void ZoomCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1389,7 +1755,7 @@ namespace VerticalPlayer.Dashcam
             }
 
             await EnableDnnAsync(PlayerFront);
-            if (_currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null))
+            if (HasActiveRear())
                 await EnableDnnAsync(PlayerRear);
         }
 
@@ -1468,8 +1834,7 @@ namespace VerticalPlayer.Dashcam
             // 位置だけ動かす。
             AccelChart.SetPlayhead(target);
             await PlayerFront.StepToVideoOnlyAsync(target, timeoutMs: 2000);
-            if (_currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null))
-                await PlayerRear.StepToVideoOnlyAsync(target, timeoutMs: 2000);
+            await SeekRearToFrontPositionAsync(target);
 
             _isDragging = false;
             _dragCompleting = false;
@@ -1477,7 +1842,7 @@ namespace VerticalPlayer.Dashcam
             if (_wasPlayingBeforeSeekDrag)
             {
                 PlayerFront.Play();
-                if (_currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null)) PlayerRear.Play();
+                if (HasActiveRear()) PlayerRear.Play();
                 _isPlaying = true;
                 PlayPauseButton.Content = "⏸";
             }
@@ -1502,7 +1867,9 @@ namespace VerticalPlayer.Dashcam
         }
 
         // ---- フルスクリーン（MainWindowから切替。プレイヤーは同一インスタンスのまま表示だけ切り替える）----
-        //  ・ツールバー/左右サイドバーを隠し、映像を全面に広げる。
+        //  ・ツールバー/左サイドバー(リスト)を隠し、映像を全面に広げる。
+        //  ・右サイドバー(日時・緯度経度＋走行軌跡マップ)は、車速OSDの下・チャートの上の右端へ
+        //    半透明のオーバーレイとして重ねる（Mキー[MainWindow側]で表示/非表示を切替）。
         //  ・加速度チャート(＋速度/加速度HUD)は映像下部へ半透明で重ねる（常時表示）。
         //  ・再生コントロールバーはマウスを動かすと現れ、再生中に無操作が続くと隠れる（一時停止中は出しっぱなし）。
 
@@ -1512,6 +1879,7 @@ namespace VerticalPlayer.Dashcam
         private long _fsLastActivityTick;
         private double _fsControlsHideDelaySec = 2.5;
         private Brush? _fsSavedControlBarBackground;
+        private bool _fsMapOverlayVisible = true;
 
         public bool IsFullScreen => _isFullScreen;
 
@@ -1534,8 +1902,13 @@ namespace VerticalPlayer.Dashcam
                 ToolbarBar.Visibility = Visibility.Collapsed;
                 LeftSidebarHost.Visibility = Visibility.Collapsed;
                 LeftSidebarColumn.Width = new GridLength(0);
-                RightSidebarHost.Visibility = Visibility.Collapsed;
+                // 右サイドバー列は0幅にし、サイドバー本体は映像列(1)の右上へオーバーレイとして移す
                 RightSidebarColumnDef.Width = new GridLength(0);
+                Grid.SetColumn(RightSidebarHost, 1);
+                Panel.SetZIndex(RightSidebarHost, 60);
+                RightSidebarHost.HorizontalAlignment = HorizontalAlignment.Right;
+                RightSidebarHost.VerticalAlignment = VerticalAlignment.Top;
+                RightSidebarHost.Opacity = 0.8;
 
                 // 映像を全行にまたがらせ、下段(コントロールバー/チャート)を映像の上へ重ねる
                 Grid.SetRow(MainRowGrid, 0);
@@ -1548,6 +1921,8 @@ namespace VerticalPlayer.Dashcam
                 _fsLastMousePos = System.Windows.Input.Mouse.GetPosition(this);
                 _fsLastActivityTick = Environment.TickCount64;
                 ControlBar.Visibility = Visibility.Visible;
+
+                UpdateFullScreenMapOverlay();
 
                 PreviewMouseMove += FullScreen_PreviewMouseMove;
                 _fsControlsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
@@ -1564,6 +1939,15 @@ namespace VerticalPlayer.Dashcam
                 LeftSidebarHost.Visibility = Visibility.Visible;
                 LeftSidebarColumn.Width = new GridLength(16);
                 LeftSidebarHost_MouseLeave(this, null!); // 折りたたみ状態(幅16px)へ戻す
+                // オーバーレイ化していた右サイドバーを通常の右列へ戻す
+                Grid.SetColumn(RightSidebarHost, 2);
+                Panel.SetZIndex(RightSidebarHost, 0);
+                RightSidebarHost.ClearValue(FrameworkElement.WidthProperty);
+                RightSidebarHost.ClearValue(FrameworkElement.HeightProperty);
+                RightSidebarHost.ClearValue(FrameworkElement.MarginProperty);
+                RightSidebarHost.HorizontalAlignment = HorizontalAlignment.Stretch;
+                RightSidebarHost.VerticalAlignment = VerticalAlignment.Stretch;
+                RightSidebarHost.Opacity = 1.0;
                 RightSidebarHost.Visibility = Visibility.Visible;
                 RightSidebarColumnDef.Width = new GridLength(_mapHorizontal ? 420 : 260);
 
@@ -1575,6 +1959,38 @@ namespace VerticalPlayer.Dashcam
                     ControlBar.Background = _fsSavedControlBarBackground;
                 ChartStrip.Opacity = 1.0;
             }
+        }
+
+        /// <summary>全画面中の地図・日時オーバーレイの表示/非表示を切り替える。</summary>
+        public void ToggleFullScreenMapOverlay()
+        {
+            _fsMapOverlayVisible = !_fsMapOverlayVisible;
+            UpdateFullScreenMapOverlay();
+        }
+
+        /// <summary>全画面中の右サイドバー(日時・緯度経度＋地図)オーバーレイの位置とサイズを更新する。
+        /// 上端は車速OSDの下、下端は再生コントロールバーとチャートの上に収める。</summary>
+        private void UpdateFullScreenMapOverlay()
+        {
+            if (!_isFullScreen) return;
+            if (!_fsMapOverlayVisible)
+            {
+                RightSidebarHost.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            double width = _mapHorizontal ? 420 : 260;
+            double top = SpeedOsdEnabled && SpeedOsdText != null
+                ? 10 + SpeedOsdText.FontSize * 1.4 + 8 // OSD(数値＋余白)の下
+                : 12;
+            double bottomReserve = ChartStrip.ActualHeight + 56 + 16; // チャート＋コントロールバー＋余白
+            double available = MainRowGrid.ActualHeight - top - bottomReserve;
+            double height = Math.Clamp(width * 1.25, 200, Math.Max(200, available));
+
+            RightSidebarHost.Width = width;
+            RightSidebarHost.Height = height;
+            RightSidebarHost.Margin = new Thickness(0, top, 12, 0);
+            RightSidebarHost.Visibility = Visibility.Visible;
         }
 
         private void FullScreen_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
@@ -1608,7 +2024,11 @@ namespace VerticalPlayer.Dashcam
 
         private void SpeedOsdCheck_Changed(object sender, RoutedEventArgs e) => UpdateSpeedOsd(_lastOsdFrame);
 
-        private void VideoArea_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateSpeedOsdFontSize();
+        private void VideoArea_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            UpdateSpeedOsdFontSize();
+            UpdateFullScreenMapOverlay(); // 全画面中のみ動作（OSDの文字サイズ確定後に配置を再計算）
+        }
 
         /// <summary>文字サイズを映像エリアの高さの約9%に追従させる（数値本体。単位は40%）。</summary>
         private void UpdateSpeedOsdFontSize()
@@ -1686,14 +2106,23 @@ namespace VerticalPlayer.Dashcam
                 _fpsWindowStart = now;
             }
 
-            bool hasActiveRear = _currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null);
-            if (!hasActiveRear || _isDragging)
+            if (RearLinked && !_isDragging)
+                ReconcileRear(); // Frontの現在時刻に対してリアclipを切り替える/外す
+
+            bool timeAligned = UseTimeAlignedRear && _currentRearClipPath != null;
+            bool rearReady = timeAligned ? _rearAvailable : HasActiveRear();
+            if (!RearLinked || !rearReady || _isDragging)
             {
                 _rearSettleSamplePending = false;
                 return;
             }
 
-            var diff = PlayerFront.Position - PlayerRear.Position; // 正=リアが遅れている
+            // 時刻ベース: リアの目標位置 = (Front開始時刻+Front位置) − リアclip開始時刻。
+            // フォールバック時は従来どおり「同名ペア＝同時開始」としてFront位置に合わせる。
+            TimeSpan desiredRearPos = timeAligned
+                ? (_frontStart!.Value + PlayerFront.Position) - _currentRearClipStart
+                : PlayerFront.Position;
+            var diff = desiredRearPos - PlayerRear.Position; // 正=リアが遅れている
 
             // 再同期の約1.5秒後に残っている遅れを、シーク所要時間ぶんの遅れとして学習し
             // 次回のシーク先へ先乗せする（一時停止中や不安定な状態は学習しない）。
@@ -1710,9 +2139,10 @@ namespace VerticalPlayer.Dashcam
             bool cooledDown = !_rearResyncWatch.IsRunning || _rearResyncWatch.Elapsed >= ResyncCooldown;
             if (RearLinked && cooledDown && diff.Duration() > ResyncThreshold)
             {
-                var target = PlayerFront.Position + _rearSeekLead;
+                var target = desiredRearPos + _rearSeekLead;
                 if (PlayerRear.NaturalDuration.HasTimeSpan && target > PlayerRear.NaturalDuration.TimeSpan)
                     target = PlayerRear.NaturalDuration.TimeSpan;
+                DashcamPlayErrorLogger.Log($"[RearResync] diff={diff.TotalSeconds:F2}s → Rear位置={target.TotalSeconds:F2}s");
                 PlayerRear.Position = target;
                 _rearResyncWatch.Restart();
                 _rearSettleSamplePending = true;
@@ -1811,7 +2241,7 @@ namespace VerticalPlayer.Dashcam
         {
             if (_mapHorizontal == horizontal) return;
             _mapHorizontal = horizontal;
-            if (_isFullScreen) return; // フルスクリーン中は右サイドバー0幅のまま。復帰時に_mapHorizontalから戻す
+            if (_isFullScreen) { UpdateFullScreenMapOverlay(); return; } // 全画面中は列幅を触らずオーバーレイの幅だけ更新。復帰時に_mapHorizontalから戻す
             RightSidebarColumnDef.Width = new GridLength(horizontal ? 420 : 260);
         }
 
