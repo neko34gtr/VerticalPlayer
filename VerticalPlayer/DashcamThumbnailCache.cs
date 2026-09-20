@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using Microsoft.Data.Sqlite;
 
@@ -67,6 +68,94 @@ namespace VerticalPlayer.Dashcam
             catch
             {
                 return null; // キャッシュが読めなくても生成し直せば良いだけなので致命的にしない
+            }
+        }
+
+        /// <summary>
+        /// 多数のファイル分を1回でまとめて取得する（一覧の初期表示用）。ファイルの更新日時取得は並列で先に済ませ、
+        /// DBは1本の接続・1つのコマンドを使い回して引く。キャッシュが無い/更新日時が違うパスは結果に含まれない。
+        /// </summary>
+        public static Dictionary<string, byte[]> TryGetMany(IReadOnlyList<string> videoPaths)
+        {
+            var result = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                EnsureInitialized();
+
+                var ticks = new long[videoPaths.Count];
+                System.Threading.Tasks.Parallel.For(0, videoPaths.Count, i =>
+                {
+                    try { ticks[i] = File.GetLastWriteTimeUtc(videoPaths[i]).Ticks; }
+                    catch { ticks[i] = -1; }
+                });
+
+                using var conn = OpenConnection();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT ImageData FROM Thumbnails WHERE Path = $p AND LastWriteTicks = $t LIMIT 1;";
+                var pp = cmd.Parameters.Add("$p", SqliteType.Text);
+                var pt = cmd.Parameters.Add("$t", SqliteType.Integer);
+
+                for (int i = 0; i < videoPaths.Count; i++)
+                {
+                    if (ticks[i] < 0) continue;
+                    pp.Value = videoPaths[i];
+                    pt.Value = ticks[i];
+                    using var reader = cmd.ExecuteReader();
+                    if (reader.Read())
+                        result[videoPaths[i]] = (byte[])reader["ImageData"];
+                }
+            }
+            catch
+            {
+                // 途中まで取れた分だけ返す（残りは生成し直すだけなので致命的にしない）
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// 多数のファイル分を1トランザクションでまとめて保存する（1件ずつ保存すると毎回コミット＝ディスク同期が走り遅い）。
+        /// キャッシュなので同期は緩めて(synchronous=NORMAL)高速化している。
+        /// </summary>
+        public static void SaveBatch(IEnumerable<(string path, byte[] data)> items)
+        {
+            try
+            {
+                EnsureInitialized();
+                using var conn = OpenConnection();
+                using (var pragma = conn.CreateCommand())
+                {
+                    pragma.CommandText = "PRAGMA synchronous=NORMAL;";
+                    pragma.ExecuteNonQuery();
+                }
+
+                using var tx = conn.BeginTransaction();
+                using var del = conn.CreateCommand();
+                del.Transaction = tx;
+                del.CommandText = "DELETE FROM Thumbnails WHERE Path = $p;";
+                var delP = del.Parameters.Add("$p", SqliteType.Text);
+
+                using var ins = conn.CreateCommand();
+                ins.Transaction = tx;
+                ins.CommandText = "INSERT INTO Thumbnails (Path, LastWriteTicks, ImageData) VALUES ($p, $t, $d);";
+                var insP = ins.Parameters.Add("$p", SqliteType.Text);
+                var insT = ins.Parameters.Add("$t", SqliteType.Integer);
+                var insD = ins.Parameters.Add("$d", SqliteType.Blob);
+
+                foreach (var (path, data) in items)
+                {
+                    long ticks = File.GetLastWriteTimeUtc(path).Ticks;
+                    delP.Value = path;
+                    del.ExecuteNonQuery();
+                    insP.Value = path;
+                    insT.Value = ticks;
+                    insD.Value = data;
+                    ins.ExecuteNonQuery();
+                }
+                tx.Commit();
+            }
+            catch
+            {
+                // 保存に失敗しても再生自体には影響しない（次回また生成し直すだけ）
             }
         }
 

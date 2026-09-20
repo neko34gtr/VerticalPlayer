@@ -15,7 +15,8 @@ namespace VerticalPlayer.Dashcam
         double AccelX,            // 左右G（軸割り当ては暫定、要校正）
         double AccelY,            // 前後G（同上）
         double AccelZ,            // 上下G（同上）
-        bool HasGpsFix = false    // GPS/レコード有効フラグ（バイナリのHeader値に基づく）
+        bool HasGpsFix = false,   // GPS/レコード有効フラグ（バイナリのHeader値に基づく）
+        bool SpeedEstimated = false // 測位ロスト区間(トンネル等)の速度を前後の測位速度から補間した推定値か（位置は無効のまま）
     );
 
     /// <summary>

@@ -60,6 +60,9 @@ namespace VerticalPlayer
         public double CursorHideDelaySec { get; set; } = 2.5;
         /// <summary>再生中のスリープ(画面オフ/システムスリープ)防止。</summary>
         public bool EnableSleepPrevention { get; set; } = true;
+        /// <summary>測位ロスト区間(トンネル等)の速度を推定補間する最大の長さ(秒)。0以下で無効。
+        /// 既定900秒＝日本最長の道路トンネル(山手トンネル約18.2km)を80km/hで走る約14分に余裕を持たせた値。</summary>
+        public double SpeedEstimateMaxGapSec { get; set; } = 900;
         public double DashcamWindowWidth { get; set; }
         public double DashcamWindowHeight { get; set; }
         public bool DashcamWasActive { get; set; }
@@ -231,6 +234,7 @@ namespace VerticalPlayer
         private double _currentRotation = 0;
         private bool _enableSleepPrevention = true;
         private double _cursorHideDelaySec = 2.5;
+        private double _speedEstimateMaxGapSec = 900;
 
         // ── ドラレコモード ──
         private bool _isDashcamMode;
@@ -533,6 +537,8 @@ namespace VerticalPlayer
             DashcamView.RearPipPosX = s.DashcamRearPipX;
             DashcamView.RearPipPosY = s.DashcamRearPipY;
             DashcamView.SpeedOsdEnabled = s.EnableOSD;
+            _speedEstimateMaxGapSec = s.SpeedEstimateMaxGapSec;
+            VerticalPlayer.Dashcam.NmeaSensorParser.MaxEstimateGapSeconds = _speedEstimateMaxGapSec;
             ApplyPlaybackComfortSettings(s.EnableSleepPrevention, s.CursorHideDelaySec);
             _dashcamWindowWidth = s.DashcamWindowWidth;
             _dashcamWindowHeight = s.DashcamWindowHeight;
@@ -613,6 +619,7 @@ namespace VerticalPlayer
                 EnableOSD = DashcamView.SpeedOsdEnabled,
                 CursorHideDelaySec = _cursorHideDelaySec,
                 EnableSleepPrevention = _enableSleepPrevention,
+                SpeedEstimateMaxGapSec = _speedEstimateMaxGapSec,
                 DashcamWindowWidth = _isDashcamMode ? this.Width : _dashcamWindowWidth,
                 DashcamWindowHeight = _isDashcamMode ? this.Height : _dashcamWindowHeight,
                 DashcamWasActive = _isDashcamMode,

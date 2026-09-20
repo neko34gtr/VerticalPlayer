@@ -26,10 +26,10 @@
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="速度 (km/h)" Foreground="{StaticResource TextAccentCyan}" FontSize="9" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                <TextBlock Grid.Column="0" Text="{Binding SpeedLabelText}" Foreground="{StaticResource TextAccentCyan}" FontSize="9" VerticalAlignment="Center" HorizontalAlignment="Left"/>
                 <!-- 数値のみ背景カード -->
                 <Border Grid.Column="1" Background="{StaticResource BgCard}" CornerRadius="4" Padding="8,2" MinWidth="45">
-                    <TextBlock Text="{Binding SpeedText}" Foreground="White" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    <TextBlock Text="{Binding SpeedText}" Foreground="{Binding SpeedBrush}" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 </Border>
             </Grid>
 

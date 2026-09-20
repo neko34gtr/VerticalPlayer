@@ -54,6 +54,20 @@ namespace VerticalPlayer.Dashcam
         private const double SettleImuMinShiftG = 0.10;       // 加速度平均の変化がこれ未満なら実加減速なしとみなす下限
         private const double SettleImuExpectedRatio = 0.4;    // 速度変化から期待される加減速Gに対する比率
 
+        // ---- 測位ロスト区間(トンネル等)の速度推定 ----
+        // 測位を失っている間は速度が記録されない(0扱い)ため、区間の直前の測位速度と復帰後に収束した
+        // 測位速度の間を線形補間した「推定速度」で埋める。トンネル内は概ね一定速度で走る前提。
+        // 加速度センサーの積分は、ノイズ(標準偏差0.05G前後)が区間内の実際の速度変化(0.01〜0.02G相当)に
+        // 埋もれるため使わない。片側の速度しか無い場合はその値を保持する。
+        // 区間の長さ(ファイルをまたぐ場合は前後のファイル分を含む)がこの秒数を超える場合は推定しない
+        // （既定900秒＝日本最長の道路トンネル山手トンネル約18.2kmを80km/hで走る約14分に余裕を持たせた値）。0以下で無効。
+        public static double MaxEstimateGapSeconds { get; set; } = 900;
+
+        /// <summary>ファイルをまたぐ測位ロスト区間の推定用に、前後のファイルから得た情報。
+        /// SpeedBefore/After: 区間の直前/直後の測位速度(無ければnull)。GapBefore/AfterSeconds: このファイルの先頭/末尾を
+        /// 起点に、その測位が得られた地点までにファイル外で経過している秒数。</summary>
+        public sealed record SpeedGapContext(double? SpeedBefore, double GapBeforeSeconds, double? SpeedAfter, double GapAfterSeconds);
+
         /// <summary>
         /// NMEA(実体は独自バイナリ)ファイルをパースする。
         /// </summary>
@@ -63,7 +77,9 @@ namespace VerticalPlayer.Dashcam
         /// 「有効レコード数で均等按分」して算出する（レコード自体には明示的なタイムスタンプが
         /// 無いため、こちらを優先する）。未指定の場合は10Hzサンプリング（1レコード=100ms）を
         /// 仮定して算出する（精度は低い）。</param>
-        public static List<DashcamSensorFrame> Parse(string nmeaFilePath, DateTime? startTimeHint = null, TimeSpan? videoDurationHint = null)
+        /// <param name="gapContext">先頭/末尾が測位ロストのとき、前後のファイルから得た速度推定用の情報（省略可）。</param>
+        public static List<DashcamSensorFrame> Parse(string nmeaFilePath, DateTime? startTimeHint = null, TimeSpan? videoDurationHint = null,
+            SpeedGapContext? gapContext = null)
         {
             var frames = new List<DashcamSensorFrame>();
             if (!File.Exists(nmeaFilePath))
@@ -115,8 +131,12 @@ namespace VerticalPlayer.Dashcam
             double secPerRecord = videoDurationHint.HasValue && raw.Count > 1
                 ? videoDurationHint.Value.TotalSeconds / (raw.Count - 1)
                 : 0.1;
+            var estimatedArr = new bool[raw.Count];
             if (secPerRecord > 0)
+            {
                 CorrectReacquisitionSpeedTransient(hasFixArr, speeds, axG, ayG, azG, secPerRecord);
+                EstimateSpeedInGpsLoss(hasFixArr, speeds, estimatedArr, secPerRecord, gapContext);
+            }
 
             for (int i = 0; i < raw.Count; i++)
             {
@@ -156,7 +176,8 @@ namespace VerticalPlayer.Dashcam
                     AccelX: ax,
                     AccelY: ay,
                     AccelZ: az,
-                    HasGpsFix: r.hasFix));
+                    HasGpsFix: r.hasFix,
+                    SpeedEstimated: estimatedArr[i]));
             }
 
             return frames;
@@ -206,6 +227,54 @@ namespace VerticalPlayer.Dashcam
 
                 for (int j = k; j < s; j++)
                     speed[j] = vStable;
+            }
+        }
+
+        /// <summary>測位ロスト区間の速度を、直前の測位速度と復帰後の測位速度の線形補間で埋める。</summary>
+        private static void EstimateSpeedInGpsLoss(bool[] hasFix, double[] speed, bool[] estimated, double secPerRecord, SpeedGapContext? ctx)
+        {
+            double maxGap = MaxEstimateGapSeconds;
+            if (maxGap <= 0) return;
+
+            int n = speed.Length;
+            int a = 0;
+            while (a < n)
+            {
+                if (hasFix[a]) { a++; continue; }
+                int b = a;
+                while (b + 1 < n && !hasFix[b + 1]) b++;
+
+                // 区間の前後の測位速度（ファイルの端に接する側は前後のファイルの情報を使う）
+                double? v0 = null, v1 = null;
+                double gapBefore = 0, gapAfter = 0;
+                if (a > 0) v0 = speed[a - 1];
+                else if (ctx != null) { v0 = ctx.SpeedBefore; gapBefore = ctx.GapBeforeSeconds; }
+                if (b < n - 1) v1 = speed[b + 1];
+                else if (ctx != null) { v1 = ctx.SpeedAfter; gapAfter = ctx.GapAfterSeconds; }
+
+                double runSec = (b - a + 1) * secPerRecord;
+                double total = gapBefore + runSec + gapAfter;
+
+                if (total <= maxGap && (v0.HasValue || v1.HasValue))
+                {
+                    for (int k = a; k <= b; k++)
+                    {
+                        double v;
+                        if (v0.HasValue && v1.HasValue && total > 0)
+                        {
+                            double elapsed = gapBefore + (k - a + 0.5) * secPerRecord;
+                            v = v0.Value + (v1.Value - v0.Value) * (elapsed / total);
+                        }
+                        else
+                        {
+                            v = v0 ?? v1!.Value; // 片側のみ: その値を保持
+                        }
+                        speed[k] = Math.Max(0, v);
+                        estimated[k] = true;
+                    }
+                }
+
+                a = b + 1;
             }
         }
 

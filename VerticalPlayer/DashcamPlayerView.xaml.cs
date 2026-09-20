@@ -85,6 +85,7 @@ namespace VerticalPlayer.Dashcam
         private readonly HashSet<string> _finalizedThumbnailPaths = new(); // 正規版(DB保存対象)まで到達済みのパス
         private const int FastThumbnailCount = 8; // 初期表示ですぐ目に入る分だけ先に簡易生成する件数
         private bool _thumbnailWorkerRunning;
+        private System.Threading.CancellationTokenSource _thumbCts = new(); // 再スキャン時に生成中のバッチを中断する
 
         // リア(PiP)ドラッグ移動・リサイズ用状態
         // ---- リア時刻ベース同期用 ----
@@ -676,6 +677,8 @@ namespace VerticalPlayer.Dashcam
             RebindCurrentGroupsAfterScan();
 
             _thumbnailQueue.Clear(); // 別ドライブ/別フォルダへ切り替えたら古いキューは破棄する
+            _thumbCts.Cancel();      // 生成中のバッチも中断する
+            _thumbCts = new System.Threading.CancellationTokenSource();
             _finalizedThumbnailPaths.Clear();
             EnqueueThumbnails(_groups);
         }
@@ -696,11 +699,8 @@ namespace VerticalPlayer.Dashcam
                 .Select(x => (x.group, path: x.path!))
                 .ToList();
 
-            // 初期表示側の体感速度を優先し、先頭N件だけ先に簡易生成(fast)をキューの先頭へ積む。
-            // 同じThumbCapturePlayerを使い回すため並列実行はできない＝キューの順序で優先度を表現する。
-            foreach (var (group, path) in withPath.Take(FastThumbnailCount))
-                _thumbnailQueue.Enqueue((group, path, fast: true));
-
+            // リスト順（上から）に積む。ワーカーはFFmpegで直接・並列に生成するため、
+            // 従来のfast/finalの二段階は不要（先頭から順に着手され、キャッシュ命中分は一瞬で出る）。
             foreach (var (group, path) in withPath)
                 _thumbnailQueue.Enqueue((group, path, fast: false));
 
@@ -708,6 +708,16 @@ namespace VerticalPlayer.Dashcam
                 _ = RunThumbnailWorkerAsync();
         }
 
+        private const int ThumbWidth = 160;
+        private const int ThumbHeight = 90;
+
+        /// <summary>
+        /// サムネイル生成ワーカー。キューを丸ごと取り出し、複数ファイルを並列に処理する:
+        ///   1) DBキャッシュ(パス+更新日時キー)を全件まとめて引き、命中分を並列デコードして一斉に表示（一瞬）
+        ///   2) 無ければFFmpegで先頭フレームを直接デコード・縮小（FastThumbnailExtractor。UIスレッド不要）
+        ///   3) 抽出に失敗したファイルだけ、従来のプレイヤー経由の生成へフォールバック（逐次）
+        /// 生成したサムネイルはDBへ保存する（保存は1本のバックグラウンドタスクで逐次。SQLiteの書き込み競合回避）。
+        /// </summary>
         private async Task RunThumbnailWorkerAsync()
         {
             _thumbnailWorkerRunning = true;
@@ -715,44 +725,106 @@ namespace VerticalPlayer.Dashcam
             {
                 while (_thumbnailQueue.Count > 0)
                 {
-                    var (group, path, fast) = _thumbnailQueue.Dequeue();
-
-                    if (fast)
+                    var batch = new List<(DashcamMediaGroup group, string path)>();
+                    while (_thumbnailQueue.Count > 0)
                     {
-                        if (_finalizedThumbnailPaths.Contains(path)) continue; // 既に正規版まで到達済み
+                        var (g, p, _) = _thumbnailQueue.Dequeue();
+                        if (_finalizedThumbnailPaths.Add(p)) // 二重生成防止（同じパスは1回だけ）
+                            batch.Add((g, p));
+                    }
+                    if (batch.Count == 0) continue;
 
-                        byte[]? cachedForFast = await Task.Run(() => DashcamThumbnailCache.TryGet(path));
-                        if (cachedForFast != null)
-                        {
-                            _finalizedThumbnailPaths.Add(path);
-                            var cachedSource = BytesToImageSource(cachedForFast);
-                            Dispatcher.Invoke(() => group.Thumbnail = cachedSource);
-                            continue; // DBキャッシュがあるならそれが正規版なので簡易生成は不要
-                        }
+                    var ct = _thumbCts.Token;
 
-                        byte[]? fastBytes = await GenerateThumbnailAsync(path, fast: true);
-                        if (fastBytes != null)
-                        {
-                            var fastSource = BytesToImageSource(fastBytes);
-                            Dispatcher.Invoke(() => group.Thumbnail = fastSource);
-                        }
-                        continue; // 簡易版はDB保存しない。正規版は後続のfast:falseキューで生成される
+                    // 1) DBキャッシュを全件まとめて引き、命中分は並列にデコードして一斉に表示する（一瞬で出る）
+                    var cachedMap = await Task.Run(() => DashcamThumbnailCache.TryGetMany(batch.Select(b => b.path).ToList()));
+                    if (ct.IsCancellationRequested) continue;
+
+                    var hits = new List<(DashcamMediaGroup group, byte[] data)>();
+                    var missing = new List<(DashcamMediaGroup group, string path)>();
+                    foreach (var item in batch)
+                    {
+                        if (cachedMap.TryGetValue(item.path, out var data)) hits.Add((item.group, data));
+                        else missing.Add(item);
                     }
 
-                    if (_finalizedThumbnailPaths.Contains(path)) continue; // fastパスでキャッシュ命中済み等、既に正規版が出ている
+                    if (hits.Count > 0)
+                    {
+                        await Task.Run(() => Parallel.ForEach(hits,
+                            new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
+                            h =>
+                            {
+                                var src = BytesToImageSource(h.data);
+                                var grp = h.group;
+                                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,
+                                    new Action(() => grp.Thumbnail = src));
+                            }));
+                    }
 
-                    byte[]? cached = await Task.Run(() => DashcamThumbnailCache.TryGet(path));
-                    byte[]? pngBytes = cached ?? await GenerateThumbnailAsync(path, fast: false);
+                    // 2) 無かった分だけFFmpegで直接生成する
+                    var fallback = new System.Collections.Concurrent.ConcurrentQueue<(DashcamMediaGroup group, string path)>();
+                    var toSave = new System.Collections.Concurrent.ConcurrentQueue<(string path, byte[] jpeg)>();
+                    int degree = Math.Clamp(Environment.ProcessorCount / 2, 2, 4); // ディスクI/Oが主体のため控えめ
 
-                    if (pngBytes == null)
-                        continue; // 生成失敗（壊れたファイル等）はスキップし、他の項目の処理は継続する
+                    try
+                    {
+                        await Parallel.ForEachAsync(missing,
+                            new ParallelOptions { MaxDegreeOfParallelism = degree, CancellationToken = ct },
+                            (item, token) =>
+                            {
+                                var (group, path) = item;
+                                ImageSource? source = null;
 
-                    if (cached == null)
-                        await Task.Run(() => DashcamThumbnailCache.Save(path, pngBytes));
+                                byte[]? bgra = FastThumbnailExtractor.ExtractBgra(path, ThumbWidth, ThumbHeight);
+                                if (bgra != null && bgra.Length >= ThumbWidth * ThumbHeight * 4)
+                                {
+                                    var bmp = BitmapSource.Create(ThumbWidth, ThumbHeight, 96, 96,
+                                        PixelFormats.Bgr32, null, bgra, ThumbWidth * 4);
+                                    bmp.Freeze();
 
-                    _finalizedThumbnailPaths.Add(path);
-                    var imageSource = BytesToImageSource(pngBytes);
-                    Dispatcher.Invoke(() => group.Thumbnail = imageSource);
+                                    var encoder = new JpegBitmapEncoder { QualityLevel = 80 };
+                                    encoder.Frames.Add(BitmapFrame.Create(bmp));
+                                    using var ms = new MemoryStream();
+                                    encoder.Save(ms);
+                                    toSave.Enqueue((path, ms.ToArray()));
+                                    source = bmp;
+                                }
+
+                                if (source != null)
+                                {
+                                    var s = source;
+                                    Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,
+                                        new Action(() => group.Thumbnail = s));
+                                }
+                                else
+                                {
+                                    fallback.Enqueue(item);
+                                }
+                                return ValueTask.CompletedTask;
+                            });
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        continue; // 再スキャンで中断された。次のループで新しいキューを処理する
+                    }
+
+                    // 新規生成分のDB保存（1本のバックグラウンドタスクで逐次）
+                    if (!toSave.IsEmpty)
+                    {
+                        var saves = toSave.ToArray();
+                        _ = Task.Run(() => DashcamThumbnailCache.SaveBatch(saves.Select(s => (s.path, s.jpeg))));
+                    }
+
+                    // FFmpeg直接抽出に失敗したファイルだけ、従来のプレイヤー経由(UIスレッド・逐次)で生成する
+                    foreach (var (group, path) in fallback)
+                    {
+                        if (ct.IsCancellationRequested) break;
+                        byte[]? png = await GenerateThumbnailAsync(path, fast: false);
+                        if (png == null) continue; // 壊れたファイル等はスキップ
+                        await Task.Run(() => DashcamThumbnailCache.Save(path, png));
+                        var imageSource = BytesToImageSource(png);
+                        Dispatcher.Invoke(() => group.Thumbnail = imageSource);
+                    }
                 }
             }
             finally
@@ -1169,10 +1241,25 @@ namespace VerticalPlayer.Dashcam
                 ? PlayerFront.NaturalDuration.TimeSpan
                 : TimeSpan.Zero;
 
-            string? nmeaPath = _currentFrontGroup?.FrontNmeaPath ?? _currentFrontGroup?.RearNmeaPath;
-            _sensorFrames = nmeaPath != null
-                ? NmeaSensorParser.Parse(nmeaPath, _currentFrontGroup?.Timestamp, duration)
+            var sensorGroup = _currentFrontGroup;
+            string? nmeaPath = sensorGroup?.FrontNmeaPath ?? sensorGroup?.RearNmeaPath;
+            var sensorFrames = nmeaPath != null
+                ? NmeaSensorParser.Parse(nmeaPath, sensorGroup?.Timestamp, duration)
                 : new List<DashcamSensorFrame>();
+
+            // ファイルの先頭/末尾が測位ロスト(トンネル等)なら、前後のファイルの測位速度を取り込んで
+            // ロスト区間の推定速度を補間し直す（ファイルをまたぐ長いトンネルにも対応）
+            if (nmeaPath != null && sensorGroup != null && sensorFrames.Count > 0 && NmeaSensorParser.MaxEstimateGapSeconds > 0
+                && (!sensorFrames[0].HasGpsFix || !sensorFrames[^1].HasGpsFix))
+            {
+                bool needBefore = !sensorFrames[0].HasGpsFix;
+                bool needAfter = !sensorFrames[^1].HasGpsFix;
+                var gapContext = await Task.Run(() => BuildSpeedGapContext(sensorGroup, needBefore, needAfter));
+                if (!ReferenceEquals(_currentFrontGroup, sensorGroup)) return; // 待機中に別ファイルへ切り替わった
+                if (gapContext != null)
+                    sensorFrames = NmeaSensorParser.Parse(nmeaPath, sensorGroup.Timestamp, duration, gapContext);
+            }
+            _sensorFrames = sensorFrames;
             // グラフはファイル全体分をここで一度だけ計算して描画する（毎フレーム全点を再計算して
             // いた従来方式はスレッド負荷が無駄に高かったため）。再生中はSetPlayhead()で現在位置を
             // 反映するだけにする。チャート自体がシークUIも兼ねるため、Maximum等の設定は不要
@@ -2018,9 +2105,96 @@ namespace VerticalPlayer.Dashcam
                 ControlBar.Visibility = Visibility.Collapsed;
         }
 
+        // ---- 測位ロスト区間の速度推定: 前後ファイルからの文脈取得 ----
+        private const double NominalClipSeconds = 120; // 1ファイルの公称長(2分)
+
+        private static bool AreConsecutiveClips(DashcamMediaGroup earlier, DashcamMediaGroup later)
+        {
+            var a = ParseFileStamp(earlier.FrontVideoPath) ?? earlier.Timestamp;
+            var b = ParseFileStamp(later.FrontVideoPath) ?? later.Timestamp;
+            if (a == null || b == null) return false;
+            // 録画は2分ごとに連続する。大きく空いていれば別の走行（トンネルの連続とみなさない）
+            return Math.Abs((b.Value - a.Value).TotalSeconds - NominalClipSeconds) <= 15;
+        }
+
+        private static List<DashcamSensorFrame> ParseNeighborFrames(DashcamMediaGroup g)
+        {
+            string? path = g.FrontNmeaPath ?? g.RearNmeaPath;
+            return path == null
+                ? new List<DashcamSensorFrame>()
+                : NmeaSensorParser.Parse(path, g.Timestamp, TimeSpan.FromSeconds(NominalClipSeconds));
+        }
+
+        /// <summary>現在ファイルの先頭/末尾の測位ロスト区間が前後のファイルへ続いている場合に、その区間の直前/直後の
+        /// 測位速度と、ファイル外で経過している秒数を求める（上限はNmeaSensorParser.MaxEstimateGapSeconds）。
+        /// バックグラウンドスレッドから呼ぶ想定（UI要素には触れない）。</summary>
+        private NmeaSensorParser.SpeedGapContext? BuildSpeedGapContext(DashcamMediaGroup group, bool needBefore, bool needAfter)
+        {
+            var groups = _frontGroups;
+            int idx = groups.IndexOf(group);
+            if (idx < 0)
+            {
+                string key = group.TimestampKey;
+                idx = groups.FindIndex(g => g.TimestampKey == key);
+            }
+            if (idx < 0) return null;
+
+            double maxGap = NmeaSensorParser.MaxEstimateGapSeconds;
+            double? speedBefore = null, speedAfter = null;
+            double gapBefore = 0, gapAfter = 0;
+
+            if (needBefore)
+            {
+                double acc = 0;
+                for (int j = idx - 1; j >= 0 && acc <= maxGap; j--)
+                {
+                    if (!AreConsecutiveClips(groups[j], groups[j + 1])) break;
+                    var frames = ParseNeighborFrames(groups[j]);
+                    int lastFix = frames.FindLastIndex(f => f.HasGpsFix);
+                    if (lastFix >= 0)
+                    {
+                        speedBefore = frames[lastFix].SpeedKmh;
+                        gapBefore = acc + (NominalClipSeconds - frames[lastFix].VideoOffset.TotalSeconds);
+                        break;
+                    }
+                    acc += NominalClipSeconds; // このファイルは全体が測位ロスト
+                }
+            }
+
+            if (needAfter)
+            {
+                double acc = 0;
+                for (int j = idx + 1; j < groups.Count && acc <= maxGap; j++)
+                {
+                    if (!AreConsecutiveClips(groups[j - 1], groups[j])) break;
+                    var frames = ParseNeighborFrames(groups[j]);
+                    int firstFix = frames.FindIndex(f => f.HasGpsFix);
+                    if (firstFix >= 0)
+                    {
+                        speedAfter = frames[firstFix].SpeedKmh;
+                        gapAfter = acc + frames[firstFix].VideoOffset.TotalSeconds;
+                        break;
+                    }
+                    acc += NominalClipSeconds;
+                }
+            }
+
+            if (speedBefore == null && speedAfter == null) return null;
+            return new NmeaSensorParser.SpeedGapContext(speedBefore, gapBefore, speedAfter, gapAfter);
+        }
+
         // ---- 車速OSD ----
 
         private DashcamSensorFrame? _lastOsdFrame;
+        private static readonly SolidColorBrush SpeedOsdMeasuredBrush = CreateFrozenBrush(0x00, 0xFF, 0x00);   // 実測: 蛍光緑
+        private static readonly SolidColorBrush SpeedOsdEstimatedBrush = CreateFrozenBrush(0xFB, 0xBF, 0x24);  // 推定: 琥珀色
+
+        private static SolidColorBrush CreateFrozenBrush(byte r, byte g, byte b)
+        {
+            var br = new SolidColorBrush(System.Windows.Media.Color.FromRgb(r, g, b));
+            br.Freeze();
+            return br;
+        }
 
         private void SpeedOsdCheck_Changed(object sender, RoutedEventArgs e) => UpdateSpeedOsd(_lastOsdFrame);
 
@@ -2054,9 +2228,16 @@ namespace VerticalPlayer.Dashcam
                 return;
             }
 
-            string text = frame.HasGpsFix ? Math.Round(frame.SpeedKmh).ToString("0") : "--";
+            // 測位ロスト中は前後の測位速度から補間した推定値を「≈」付き・琥珀色で表示（実測の緑と区別）
+            bool estimated = !frame.HasGpsFix && frame.SpeedEstimated;
+            string text = frame.HasGpsFix ? Math.Round(frame.SpeedKmh).ToString("0")
+                : estimated ? "≈" + Math.Round(frame.SpeedKmh).ToString("0")
+                : "--";
             if (SpeedOsdValue.Text != text)
                 SpeedOsdValue.Text = text;
+            var brush = estimated ? SpeedOsdEstimatedBrush : SpeedOsdMeasuredBrush;
+            if (!ReferenceEquals(SpeedOsdText.Foreground, brush))
+                SpeedOsdText.Foreground = brush;
             if (SpeedOsd.Visibility != Visibility.Visible)
             {
                 UpdateSpeedOsdFontSize();

@@ -14,7 +14,8 @@ namespace VerticalPlayer.Dashcam
     /// 従来は毎フレームAddSample()で1点ずつ追加し、そのたびに全点を再計算していたため
     /// スレッド負荷が無駄に高かった。ファイルを開いた時点で一度だけ全体を計算・描画し
     /// （SetFullTrack）、再生中はSetPlayhead()で現在位置を反映するだけにしている。
-    /// 速度はGPSロスト区間(HasGpsFix=false)では値が信頼できないため、0へ張り付けるのではなく
+    /// 速度はGPSロスト区間(HasGpsFix=false)では計測値が無いため、0へ張り付けない。前後の測位速度から
+    /// 補間した推定値(SpeedEstimated)がある区間は破線で描き（前後の実線とつなぐ）、推定値も無い区間は
     /// 線を途切れさせる（区間ごとに別々のPolylineとして描画する）。
     /// 左側にG軸(-3〜3)、右側に速度軸(0〜180km/h)の目盛り・グリッド線を表示する。
     ///
@@ -208,7 +209,8 @@ namespace VerticalPlayer.Dashcam
             var py = new PointCollection();
             var pz = new PointCollection();
 
-            List<Point>? currentSpeedSegment = null;
+            List<Point>? currentSpeedSegment = null; // 測位あり(実線)
+            List<Point>? estimatedSegment = null;    // 測位ロスト中の推定速度(破線)
 
             foreach (var f in ordered)
             {
@@ -224,19 +226,52 @@ namespace VerticalPlayer.Dashcam
                 // 0を描画せず線を途切れさせる。ロスト区間ごとに新しいPolylineへ切り替える。
                 if (f.HasGpsFix)
                 {
+                    var p = new Point(cx, SpeedToY(Math.Clamp(f.SpeedKmh, 0.0, MaxSpeedKmh), h));
+                    if (estimatedSegment != null)
+                    {
+                        // 推定区間(破線)の終点を、復帰後の最初の測位点へつないでから確定する
+                        estimatedSegment.Add(p);
+                        FlushSpeedSegment(estimatedSegment, dashed: true);
+                        estimatedSegment = null;
+                    }
                     currentSpeedSegment ??= new List<Point>();
-                    double clampedSpeed = Math.Clamp(f.SpeedKmh, 0.0, MaxSpeedKmh);
-                    double speedY = h - (clampedSpeed / MaxSpeedKmh * h);
-                    currentSpeedSegment.Add(new Point(cx, speedY));
+                    currentSpeedSegment.Add(p);
                 }
-                else if (currentSpeedSegment != null)
+                else if (f.SpeedEstimated)
                 {
-                    FlushSpeedSegment(currentSpeedSegment);
-                    currentSpeedSegment = null;
+                    var p = new Point(cx, SpeedToY(Math.Clamp(f.SpeedKmh, 0.0, MaxSpeedKmh), h));
+                    if (estimatedSegment == null)
+                    {
+                        // 実線の最終点を破線の起点にして、線が途切れて見えないようにする
+                        estimatedSegment = new List<Point>();
+                        if (currentSpeedSegment != null && currentSpeedSegment.Count > 0)
+                            estimatedSegment.Add(currentSpeedSegment[^1]);
+                    }
+                    if (currentSpeedSegment != null)
+                    {
+                        FlushSpeedSegment(currentSpeedSegment, dashed: false);
+                        currentSpeedSegment = null;
+                    }
+                    estimatedSegment.Add(p);
+                }
+                else
+                {
+                    if (currentSpeedSegment != null)
+                    {
+                        FlushSpeedSegment(currentSpeedSegment, dashed: false);
+                        currentSpeedSegment = null;
+                    }
+                    if (estimatedSegment != null)
+                    {
+                        FlushSpeedSegment(estimatedSegment, dashed: true);
+                        estimatedSegment = null;
+                    }
                 }
             }
             if (currentSpeedSegment != null)
-                FlushSpeedSegment(currentSpeedSegment);
+                FlushSpeedSegment(currentSpeedSegment, dashed: false);
+            if (estimatedSegment != null)
+                FlushSpeedSegment(estimatedSegment, dashed: true);
 
             LineX.Points = px;
             LineY.Points = py;
@@ -293,7 +328,7 @@ namespace VerticalPlayer.Dashcam
 
         private static double SpeedToY(double speed, double h) => h - (speed / MaxSpeedKmh * h);
 
-        private void FlushSpeedSegment(List<Point> points)
+        private void FlushSpeedSegment(List<Point> points, bool dashed)
         {
             if (points.Count < 2) return; // 1点だけの区間は線として描けないので無視する
 
@@ -304,6 +339,8 @@ namespace VerticalPlayer.Dashcam
                 Opacity = 0.9,
                 Points = new PointCollection(points)
             };
+            if (dashed) // 測位ロスト中の推定速度は破線で表す（実測の実線と区別）
+                line.StrokeDashArray = new DoubleCollection { 3, 2 };
             ChartCanvas.Children.Add(line);
             _speedSegmentLines.Add(line);
         }

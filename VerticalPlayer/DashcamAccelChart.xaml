@@ -45,7 +45,9 @@
                     <Rectangle Width="10" Height="3" Fill="#F87171" VerticalAlignment="Center"/>
                     <TextBlock Text=" 上下  " Foreground="{StaticResource TextMuted}" FontSize="9" VerticalAlignment="Center"/>
                     <Rectangle Width="10" Height="3" Fill="#E5E7EB" VerticalAlignment="Center"/>
-                    <TextBlock Text=" 速度" Foreground="{StaticResource TextMuted}" FontSize="9" VerticalAlignment="Center"/>
+                    <TextBlock Text=" 速度  " Foreground="{StaticResource TextMuted}" FontSize="9" VerticalAlignment="Center"/>
+                    <Line X1="0" X2="10" Y1="0" Y2="0" Stroke="#E5E7EB" StrokeThickness="1.5" StrokeDashArray="3,2" VerticalAlignment="Center"/>
+                    <TextBlock Text=" 推定" Foreground="{StaticResource TextMuted}" FontSize="9" VerticalAlignment="Center"/>
                 </StackPanel>
             </StackPanel>
 
