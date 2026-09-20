@@ -40,7 +40,15 @@ namespace VerticalPlayer.Dashcam
         private List<DashcamSensorFrame> _sensorFrames = new();
 
         private readonly DispatcherTimer _syncTimer;
-        private static readonly TimeSpan ResyncThreshold = TimeSpan.FromMilliseconds(150);
+        // リア再同期: 閾値150ms・クールダウン無しだと、シーク所要時間(約120〜360ms)ぶん必ずリアが
+        // 遅れて着地するため毎回(500ms周期)再シークするループに陥り、リアが約10fpsに落ちていた。
+        // 閾値を広げ、再同期後はクールダウンを置き、シーク所要時間ぶんを先乗せして着地させる。
+        private static readonly TimeSpan ResyncThreshold = TimeSpan.FromMilliseconds(400);
+        private static readonly TimeSpan ResyncCooldown = TimeSpan.FromSeconds(3);
+        private static readonly TimeSpan MaxRearLead = TimeSpan.FromMilliseconds(800);
+        private readonly System.Diagnostics.Stopwatch _rearResyncWatch = new();
+        private bool _rearSettleSamplePending;
+        private TimeSpan _rearSeekLead = TimeSpan.FromMilliseconds(250); // 再同期時のシーク先に上乗せする量（実測で自動学習）
 
         private bool _suppressSelectionEvent;
         private bool _isPlaying;
@@ -237,6 +245,9 @@ namespace VerticalPlayer.Dashcam
         {
             InitializeComponent();
 
+            // 折りたたみ中はサイドバー内容(ScrollBar/コーナー等)を不可視にする（XAML側の指定に依存しない）
+            SidebarContent.Opacity = 0;
+
             // ドラレコは1ファイルあたり約2分間隔で次々切り替わり、かつSDカード等の低速
             // ストレージ運用が前提のため、既存の「パケット先読み（低速ストレージ対策）」
             // パイプラインをこの画面のFront/Rear両方で既定ONにする。
@@ -316,12 +327,17 @@ namespace VerticalPlayer.Dashcam
             LeftSidebarHost.Width = 220;
             CollapsedHint.Visibility = Visibility.Collapsed;
             // SidebarContent自体のVisibilityは常にVisibleのまま変更しない（下記コメント参照）。
+            // 折りたたみ中はOpacity=0で不可視にしているため、展開時に表示へ戻す。
+            SidebarContent.Opacity = 1;
         }
 
         private void LeftSidebarHost_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
         {
             LeftSidebarHost.Width = 16;
             CollapsedHint.Visibility = Visibility.Visible;
+            // 幅16pxの間は各ListBoxのScrollBar(上下ボタン)がはみ出して見えてしまうため、
+            // Visibilityではなく（レイアウトを維持したまま）Opacity=0で完全に不可視にする。
+            SidebarContent.Opacity = 0;
         }
 
         // ---- 録画フォルダ種別・ドライブ選択（選択が変わったら自動で読み込み直す） ----
@@ -440,6 +456,12 @@ namespace VerticalPlayer.Dashcam
 
             FrontList.ItemsSource = _frontGroups;
             RearList.ItemsSource = _rearGroups;
+
+            // 再スキャンでグループ実体が作り直されるため、再生中のグループを新しいリストの
+            // 同一キーの実体へ付け替え、選択状態も復元する（レジューム直後にLoadedの
+            // RefreshDriveList等が再スキャンすると、選択が消え_currentFrontGroupがリストに
+            // 見つからなくなり「次のシーン」が進まなくなっていた）。
+            RebindCurrentGroupsAfterScan();
 
             _thumbnailQueue.Clear(); // 別ドライブ/別フォルダへ切り替えたら古いキューは破棄する
             _finalizedThumbnailPaths.Clear();
@@ -614,6 +636,49 @@ namespace VerticalPlayer.Dashcam
             return await innerTask;
         }
 
+        // ---- リスト選択の同期補助 ----
+
+        /// <summary>選択イベント(再生開始)を発火させずにリストの選択項目だけを設定する。</summary>
+        private void SetListSelection(ListBox list, DashcamMediaGroup? group, bool scrollToTop)
+        {
+            bool prev = _suppressSelectionEvent;
+            _suppressSelectionEvent = true;
+            try { list.SelectedItem = group; }
+            finally { _suppressSelectionEvent = prev; }
+
+            if (group == null || !scrollToTop) return;
+
+            var source = ReferenceEquals(list, FrontList) ? _frontGroups : _rearGroups;
+            int idx = source.IndexOf(group);
+            // ItemsSource差し替え直後はレイアウト前でオフセットが効かないため、Loaded優先度で遅延実行する
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => ScrollSelectedToTop(list, idx)));
+        }
+
+        private void RebindCurrentGroupsAfterScan()
+        {
+            if (_currentFrontGroup != null)
+            {
+                string key = _currentFrontGroup.TimestampKey;
+                var nf = _frontGroups.FirstOrDefault(g => g.TimestampKey == key);
+                if (nf != null)
+                {
+                    _currentFrontGroup = nf;
+                    SetListSelection(FrontList, nf, scrollToTop: true);
+                }
+            }
+
+            if (_currentRearGroup != null)
+            {
+                string key = _currentRearGroup.TimestampKey;
+                var nr = _rearGroups.FirstOrDefault(g => g.TimestampKey == key);
+                if (nr != null)
+                {
+                    _currentRearGroup = nr;
+                    SetListSelection(RearList, nr, scrollToTop: true);
+                }
+            }
+        }
+
         // ---- リスト選択 → 再生 ----
 
         private void FrontList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -645,6 +710,8 @@ namespace VerticalPlayer.Dashcam
         private void PlayFrontGroup(DashcamMediaGroup group)
         {
             _currentFrontGroup = group;
+            _rearResyncWatch.Reset(); // 新しいファイルでは再同期の状態を初期化する
+            _rearSettleSamplePending = false;
             CurrentFileChanged?.Invoke(Path.GetFileName(group.FrontVideoPath) ?? group.TimestampKey);
             _sensorFrames = new List<DashcamSensorFrame>(); // Frontの動画長が判明してからParseし直す（MediaOpened側）
             _wantsPlaying = true; // Front/RearどちらのMediaOpenedが先に来ても再生開始させる意図フラグ
@@ -659,12 +726,13 @@ namespace VerticalPlayer.Dashcam
             {
                 if (group.HasRear)
                 {
-                    PlayRearGroup(group, keepListSelectionOnly: true);
+                    PlayRearGroup(group, keepListSelectionOnly: true); // 内部でRearListの選択色も更新される
                     int rearIdx = _rearGroups.IndexOf(group);
                     ScrollSelectedToTop(RearList, rearIdx);
                 }
                 else
                 {
+                    SetListSelection(RearList, null, scrollToTop: false);
                     // フロントと同名のリアファイルが存在しないケース。スイッチ自体はユーザーの
                     // 操作結果のまま変更せず（勝手にOFFにしない）、表示できないので黙って隠すだけにする。
                     PlayerRear.Stop();
@@ -688,13 +756,12 @@ namespace VerticalPlayer.Dashcam
                 PlayerRear.Source = new Uri(group.RearVideoPath);
             }
 
+            // 追従(keepListSelectionOnly)時もリアリストの選択色は付ける（従来はスキップしており
+            // フロント追従再生中にリア側だけ選択色が付かなかった）。スクロール位置だけは
+            // 呼び出し側(ScrollSelectedToTop)に任せる。
+            SetListSelection(RearList, group, scrollToTop: false);
             if (!keepListSelectionOnly)
-            {
-                _suppressSelectionEvent = true;
-                RearList.SelectedItem = group;
-                _suppressSelectionEvent = false;
                 RearList.ScrollIntoView(group);
-            }
         }
 
         // ---- 再生制御 ----
@@ -867,6 +934,11 @@ namespace VerticalPlayer.Dashcam
             int idx = _frontGroups.IndexOf(_currentFrontGroup);
             if (idx < 0)
             {
+                string curKey = _currentFrontGroup.TimestampKey;
+                idx = _frontGroups.FindIndex(g => g.TimestampKey == curKey); // 再スキャンで実体が入れ替わっていてもキーで探す
+            }
+            if (idx < 0)
+            {
                 DashcamPlayErrorLogger.Log($"[Advance] {_currentFrontGroup.TimestampKey}が_frontGroupsに見つからず中止（再スキャンで参照が失われた可能性）");
                 return;
             }
@@ -877,9 +949,7 @@ namespace VerticalPlayer.Dashcam
             }
 
             var next = _frontGroups[idx + 1];
-            _suppressSelectionEvent = true;
-            FrontList.SelectedItem = next;
-            _suppressSelectionEvent = false;
+            SetListSelection(FrontList, next, scrollToTop: false);
 
             // 連続再生の見た目: 再生中のファイルが常にリストの一番上に来て、後続が下から
             // 順々にせり上がって見えるようにする（単なるScrollIntoViewだと最小限しか動かない）。
@@ -893,6 +963,11 @@ namespace VerticalPlayer.Dashcam
             if (RearLinked) return;
             if (_currentRearGroup is null) return;
             int idx = _rearGroups.IndexOf(_currentRearGroup);
+            if (idx < 0)
+            {
+                string curKey = _currentRearGroup.TimestampKey;
+                idx = _rearGroups.FindIndex(g => g.TimestampKey == curKey);
+            }
             if (idx < 0 || idx + 1 >= _rearGroups.Count) return;
 
             PlayRearGroup(_rearGroups[idx + 1]);
@@ -1300,11 +1375,35 @@ namespace VerticalPlayer.Dashcam
 
             bool hasActiveRear = _currentFrontGroup?.HasRear == true || (!RearLinked && _currentRearGroup != null);
             if (!hasActiveRear || _isDragging)
+            {
+                _rearSettleSamplePending = false;
                 return;
+            }
 
-            var diff = PlayerFront.Position - PlayerRear.Position;
-            if (RearLinked && diff.Duration() > ResyncThreshold)
-                PlayerRear.Position = PlayerFront.Position;
+            var diff = PlayerFront.Position - PlayerRear.Position; // 正=リアが遅れている
+
+            // 再同期の約1.5秒後に残っている遅れを、シーク所要時間ぶんの遅れとして学習し
+            // 次回のシーク先へ先乗せする（一時停止中や不安定な状態は学習しない）。
+            if (_rearSettleSamplePending && _rearResyncWatch.ElapsedMilliseconds >= 1500)
+            {
+                _rearSettleSamplePending = false;
+                if (_isPlaying)
+                {
+                    var lead = _rearSeekLead + diff;
+                    _rearSeekLead = lead < TimeSpan.Zero ? TimeSpan.Zero : (lead > MaxRearLead ? MaxRearLead : lead);
+                }
+            }
+
+            bool cooledDown = !_rearResyncWatch.IsRunning || _rearResyncWatch.Elapsed >= ResyncCooldown;
+            if (RearLinked && cooledDown && diff.Duration() > ResyncThreshold)
+            {
+                var target = PlayerFront.Position + _rearSeekLead;
+                if (PlayerRear.NaturalDuration.HasTimeSpan && target > PlayerRear.NaturalDuration.TimeSpan)
+                    target = PlayerRear.NaturalDuration.TimeSpan;
+                PlayerRear.Position = target;
+                _rearResyncWatch.Restart();
+                _rearSettleSamplePending = true;
+            }
         }
 
         // ---- 走行軌跡マップ: 前後数ファイル分をつないだ連続した経路として表示する ----
@@ -1484,10 +1583,7 @@ namespace VerticalPlayer.Dashcam
                     return false;
 
                 _pendingResumeSeconds = positionSeconds;
-                _suppressSelectionEvent = true;
-                FrontList.SelectedItem = group;
-                _suppressSelectionEvent = false;
-                FrontList.ScrollIntoView(group);
+                SetListSelection(FrontList, group, scrollToTop: true);
                 PlayFrontGroup(group);
 
                 await Task.CompletedTask;

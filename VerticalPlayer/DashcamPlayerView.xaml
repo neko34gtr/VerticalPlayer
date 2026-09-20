@@ -99,7 +99,7 @@
                          「一度もホバーしていないと自動スクロールが効かない」不具合の原因に
                          なっていたため）。表示上はホストのWidth=16px＋ClipToBounds=Trueで
                          十分隠れるので、中身は常にVisible/レイアウト済みのまま持っておく。 -->
-                    <Grid x:Name="SidebarContent">
+                    <Grid x:Name="SidebarContent" Opacity="0">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>

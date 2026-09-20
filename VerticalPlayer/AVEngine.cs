@@ -1013,6 +1013,12 @@ namespace VerticalPlayer.Media
                             // Stopwatchベースの外挿だけが実時間で進み続けてしまう）。
                             SetExternalClock(GetMasterClockSec(), false);
                         }
+                        else if (_extPlaying && (audioOutput == null || !audioOutput.IsActive))
+                        {
+                            // 音声を持たないエンジン（ドラレコのRear等）向け。下記の実時間自走クロックを
+                            // 一時停止中も進め続けないよう、停止した瞬間の位置で凍結する。
+                            SetExternalClock(GetMasterClockSec(), false);
+                        }
                         Thread.Sleep(10);
                         continue;
                     }
@@ -1057,6 +1063,19 @@ namespace VerticalPlayer.Media
                                 lastAnchoredAudioPos = curAudioPos;
                             }
                         }
+                    }
+                    else if (_audioDesired && (audioOutput == null || !audioOutput.IsActive))
+                    {
+                        // 音声ストリームが無い（ドラレコのRearファイル等）／音声デバイスが使えない場合、
+                        // 上の音声位置からの再アンカーが一度も走らないため _desiredPlaying が false の
+                        // ままになり、シーク後のキャッチアップ完了時に _extPlaying=false（クロック凍結）
+                        // で解凍されて、クロックが二度と進まなくなっていた。その結果、映像ペーシングが
+                        // 「pts>masterで毎フレーム最大200ms待つ」状態になり約5fpsに固定されていた。
+                        // 再生中は実時間(Stopwatch×速度)で自走させる。キャッチアップ中は
+                        // SetExternalClock側が _desiredPlaying の更新だけ行い、解凍は
+                        // 「CatchUp done」に任せる。
+                        if (!_desiredPlaying)
+                            SetExternalClock(GetMasterClockSec(), true);
                     }
 
                     if (wantPrefetch && pktChannel != null)
