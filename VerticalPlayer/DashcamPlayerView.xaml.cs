@@ -139,6 +139,21 @@ namespace VerticalPlayer.Dashcam
         /// <summary>再生中のFrontファイル名が変わるたびに通知する（ホスト側でウィンドウタイトル表示用）。停止時はnull。</summary>
         public event Action<string?>? CurrentFileChanged;
 
+        /// <summary>再生中のFront/Rearファイル名が変わったときに通知する（タイトルバー中央の表示用）。
+        /// 引数: Frontファイル名(無ければnull)、Rearファイル名(リアが無い区間・未検出・開けなかった場合はnull)、
+        /// リア表示スイッチの状態。</summary>
+        public event Action<string?, string?, bool>? PlayingFilesChanged;
+
+        private void NotifyPlayingFiles()
+        {
+            string? frontPath = _currentFrontGroup?.FrontVideoPath;
+            string? rearPath = _currentRearClipPath ?? _currentRearGroup?.RearVideoPath;
+            PlayingFilesChanged?.Invoke(
+                frontPath != null ? Path.GetFileName(frontPath) : null,
+                rearPath != null ? Path.GetFileName(rearPath) : null,
+                RearVisibleCheck?.IsChecked == true);
+        }
+
         public bool RearLinked
         {
             get => RearLinkedCheck.IsChecked == true;
@@ -451,7 +466,12 @@ namespace VerticalPlayer.Dashcam
             {
                 Owner = Window.GetWindow(this)
             };
+
+            // 再生中にモーダルを開くと映像/サムネイルが黒くなる事象の調査用ログ（描画Tier・GPU描画の可否・再生状態）
+            DashcamPlayErrorLogger.Log($"[PairList] 開く 再生中={_isPlaying} 描画Tier={System.Windows.Media.RenderCapability.Tier >> 16} " +
+                $"Front(GPU)={PlayerFront.IsGpuPresenterAvailable} Rear(GPU)={PlayerRear.IsGpuPresenterAvailable}");
             win.ShowDialog();
+            DashcamPlayErrorLogger.Log($"[PairList] 閉じた 再生中={_isPlaying}");
         }
 
         private const double PairListClipSeconds = 120; // 1ファイルの公称長(2分)
@@ -641,11 +661,26 @@ namespace VerticalPlayer.Dashcam
             RescanCurrentSelection();
         }
 
+        // 直近にスキャンしたドライブ/フォルダ（別のドライブ/フォルダへの切替を検出するため）
+        private string? _scannedRoot;
+        private DashcamEventFolder? _scannedFolder;
+
         private void RescanCurrentSelection()
         {
             if (DriveCombo.SelectedItem is not DriveOrFolderOption option || option.IsBrowseOption || option.RootPath == null)
                 return;
 
+            // 物理ドライブ(または対象フォルダ)が別のものへ変わった場合は、再生を止めてからファイルリストの
+            // 処理へ進む。再生中のまま切り替えると、旧ドライブの再生と新ドライブのサムネイル生成が並行して
+            // 走り、サムネイルが黒いまま残る等の不具合になっていた。同じドライブの再スキャン（更新ボタン等）では止めない。
+            bool targetChanged = _scannedRoot != null
+                && (!string.Equals(_scannedRoot, option.RootPath, StringComparison.OrdinalIgnoreCase)
+                    || _scannedFolder != CurrentEventFolder);
+            if (targetChanged && !_isResuming)
+                StopPlayback();
+
+            _scannedRoot = option.RootPath;
+            _scannedFolder = CurrentEventFolder;
             ScanDrive(option.RootPath, CurrentEventFolder);
 
             // レジューム再生の内部処理中は、目的のドライブへ切り替わる前の一瞬だけ発生する
@@ -1159,12 +1194,23 @@ namespace VerticalPlayer.Dashcam
         private void PlayFrontGroup(DashcamMediaGroup group)
         {
             _currentFrontGroup = group;
-            _frontStart = ParseFileStamp(group.FrontVideoPath) ?? group.Timestamp;
-            _rearExhaustedPath = null;
-            _rearFailedPath = null;
+            // 直前のFrontの次(約2分後)に続くファイルへの切替（連続再生・次のシーン）では、リアの
+            // 「終了済み/開けなかった」記録を維持する。リアはFrontと位相が違い、まだ終わったはずの
+            // 直前のリアclipが新しいFrontの開始時刻にも含まれて見えることがあり、リセットすると
+            // 同じclipを読み直してPiPが1〜2秒途切れていた。リストの選択などで別の場所へ飛ぶ場合だけリセットする。
+            var newFrontStart = ParseFileStamp(group.FrontVideoPath) ?? group.Timestamp;
+            bool sequentialSwitch = _frontStart != null && newFrontStart != null
+                && Math.Abs((newFrontStart.Value - _frontStart.Value).TotalSeconds - NominalClipSeconds) <= 15;
+            _frontStart = newFrontStart;
+            if (!sequentialSwitch)
+            {
+                _rearExhaustedPath = null;
+                _rearFailedPath = null;
+            }
             _rearResyncWatch.Reset(); // 新しいファイルでは再同期の状態を初期化する
             _rearSettleSamplePending = false;
             CurrentFileChanged?.Invoke(Path.GetFileName(group.FrontVideoPath) ?? group.TimestampKey);
+            NotifyPlayingFiles();
             _sensorFrames = new List<DashcamSensorFrame>(); // Frontの動画長が判明してからParseし直す（MediaOpened側）
             _wantsPlaying = true; // Front/RearどちらのMediaOpenedが先に来ても再生開始させる意図フラグ
 
@@ -1562,11 +1608,15 @@ namespace VerticalPlayer.Dashcam
             PlayerFront.Stop();
             PlayerRear.Stop();
             _currentRearClipPath = null;
+            _frontStart = null;          // 次に再生を始めるときは連続再生扱いにしない
+            _rearExhaustedPath = null;
+            _rearFailedPath = null;
             _isPlaying = false;
             _wantsPlaying = false;
             PlayPauseButton.Content = "▶";
             UpdateSpeedOsd(null);
             CurrentFileChanged?.Invoke(null);
+            NotifyPlayingFiles();
         }
 
         private void RearVisibleCheck_Changed(object sender, RoutedEventArgs e) => UpdateRearPipVisibility();
@@ -1586,6 +1636,8 @@ namespace VerticalPlayer.Dashcam
             // リア倍率の設定UIは「リア表示スイッチがON」の間だけ出す（リアが今再生可能かは問わない）
             if (RearZoomPanel != null)
                 RearZoomPanel.Visibility = RearVisibleCheck.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+
+            NotifyPlayingFiles(); // リアの切替/消失/スイッチ変更がタイトルバー表示へ反映される
 
             if (show && _wantsPlaying)
                 PlayerRear.Play();

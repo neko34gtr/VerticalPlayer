@@ -6,12 +6,13 @@ namespace VerticalPlayer.Dashcam
     /// <summary>
     /// ドラレコモード専用の診断ログ。trace.log（DEBUGビルドのみ・ホットパス禁止方針）とは別に、
     /// Front/Rearペアリング結果や次シーンへ進めなかった理由など、低頻度イベントだけを
-    /// "play_error.txt"（exe直下、Releaseビルドでも常に出力）へ追記する。
+    /// "play_error.txt"（出力先は設定で指定、既定はXドライブがあれば X:\temp\VerticalPlayer、無ければexe直下。
+    /// Releaseビルドでも常に出力）へ追記する。
     /// </summary>
     public static class DashcamPlayErrorLogger
     {
         private static readonly object _lock = new();
-        private static string LogPath => Path.Combine(AppContext.BaseDirectory, "play_error.txt");
+        private static string LogPath => AppLogPaths.GetPath("play_error.txt");
 
         public static void Log(string message)
         {

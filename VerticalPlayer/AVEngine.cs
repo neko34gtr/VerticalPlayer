@@ -2095,7 +2095,7 @@ namespace VerticalPlayer.Media
             try
             {
                 File.AppendAllText(
-                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "trace.log"),
+                    AppLogPaths.GetPath("trace.log"),
                     $"{DateTime.Now:HH:mm:ss.fff} | [AVEngine] {msg}{Environment.NewLine}",
                     new System.Text.UTF8Encoding(false));
             }

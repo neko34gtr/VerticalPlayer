@@ -39,6 +39,39 @@ namespace VerticalPlayer
 
         public D3DImage D3DImage { get; } = new D3DImage();
 
+        /// <summary>D3DImageのフロントバッファの可用性が変わったとき（デバイスロスト・セッション/ディスプレイ
+        /// 状態の変化・別ウィンドウの表示等で起こり得る）に呼ばれる（UIスレッド）。使えるようになった時点で
+        /// 共有サーフェスをバックバッファへ再設定し、全面を更新して映像表示を復旧させる。
+        /// 従来はバックバッファの設定をテクスチャ(再)生成時（解像度が変わったとき）にしか行っておらず、
+        /// 一度使えなくなると次にサイズが変わるまで黒いままだった。</summary>
+        private void OnFrontBufferAvailableChanged(object? sender, DependencyPropertyChangedEventArgs e)
+        {
+            bool available = D3DImage.IsFrontBufferAvailable;
+            Trace($"D3DImage.IsFrontBufferAvailable={available}");
+            if (!available) return;
+
+            try
+            {
+                var surface = _surface9;
+                if (surface == null) return;
+                D3DImage.Lock();
+                try
+                {
+                    D3DImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, surface.NativePointer);
+                    D3DImage.AddDirtyRect(new Int32Rect(0, 0, _outW > 0 ? _outW : _w, _outH > 0 ? _outH : _h));
+                }
+                finally
+                {
+                    D3DImage.Unlock();
+                }
+                Trace("D3DImage back buffer re-attached after front buffer became available");
+            }
+            catch (Exception ex)
+            {
+                Trace($"D3DImage back buffer re-attach failed: {ex.Message}");
+            }
+        }
+
         private ID3D11Device? _d3d11Device;
         private ID3D11DeviceContext? _d3d11Context;
         private IDirect3D9Ex? _d3d9;
@@ -523,6 +556,10 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
 
         public GpuFramePresenter()
         {
+            // フロントバッファが一時的に使えなくなり、再び使えるようになった場合に、バックバッファを
+            // 再接続する（D3DImageの仕様上、これをしないと映像が黒いまま戻らない）。
+            D3DImage.IsFrontBufferAvailableChanged += OnFrontBufferAvailableChanged;
+
             try
             {
                 InitDevices();
@@ -1646,7 +1683,7 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
             try
             {
                 System.IO.File.AppendAllText(
-                    System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "trace.log"),
+                    AppLogPaths.GetPath("trace.log"),
                     $"{DateTime.Now:HH:mm:ss.fff} | [GpuFramePresenter] {msg}{Environment.NewLine}",
                     new System.Text.UTF8Encoding(false));
             }

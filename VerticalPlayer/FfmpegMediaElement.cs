@@ -496,7 +496,7 @@ namespace VerticalPlayer.Media
             try
             {
                 System.IO.File.AppendAllText(
-                    System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "trace.log"),
+                    AppLogPaths.GetPath("trace.log"),
                     $"{DateTime.Now:HH:mm:ss.fff} | [FfmpegMediaElement] {msg}{Environment.NewLine}",
                     new System.Text.UTF8Encoding(false));
             }

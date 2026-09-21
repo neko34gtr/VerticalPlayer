@@ -501,11 +501,24 @@
                                    Margin="0,0,8,0"/>
                     </StackPanel>
 
-                    <!-- 中央：ファイル名 -->
+                    <!-- 中央：ファイル名（通常モード） -->
                     <TextBlock x:Name="FileNameText" Grid.Column="1"
                                Foreground="{StaticResource TextMuted}" FontSize="11"
                                VerticalAlignment="Center" HorizontalAlignment="Center"
                                TextTrimming="CharacterEllipsis" MaxWidth="200"/>
+
+                    <!-- 中央：ファイル名（ドラレコモード）。再生中のFront/Rearを暗い背景で読みやすい明るい色で表示する。
+                         リアが無い区間・未検出のときは「リアなし」、リア表示スイッチOFFのときはリア側を出さない
+                         （表示内容の切替はコードビハインドのDashcamView_PlayingFilesChanged） -->
+                    <StackPanel x:Name="DashcamFileNamePanel" Grid.Column="1" Orientation="Horizontal"
+                                VerticalAlignment="Center" HorizontalAlignment="Center"
+                                Visibility="Collapsed" IsHitTestVisible="False">
+                        <TextBlock x:Name="DashcamFrontNameText" Foreground="#7DD3FC" FontSize="11" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" MaxWidth="320"/>
+                        <TextBlock x:Name="DashcamRearSeparator" Text="  |  " Foreground="#94A3B8" FontSize="11"/>
+                        <TextBlock x:Name="DashcamRearNameText" Foreground="#86EFAC" FontSize="11" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" MaxWidth="320"/>
+                    </StackPanel>
 
                     <!-- 右：ウィンドウ操作 -->
                     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
@@ -1038,6 +1051,21 @@
                                     <CheckBox x:Name="FpsCounterCheck" Content="fpsカウンタ表示"
                                               Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
                                               Checked="FpsCounter_Changed" Unchecked="FpsCounter_Changed"/>
+
+                                    <!-- ログ出力先（trace.log / play_error.txt。通常/ドラレコ共通）。
+                                         空欄＝自動（Xドライブ[RAMディスク]があれば X:\temp\VerticalPlayer、無ければ実行ファイル直下） -->
+                                    <TextBlock Text="ログ出力先（空欄＝自動）" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
+                                    <TextBox x:Name="LogDirBox" Style="{StaticResource ModernTextBox}"
+                                             Margin="0,0,0,4" LostFocus="LogDir_Changed"/>
+                                    <TextBlock x:Name="LogDirResolvedText" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                        <Button Content="開く" Style="{StaticResource SecondaryBtn}"
+                                                Margin="0,0,6,0" Click="OpenLogDir_Click"/>
+                                        <Button Content="自動に戻す" Style="{StaticResource SecondaryBtn}"
+                                                Click="ResetLogDir_Click"/>
+                                    </StackPanel>
 
                                     <Border Style="{StaticResource Separator}"/>
 

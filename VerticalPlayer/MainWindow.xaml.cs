@@ -63,6 +63,9 @@ namespace VerticalPlayer
         /// <summary>測位ロスト区間(トンネル等)の速度を推定補間する最大の長さ(秒)。0以下で無効。
         /// 既定900秒＝日本最長の道路トンネル(山手トンネル約18.2km)を80km/hで走る約14分に余裕を持たせた値。</summary>
         public double SpeedEstimateMaxGapSec { get; set; } = 900;
+        /// <summary>ログ(trace.log / play_error.txt)の出力先フォルダ。null/空＝自動（Xドライブ[RAMディスク]があれば
+        /// X:\temp\VerticalPlayer、無ければ実行ファイル直下）。通常/ドラレコ両モード共通。</summary>
+        public string? LogDirectory { get; set; }
         public double DashcamWindowWidth { get; set; }
         public double DashcamWindowHeight { get; set; }
         public bool DashcamWasActive { get; set; }
@@ -267,8 +270,8 @@ namespace VerticalPlayer
         private double _prevSpeed = 1.0;
 
         // ── トレースログ ──
-        private static readonly string TracePath = Path.Combine(
-            AppDomain.CurrentDomain.BaseDirectory, "trace.log");
+        // ログ出力先は AppLogPaths で一元管理（設定 > Xドライブ(RAMディスク) > 実行ファイル直下の順）
+        private static string TracePath => AppLogPaths.GetPath("trace.log");
 
         private static void Trace(string msg)
         {
@@ -288,6 +291,8 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         public MainWindow()
         {
+            // 最初のtrace.log初期化より前に、設定ファイルのログ出力先を先読みして反映する
+            AppLogPaths.LoadFromConfigFile(ConfigPath);
 #if DEBUG
             try
             {
@@ -302,6 +307,7 @@ namespace VerticalPlayer
             Trace("InitializeComponent done");
             _baseTitle = this.Title;
             DashcamView.CurrentFileChanged += DashcamView_CurrentFileChanged;
+            DashcamView.PlayingFilesChanged += DashcamView_PlayingFilesChanged;
 
             // ドラレコモード: 動画オープン/ズーム変更時にウィンドウをフィットさせる
             DashcamView.RequestWindowFit += DashcamView_RequestWindowFit;
@@ -424,6 +430,7 @@ namespace VerticalPlayer
                 catch { /* 壊れていたらデフォルト */ }
             }
             ApplyPlaybackComfortSettings(_enableSleepPrevention, _cursorHideDelaySec); // 設定ファイル無し/破損時は既定値
+            UpdateLogDirResolvedText();
             CenterOnScreen();
             // 設定ファイルが無い(初回起動等)場合でも、起動引数でフォルダが渡されていれば
             // ドラレコモードへ直接入る。
@@ -538,6 +545,9 @@ namespace VerticalPlayer
             DashcamView.RearPipPosY = s.DashcamRearPipY;
             DashcamView.SpeedOsdEnabled = s.EnableOSD;
             _speedEstimateMaxGapSec = s.SpeedEstimateMaxGapSec;
+            LogDirBox.Text = s.LogDirectory ?? "";
+            AppLogPaths.ConfiguredDirectory = LogDirBox.Text;
+            UpdateLogDirResolvedText();
             VerticalPlayer.Dashcam.NmeaSensorParser.MaxEstimateGapSeconds = _speedEstimateMaxGapSec;
             ApplyPlaybackComfortSettings(s.EnableSleepPrevention, s.CursorHideDelaySec);
             _dashcamWindowWidth = s.DashcamWindowWidth;
@@ -620,6 +630,7 @@ namespace VerticalPlayer
                 CursorHideDelaySec = _cursorHideDelaySec,
                 EnableSleepPrevention = _enableSleepPrevention,
                 SpeedEstimateMaxGapSec = _speedEstimateMaxGapSec,
+                LogDirectory = string.IsNullOrWhiteSpace(LogDirBox.Text) ? null : LogDirBox.Text.Trim(),
                 DashcamWindowWidth = _isDashcamMode ? this.Width : _dashcamWindowWidth,
                 DashcamWindowHeight = _isDashcamMode ? this.Height : _dashcamWindowHeight,
                 DashcamWasActive = _isDashcamMode,
@@ -756,7 +767,7 @@ namespace VerticalPlayer
                     catch (Exception ex)
                     {
                         // ここでエラーが出ればログへ書き出す
-                        string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "play_error.txt");
+                        string logPath = AppLogPaths.GetPath("play_error.txt");
                         File.AppendAllText(logPath, $"{DateTime.Now} | Retry-Play Error: {ex.Message}{Environment.NewLine}", new System.Text.UTF8Encoding(false));
                     }
                 }), DispatcherPriority.Loaded); // ここを Background から Loaded に変更
@@ -1683,6 +1694,39 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         // TensorRTキャッシュのバックアップ先
         // ─────────────────────────────────────────────────────────────────
+        // ── ログ出力先（通常/ドラレコ共通）──
+        private void UpdateLogDirResolvedText()
+            => LogDirResolvedText.Text = "現在の出力先: " + AppLogPaths.LogDirectory;
+
+        private void LogDir_Changed(object sender, RoutedEventArgs e)
+        {
+            AppLogPaths.ConfiguredDirectory = LogDirBox.Text?.Trim() ?? "";
+            UpdateLogDirResolvedText(); // 指定先が作成・書き込みできない場合はフォールバック先が表示される
+        }
+
+        private void OpenLogDir_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                Directory.CreateDirectory(AppLogPaths.LogDirectory);
+                Process.Start(new ProcessStartInfo("explorer.exe", $"\"{AppLogPaths.LogDirectory}\"")
+                {
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                Trace($"OpenLogDir_Click failed: {ex.Message}");
+            }
+        }
+
+        private void ResetLogDir_Click(object sender, RoutedEventArgs e)
+        {
+            LogDirBox.Text = "";
+            AppLogPaths.ConfiguredDirectory = "";
+            UpdateLogDirResolvedText();
+        }
+
         private void TrtCacheBackupDir_Changed(object sender, RoutedEventArgs e)
         {
             var path = TrtCacheBackupDirBox.Text?.Trim();
@@ -1873,6 +1917,10 @@ namespace VerticalPlayer
             ControlPanel.Visibility = Visibility.Collapsed;
             DashcamView.Visibility = Visibility.Visible;
 
+            // タイトルバー中央のファイル名を、通常モードの1本表示からドラレコモードのFront/Rear表示へ切り替える
+            FileNameText.Visibility = Visibility.Collapsed;
+            DashcamFileNamePanel.Visibility = Visibility.Visible;
+
             // ドラレコモード専用のウィンドウサイズへ（前回終了時のサイズを記憶している場合はそれを復元。
             // 動画を開いた時点でRequestWindowFitにより倍率どおりへ再フィットされる）
             _preDashcamWidth = this.Width;
@@ -1897,6 +1945,11 @@ namespace VerticalPlayer
             VideoAreaBorder.Visibility = Visibility.Visible;
             ControlPanel.Visibility = Visibility.Visible;
 
+            DashcamFileNamePanel.Visibility = Visibility.Collapsed;
+            DashcamFrontNameText.Text = "";
+            DashcamRearNameText.Text = "";
+            FileNameText.Visibility = Visibility.Visible;
+
             // ドラレコモードのウィンドウサイズを記憶してから通常モードのサイズへ戻す
             _dashcamWindowWidth = this.Width;
             _dashcamWindowHeight = this.Height;
@@ -1905,6 +1958,44 @@ namespace VerticalPlayer
             EnsureOnScreen();
             this.Title = _baseTitle;
         }
+        private static readonly System.Windows.Media.Brush RearNameBrush =
+            new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x86, 0xEF, 0xAC));  // 明るい緑
+        private static readonly System.Windows.Media.Brush NoRearBrush =
+            new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x94, 0xA3, 0xB8));  // 明るめのグレー
+
+        /// <summary>ドラレコモードのタイトルバー中央表示を更新する。
+        /// front/rear: 再生中のファイル名(無ければnull)。rearSwitchOn: リア表示スイッチの状態。
+        /// リアはスイッチOFFなら出さず、ONでリアが無い（録画の無い区間・ペア無し・開けなかった）ときは「リアなし」を出す。</summary>
+        private void DashcamView_PlayingFilesChanged(string? front, string? rear, bool rearSwitchOn)
+        {
+            bool hasFront = !string.IsNullOrEmpty(front);
+            bool hasRear = !string.IsNullOrEmpty(rear);
+
+            DashcamFrontNameText.Text = front ?? "";
+            DashcamFrontNameText.Visibility = hasFront ? Visibility.Visible : Visibility.Collapsed;
+
+            if (!hasFront && !hasRear)
+            {
+                DashcamRearNameText.Text = "";
+                DashcamRearNameText.Visibility = Visibility.Collapsed;
+                DashcamRearSeparator.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            if (!rearSwitchOn)
+            {
+                DashcamRearNameText.Visibility = Visibility.Collapsed;
+                DashcamRearSeparator.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            DashcamRearNameText.Text = hasRear ? rear! : "リアなし";
+            DashcamRearNameText.Foreground = hasRear ? RearNameBrush : NoRearBrush;
+            DashcamRearNameText.FontStyle = hasRear ? FontStyles.Normal : FontStyles.Italic;
+            DashcamRearNameText.Visibility = Visibility.Visible;
+            DashcamRearSeparator.Visibility = hasFront ? Visibility.Visible : Visibility.Collapsed;
+        }
+
         private void DashcamView_CurrentFileChanged(string? fileName)
         {
             this.Title = string.IsNullOrEmpty(fileName) ? _baseTitle : $"{_baseTitle} - {fileName}";
@@ -2400,7 +2491,7 @@ namespace VerticalPlayer
         {
             Trace($"MediaFailed: {e.ErrorException?.GetType().Name}: {e.ErrorException?.Message}");
             Trace($"MediaFailed StackTrace: {e.ErrorException?.StackTrace}");
-            string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "play_error.txt");
+            string logPath = AppLogPaths.GetPath("play_error.txt");
             string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | Error: {e.ErrorException?.Message}{Environment.NewLine}";
             try { File.AppendAllText(logPath, logMessage, new UTF8Encoding(false)); }
             catch { }
