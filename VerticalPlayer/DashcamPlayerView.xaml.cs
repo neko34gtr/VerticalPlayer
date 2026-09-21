@@ -2234,8 +2234,8 @@ namespace VerticalPlayer.Dashcam
             }
 
             double width = _mapHorizontal ? 420 : 260;
-            double top = SpeedOsdEnabled && SpeedOsdText != null
-                ? 10 + SpeedOsdText.FontSize * 1.4 + 8 // OSD(数値＋余白)の下
+            double top = SpeedOsdEnabled && SpeedOsd != null
+                ? 10 + SpeedOsd.Height + 8 // OSD(数字の高さ＋余白)の下
                 : 12;
             double bottomReserve = ChartStrip.ActualHeight + 56 + 16; // チャート＋コントロールバー＋余白
             double available = MainRowGrid.ActualHeight - top - bottomReserve;
@@ -2353,36 +2353,28 @@ namespace VerticalPlayer.Dashcam
         // ---- 車速OSD ----
 
         private DashcamSensorFrame? _lastOsdFrame;
-        private static readonly SolidColorBrush SpeedOsdMeasuredBrush = CreateFrozenBrush(0x00, 0xFF, 0x00);   // 実測: 蛍光緑
-        private static readonly SolidColorBrush SpeedOsdEstimatedBrush = CreateFrozenBrush(0xFB, 0xBF, 0x24);  // 推定: 琥珀色
-
-        private static SolidColorBrush CreateFrozenBrush(byte r, byte g, byte b)
-        {
-            var br = new SolidColorBrush(System.Windows.Media.Color.FromRgb(r, g, b));
-            br.Freeze();
-            return br;
-        }
 
         private void SpeedOsdCheck_Changed(object sender, RoutedEventArgs e) => UpdateSpeedOsd(_lastOsdFrame);
 
         private void VideoArea_SizeChanged(object sender, SizeChangedEventArgs e)
         {
-            UpdateSpeedOsdFontSize();
-            UpdateFullScreenMapOverlay(); // 全画面中のみ動作（OSDの文字サイズ確定後に配置を再計算）
+            UpdateSpeedOsdSize();
+            UpdateFullScreenMapOverlay(); // 全画面中のみ動作（OSDの高さ確定後に配置を再計算）
         }
 
-        /// <summary>文字サイズを映像エリアの高さの約9%に追従させる（数値本体。単位は40%）。</summary>
-        private void UpdateSpeedOsdFontSize()
+        /// <summary>OSDの高さ(＝7セグ数字の高さ)を映像エリアの高さの約8%に追従させる。
+        /// 幅は縦横比を保ってViewboxが決めるため、ここでは高さだけ与える。</summary>
+        private void UpdateSpeedOsdSize()
         {
-            if (SpeedOsdText == null || VideoArea == null) return;
+            if (SpeedOsd == null || VideoArea == null) return;
             double h = VideoArea.ActualHeight;
             if (h <= 0) return;
-            double size = Math.Max(24, h * 0.09);
-            SpeedOsdText.FontSize = size;
-            SpeedOsdUnit.FontSize = size * 0.4;
+            double size = Math.Max(30, h * 0.08);
+            if (Math.Abs(SpeedOsd.Height - size) > 0.5)
+                SpeedOsd.Height = size;
         }
 
-        /// <summary>現在フレームの走行速度をOSDへ反映する。未測位(トンネル内等)は「--」、
+        /// <summary>現在フレームの走行速度をOSDへ反映する。未測位(トンネル内等)で推定値も無い場合は全桁消灯、
         /// センサーデータが無い/OSDがOFFの間は非表示。</summary>
         private void UpdateSpeedOsd(DashcamSensorFrame? frame)
         {
@@ -2397,17 +2389,12 @@ namespace VerticalPlayer.Dashcam
 
             // 測位ロスト中は前後の測位速度から補間した推定値を「≈」付き・琥珀色で表示（実測の緑と区別）
             bool estimated = !frame.HasGpsFix && frame.SpeedEstimated;
-            string text = frame.HasGpsFix ? Math.Round(frame.SpeedKmh).ToString("0")
-                : estimated ? "≈" + Math.Round(frame.SpeedKmh).ToString("0")
-                : "--";
-            if (SpeedOsdValue.Text != text)
-                SpeedOsdValue.Text = text;
-            var brush = estimated ? SpeedOsdEstimatedBrush : SpeedOsdMeasuredBrush;
-            if (!ReferenceEquals(SpeedOsdText.Foreground, brush))
-                SpeedOsdText.Foreground = brush;
+            int? speed = (frame.HasGpsFix || estimated) ? (int)Math.Round(frame.SpeedKmh) : (int?)null;
+            SpeedOsd.IsEstimated = estimated;
+            SpeedOsd.Speed = speed; // 値が変わった桁だけ再描画される
             if (SpeedOsd.Visibility != Visibility.Visible)
             {
-                UpdateSpeedOsdFontSize();
+                UpdateSpeedOsdSize();
                 SpeedOsd.Visibility = Visibility.Visible;
             }
         }

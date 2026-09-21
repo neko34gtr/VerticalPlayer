@@ -1,0 +1,16 @@
+<UserControl x:Class="VerticalPlayer.Controls.SevenSegmentDigit"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Width="40" Height="70"
+             IsHitTestVisible="False">
+    <!-- 基準サイズ 40x70。上から A(上) / F,B(左右上) / G(中) / E,C(左右下) / D(下)。Fill はコードビハインドで OnBrush / OffBrush を切り替える。 -->
+    <Canvas Width="40" Height="70">
+        <Path x:Name="SegA" Data="M 6,4 L 9,1 L 31,1 L 34,4 L 31,7 L 9,7 Z"/>
+        <Path x:Name="SegB" Data="M 36,6.5 L 39,9.5 L 39,31 L 36,33.5 L 33,31 L 33,9.5 Z"/>
+        <Path x:Name="SegC" Data="M 36,36.5 L 39,39 L 39,60.5 L 36,63.5 L 33,60.5 L 33,39 Z"/>
+        <Path x:Name="SegD" Data="M 6,66 L 9,63 L 31,63 L 34,66 L 31,69 L 9,69 Z"/>
+        <Path x:Name="SegE" Data="M 4,36.5 L 7,39 L 7,60.5 L 4,63.5 L 1,60.5 L 1,39 Z"/>
+        <Path x:Name="SegF" Data="M 4,6.5 L 7,9.5 L 7,31 L 4,33.5 L 1,31 L 1,9.5 Z"/>
+        <Path x:Name="SegG" Data="M 6,35 L 9,32 L 31,32 L 34,35 L 31,38 L 9,38 Z"/>
+    </Canvas>
+</UserControl>

@@ -1,0 +1,40 @@
+<UserControl x:Class="VerticalPlayer.Controls.SevenSegmentSpeedOsd"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:VerticalPlayer.Controls"
+             IsHitTestVisible="False">
+    <!-- 親から与えられた Height(または Width)に対しアスペクト比を保ったまま拡縮する -->
+    <Viewbox Stretch="Uniform" StretchDirection="Both">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Orientation="Horizontal">
+                <local:SevenSegmentDigit x:Name="Digit100" Margin="0,0,6,0"/>
+                <local:SevenSegmentDigit x:Name="Digit10" Margin="0,0,6,0"/>
+                <local:SevenSegmentDigit x:Name="Digit1"/>
+            </StackPanel>
+
+            <Grid Grid.Column="1" Margin="10,0,0,0">
+                <!-- 推定速度時のみ表示(Opacityで切替、レイアウトは変えない) -->
+                <TextBlock x:Name="ApproxMark"
+                           Text="≈"
+                           FontFamily="Segoe UI"
+                           FontSize="30"
+                           FontWeight="Bold"
+                           HorizontalAlignment="Left"
+                           VerticalAlignment="Top"
+                           Opacity="0"/>
+                <TextBlock x:Name="UnitBlock"
+                           FontFamily="Segoe UI"
+                           FontSize="22"
+                           FontWeight="SemiBold"
+                           HorizontalAlignment="Left"
+                           VerticalAlignment="Bottom"
+                           Margin="0,0,0,2"/>
+            </Grid>
+        </Grid>
+    </Viewbox>
+</UserControl>
