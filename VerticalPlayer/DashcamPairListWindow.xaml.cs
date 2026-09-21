@@ -13,6 +13,8 @@ namespace VerticalPlayer.Dashcam
     /// 再生側(DashcamPlayerView)も同じ時刻情報で絶対時刻同期している。
     /// メインウィンドウと同じ自前タイトルバー（WindowStyle="None"、ドラッグ移動・最小化・
     /// 閉じるのみ）にしてアプリ全体の見た目と統一している。
+    /// モーダルではなく別ウィンドウ（Show）として開く。開いたままメイン画面の再生・操作ができ、
+    /// メイン画面が無効化されて暗く見えることもない。
     /// </summary>
     public partial class DashcamPairListWindow : Window
     {
@@ -52,6 +54,15 @@ namespace VerticalPlayer.Dashcam
         {
             InitializeComponent();
             _all = rows.ToList();
+            NoteText.Text = note;
+            ApplyViewMode();
+        }
+
+        /// <summary>開いたままのウィンドウの内容を最新の算出結果へ差し替える（再スキャン時・再度「ペア一覧」を押したとき）。</summary>
+        public void UpdateRows(IReadOnlyList<PairOverlapRow> rows, string note)
+        {
+            _all.Clear();
+            _all.AddRange(rows);
             NoteText.Text = note;
             ApplyViewMode();
         }

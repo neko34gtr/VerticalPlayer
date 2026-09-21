@@ -226,13 +226,24 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
-                <StackPanel Orientation="Horizontal" Grid.Column="0" Margin="8">
-                    <Button x:Name="PlayPauseButton" Content="▶" Width="32" Style="{StaticResource IconBtn}" Click="PlayPauseButton_Click" Margin="0,0,4,0"/>
-                    <Button x:Name="StopButton" Content="■" Width="32" Style="{StaticResource IconBtn}" Click="StopButton_Click" Margin="0,0,10,0"/>
-                    <Button x:Name="NextSceneButton" Content="次のシーン ▶▶" Style="{StaticResource SecondaryBtn}" Click="NextSceneButton_Click" Margin="0,0,6,0"
+                <StackPanel Orientation="Horizontal" Grid.Column="0" Margin="8" ToolTipService.InitialShowDelay="300">
+                    <!-- 操作アイコンは文字(▶■📷)ではなく Segoe Fluent Icons / Segoe MDL2 Assets のグリフを使う。
+                         4K等の高解像度でも輪郭がはっきりし、再生(▶)と一時停止(||)、停止(■)、カメラを取り違えない。
+                         各ボタンにはTips(ツールチップ)を付けている。再生/一時停止はコードビハインド
+                         (SetPlayPauseIcon)で状態に応じてアイコンとTipsを切り替える -->
+                    <Button x:Name="PlayPauseButton" Content="&#xE768;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="18"
+                            Width="44" Height="38" Style="{StaticResource IconBtn}" Click="PlayPauseButton_Click" Margin="0,0,4,0"
+                            ToolTip="再生"/>
+                    <Button x:Name="StopButton" Content="&#xE71A;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="18"
+                            Width="44" Height="38" Style="{StaticResource IconBtn}" Click="StopButton_Click" Margin="0,0,10,0"
+                            ToolTip="停止（映像を閉じます。再生ボタンで先頭から再生し直します）"/>
+                    <Button x:Name="PrevSceneButton" Content="◀◀ 前のシーン" Style="{StaticResource SecondaryBtn}" Click="PrevSceneButton_Click" Margin="0,0,6,0"
+                            ToolTip="Frontリストの前のグループへ戻る"/>
+                    <Button x:Name="NextSceneButton" Content="次のシーン ▶▶" Style="{StaticResource SecondaryBtn}" Click="NextSceneButton_Click" Margin="0,0,10,0"
                             ToolTip="Frontリストの次のグループへ進む"/>
-                    <Button x:Name="ScreenshotButton" Content="📷" Width="32" Style="{StaticResource IconBtn}" Click="ScreenshotButton_Click" Margin="0,0,10,0"
-                            ToolTip="現在のフロント映像を静止画で保存"/>
+                    <Button x:Name="ScreenshotButton" Content="&#xE722;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="20"
+                            Width="44" Height="38" Style="{StaticResource IconBtn}" Click="ScreenshotButton_Click" Margin="0,0,10,0"
+                            ToolTip="現在のフロント映像を静止画で保存（カメラ）"/>
                     <CheckBox x:Name="RearVisibleCheck" Content="リア表示" Style="{StaticResource ModernCheck}"
                               Foreground="{StaticResource TextPrimary}"
                               Checked="RearVisibleCheck_Changed" Unchecked="RearVisibleCheck_Changed"

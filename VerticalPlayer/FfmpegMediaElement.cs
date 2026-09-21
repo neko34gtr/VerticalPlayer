@@ -552,9 +552,18 @@ namespace VerticalPlayer.Media
             _isPlaying = false;
             PlaybackPowerGuard.SetPlaying(this, false);
             _engine.Stop();
+            _positionSeconds = 0;
             NaturalDuration = Duration.Automatic;
             NaturalVideoWidth = 0;
             NaturalVideoHeight = 0;
+        }
+
+        /// <summary>最後に表示したフレームを画面から消す（停止ボタン用）。Stop()だけでは最後のフレームが
+        /// 表示されたまま残り、一時停止と見分けがつかないため、停止時はこれも呼んで映像領域を空にする。
+        /// 次にSourceを設定して開き直したとき(OnEngineOpened)に表示は自動的に復帰する。</summary>
+        public void ClearDisplay()
+        {
+            _image.Source = null;
         }
 
         /// <summary>コマ送り/戻し専用。音声の再生には一切触れず、

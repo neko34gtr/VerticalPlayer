@@ -144,10 +144,17 @@ namespace VerticalPlayer.Dashcam
         /// リア表示スイッチの状態。</summary>
         public event Action<string?, string?, bool>? PlayingFilesChanged;
 
+        private void DashcamPlayerView_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
+            // ドラレコモードを抜けてこの画面が非表示になったら、開いているペア一覧も閉じる
+            if (e.NewValue is bool visible && !visible)
+                ClosePairListWindow();
+        }
+
         private void NotifyPlayingFiles()
         {
-            string? frontPath = _currentFrontGroup?.FrontVideoPath;
-            string? rearPath = _currentRearClipPath ?? _currentRearGroup?.RearVideoPath;
+            string? frontPath = _isStopped ? null : _currentFrontGroup?.FrontVideoPath;
+            string? rearPath = _isStopped ? null : (_currentRearClipPath ?? _currentRearGroup?.RearVideoPath);
             PlayingFilesChanged?.Invoke(
                 frontPath != null ? Path.GetFileName(frontPath) : null,
                 rearPath != null ? Path.GetFileName(rearPath) : null,
@@ -334,6 +341,7 @@ namespace VerticalPlayer.Dashcam
         public DashcamPlayerView()
         {
             InitializeComponent();
+            IsVisibleChanged += DashcamPlayerView_IsVisibleChanged;
 
             // 折りたたみ中はサイドバー内容(ScrollBar/コーナー等)を不可視にする（XAML側の指定に依存しない）
             SidebarContent.Opacity = 0;
@@ -457,21 +465,54 @@ namespace VerticalPlayer.Dashcam
                 return;
             }
 
-            const string note = "ファイル名の時刻から算出したFront/Rearの対応です（1本=最大2分と仮定した推定）。" +
-                "FrontとRearは録画開始の位相がずれているため1対1にはならず、Frontに対して重なるRear、" +
-                "Rearに対して重なるFrontを、重なる区間ごとに1行で表示します。「ずれ」はRear開始−Front開始(秒)、" +
-                "「区間」はその行が占める各ファイル内の位置です。表示専用で、再生は同じ時刻情報で自動的に同期します。";
+            // すでに開いていれば、内容を最新にして前面へ出すだけ（複数開かない）
+            if (_pairListWindow != null)
+            {
+                _pairListWindow.UpdateRows(rows, PairListNote);
+                if (_pairListWindow.WindowState == WindowState.Minimized)
+                    _pairListWindow.WindowState = WindowState.Normal;
+                _pairListWindow.Activate();
+                return;
+            }
 
-            var win = new DashcamPairListWindow(rows, note)
+            // モーダル(ShowDialog)ではなく別ウィンドウとして開く。開いている間もメイン画面は操作・再生でき、
+            // メイン画面全体が無効化されてサムネイル等が暗く見えることもない。Ownerを指定しているため
+            // 常にメイン画面の前面に出て、メイン画面を閉じれば一緒に閉じる。
+            var win = new DashcamPairListWindow(rows, PairListNote)
             {
                 Owner = Window.GetWindow(this)
             };
+            win.Closed += (s, args) =>
+            {
+                _pairListWindow = null;
+                DashcamPlayErrorLogger.Log("[PairList] 閉じた");
+            };
+            _pairListWindow = win;
 
-            // 再生中にモーダルを開くと映像/サムネイルが黒くなる事象の調査用ログ（描画Tier・GPU描画の可否・再生状態）
-            DashcamPlayErrorLogger.Log($"[PairList] 開く 再生中={_isPlaying} 描画Tier={System.Windows.Media.RenderCapability.Tier >> 16} " +
+            DashcamPlayErrorLogger.Log($"[PairList] 開く(別ウィンドウ) 再生中={_isPlaying} 描画Tier={System.Windows.Media.RenderCapability.Tier >> 16} " +
                 $"Front(GPU)={PlayerFront.IsGpuPresenterAvailable} Rear(GPU)={PlayerRear.IsGpuPresenterAvailable}");
-            win.ShowDialog();
-            DashcamPlayErrorLogger.Log($"[PairList] 閉じた 再生中={_isPlaying}");
+            win.Show();
+        }
+
+        private DashcamPairListWindow? _pairListWindow;
+
+        private const string PairListNote = "ファイル名の時刻から算出したFront/Rearの対応です（1本=最大2分と仮定した推定）。" +
+            "FrontとRearは録画開始の位相がずれているため1対1にはならず、Frontに対して重なるRear、" +
+            "Rearに対して重なるFrontを、重なる区間ごとに1行で表示します。「ずれ」はRear開始−Front開始(秒)、" +
+            "「区間」はその行が占める各ファイル内の位置です。表示専用で、再生は同じ時刻情報で自動的に同期します。";
+
+        /// <summary>ペア一覧を開いている場合、最新のFront/Rear情報で内容を更新する（ドライブ/フォルダの再スキャン後）。</summary>
+        private void RefreshPairListWindow()
+        {
+            if (_pairListWindow == null) return;
+            _pairListWindow.UpdateRows(BuildPairOverlapRows(), PairListNote);
+        }
+
+        /// <summary>ペア一覧を閉じる（ドラレコモードを抜けたときなど）。</summary>
+        private void ClosePairListWindow()
+        {
+            _pairListWindow?.Close();
+            _pairListWindow = null;
         }
 
         private const double PairListClipSeconds = 120; // 1ファイルの公称長(2分)
@@ -701,6 +742,7 @@ namespace VerticalPlayer.Dashcam
             _frontGroups = _groups.Where(g => g.HasFront).ToList();
             _rearGroups = _groups.Where(g => g.HasRear).ToList();
             BuildRearTimeline();
+            RefreshPairListWindow();
 
             FrontList.ItemsSource = _frontGroups;
             RearList.ItemsSource = _rearGroups;
@@ -1194,6 +1236,7 @@ namespace VerticalPlayer.Dashcam
         private void PlayFrontGroup(DashcamMediaGroup group)
         {
             _currentFrontGroup = group;
+            _isStopped = false;
             // 直前のFrontの次(約2分後)に続くファイルへの切替（連続再生・次のシーン）では、リアの
             // 「終了済み/開けなかった」記録を維持する。リアはFrontと位相が違い、まだ終わったはずの
             // 直前のリアclipが新しいFrontの開始時刻にも含まれて見えることがあり、リセットすると
@@ -1336,7 +1379,7 @@ namespace VerticalPlayer.Dashcam
             {
                 PlayerFront.Play();
                 _isPlaying = true;
-                PlayPauseButton.Content = "⏸";
+                SetPlayPauseIcon(true);
             }
 
             if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
@@ -1466,6 +1509,40 @@ namespace VerticalPlayer.Dashcam
 
         private void NextSceneButton_Click(object sender, RoutedEventArgs e) => AdvanceToNextFrontScene();
 
+        private void PrevSceneButton_Click(object sender, RoutedEventArgs e) => GoToPreviousFrontScene();
+
+        /// <summary>Frontリストの1つ前のグループを再生する（次のシーンの逆方向）。</summary>
+        private void GoToPreviousFrontScene()
+        {
+            if (_currentFrontGroup is null)
+            {
+                DashcamPlayErrorLogger.Log("[Previous] _currentFrontGroupがnullのため中止");
+                return;
+            }
+
+            int idx = _frontGroups.IndexOf(_currentFrontGroup);
+            if (idx < 0)
+            {
+                string curKey = _currentFrontGroup.TimestampKey;
+                idx = _frontGroups.FindIndex(g => g.TimestampKey == curKey); // 再スキャンで実体が入れ替わっていてもキーで探す
+            }
+            if (idx < 0)
+            {
+                DashcamPlayErrorLogger.Log($"[Previous] {_currentFrontGroup.TimestampKey}が_frontGroupsに見つからず中止");
+                return;
+            }
+            if (idx <= 0)
+            {
+                DashcamPlayErrorLogger.Log($"[Previous] {_currentFrontGroup.TimestampKey}は先頭ファイルのため中止");
+                return;
+            }
+
+            var prev = _frontGroups[idx - 1];
+            SetListSelection(FrontList, prev, scrollToTop: false);
+            ScrollSelectedToTop(FrontList, idx - 1);
+            PlayFrontGroup(prev);
+        }
+
         private void AdvanceToNextFrontScene()
         {
             if (_currentFrontGroup is null)
@@ -1544,26 +1621,47 @@ namespace VerticalPlayer.Dashcam
             return null;
         }
 
+        // Segoe Fluent Icons / Segoe MDL2 Assets のグリフ（再生 / 一時停止）
+        private const string PlayGlyph = "\uE768";
+        private const string PauseGlyph = "\uE769";
+
+        /// <summary>再生/一時停止ボタンのアイコンとTipsを状態に合わせる（playing=trueなら「一時停止」を表示）。</summary>
+        private void SetPlayPauseIcon(bool playing)
+        {
+            PlayPauseButton.Content = playing ? PauseGlyph : PlayGlyph;
+            PlayPauseButton.ToolTip = playing ? "一時停止" : (_isStopped ? "再生（先頭から）" : "再生");
+        }
+
+        // 停止ボタンで止めた状態（映像を消している）。この間は再生ボタンで現在のシーンを先頭から開き直す。
+        private bool _isStopped;
+
         private void PlayPauseButton_Click(object sender, RoutedEventArgs e)
         {
+            if (_isStopped)
+            {
+                if (_currentFrontGroup != null)
+                    PlayFrontGroup(_currentFrontGroup); // 内部で_isStopped解除・アイコン更新
+                return;
+            }
+
             if (_isPlaying)
             {
                 PlayerFront.Pause();
                 PlayerRear.Pause();
-                PlayPauseButton.Content = "▶";
+                SetPlayPauseIcon(false);
                 _wantsPlaying = false;
             }
             else
             {
                 PlayerFront.Play();
                 if (HasActiveRear()) PlayerRear.Play();
-                PlayPauseButton.Content = "⏸";
+                SetPlayPauseIcon(true);
                 _wantsPlaying = true;
             }
             _isPlaying = !_isPlaying;
         }
 
-        private void StopButton_Click(object sender, RoutedEventArgs e) => StopPlayback();
+        private void StopButton_Click(object sender, RoutedEventArgs e) => StopPlayback(keepCurrent: true);
 
         private void VolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
@@ -1572,7 +1670,7 @@ namespace VerticalPlayer.Dashcam
 
         private void ScreenshotButton_Click(object sender, RoutedEventArgs e)
         {
-            if (_currentFrontGroup?.FrontVideoPath == null)
+            if (_currentFrontGroup?.FrontVideoPath == null || _isStopped)
             {
                 AppMessageBox.Show(Window.GetWindow(this), "Front動画を再生してから撮影してください。",
                     "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Information, isDarkMode: true);
@@ -1603,17 +1701,34 @@ namespace VerticalPlayer.Dashcam
             }
         }
 
-        public void StopPlayback()
+        /// <summary>再生を停止して映像を消す。keepCurrent=trueは停止ボタン用: 現在のシーン(_currentFrontGroup)を
+        /// 覚えておき、再生ボタンで先頭から再生し直せるようにする。既定(false)はドライブ切替・モード終了用で、
+        /// 現在のシーンも破棄する（別ドライブの古いシーンを再生し直してしまわないため）。</summary>
+        public void StopPlayback(bool keepCurrent = false)
         {
             PlayerFront.Stop();
             PlayerRear.Stop();
+            // Stop()だけでは最後のフレームが画面に残り、一時停止と見分けがつかない（＝停止したつもりが
+            // 一時停止に見え、再生ボタンも効かない状態になっていた）。映像領域を空にする。
+            PlayerFront.ClearDisplay();
+            PlayerRear.ClearDisplay();
+            _rearAvailable = false;
+            UpdateRearPipVisibility();
+            _isStopped = keepCurrent && _currentFrontGroup != null;
+            if (!keepCurrent)
+            {
+                _currentFrontGroup = null;
+                _currentRearGroup = null;
+            }
+            AccelChart.SetPlayhead(TimeSpan.Zero);
+            Hud.UpdateFrame(null);
             _currentRearClipPath = null;
             _frontStart = null;          // 次に再生を始めるときは連続再生扱いにしない
             _rearExhaustedPath = null;
             _rearFailedPath = null;
             _isPlaying = false;
             _wantsPlaying = false;
-            PlayPauseButton.Content = "▶";
+            SetPlayPauseIcon(false);
             UpdateSpeedOsd(null);
             CurrentFileChanged?.Invoke(null);
             NotifyPlayingFiles();
@@ -1933,7 +2048,7 @@ namespace VerticalPlayer.Dashcam
                 PlayerFront.Pause();
                 PlayerRear.Pause();
                 _isPlaying = false;
-                PlayPauseButton.Content = "▶";
+                SetPlayPauseIcon(false);
             }
         }
 
@@ -1983,7 +2098,7 @@ namespace VerticalPlayer.Dashcam
                 PlayerFront.Play();
                 if (HasActiveRear()) PlayerRear.Play();
                 _isPlaying = true;
-                PlayPauseButton.Content = "⏸";
+                SetPlayPauseIcon(true);
             }
         }
 

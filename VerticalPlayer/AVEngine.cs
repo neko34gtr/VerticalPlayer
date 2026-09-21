@@ -1218,6 +1218,7 @@ namespace VerticalPlayer.Media
                                 if (_dnnSrEnabled && GpuPresenter != null && _dnnSr != null &&
                                     _dnnSr.IsReadyFor(w, h) && _dnnInferenceBusy)
                                 {
+                                    if (myGen != _generation) continue; // 旧世代が共有状態(クロック/キャッチアップ)を書き換えない
                                     if (_catchingUpAfterSeek)
                                     {
                                         Trace($"CatchUp done (DNN busy skip) pts={ptsSeconds:F3} desiredPlaying={_desiredPlaying}");
@@ -1309,6 +1310,12 @@ namespace VerticalPlayer.Media
 
                                 if (_effectsActive && GpuPresenter == null)
                                     ApplyEffects(managedBuf, bufSize);
+
+                                // 同じエンジンでSourceを差し替えた直後は、旧世代のスレッドがまだ最後のフレームを
+                                // 処理していることがある。旧世代がここでクロックを自分のptsへ再アンカーしたり
+                                // キャッチアップを完了扱いにすると、新世代のクロックが壊れる（新世代のフレームが
+                                // 大幅に遅れた扱いで捨てられ続け、映像が止まる）ため、世代が違えば何もしない。
+                                if (myGen != _generation) continue;
 
                                 if (_catchingUpAfterSeek)
                                 {
@@ -1573,7 +1580,13 @@ namespace VerticalPlayer.Media
                 // チェックで自然に終了させる。
                 if (demuxThread != null)
                 {
-                    _demuxInterruptFlag = 1;
+                    // 【重要】_demuxInterruptFlag/_demuxAckedはエンジン(インスタンス)で共有されるため、
+                    // 既に新しい世代へ切り替わっている場合(=リア等でSource差し替え直後)にここで1を立てると、
+                    // 新世代のDemuxスレッドがフラグ待機に入ったまま誰も解除せず、新世代のデコードスレッドは
+                    // パケット待ちで固まる（レジューム直後にリアが止まったままになる不具合の原因）。
+                    // 旧世代のDemuxスレッドは myGen != _generation で自然に終了するためフラグは不要。
+                    if (myGen == _generation)
+                        _demuxInterruptFlag = 1;
                     demuxJoinedCleanly = demuxThread.Join(5000);
                     if (!demuxJoinedCleanly)
                         Trace($"DemuxPrefetch(gen={myGen}): 5000ms待っても終了しなかった - リーク疑いあり、fmtの解放をスキップ（クラッシュ回避優先）");
@@ -1817,10 +1830,12 @@ namespace VerticalPlayer.Media
                     // フラグが解除されるまで待つ（fmtへの同時アクセスを避けるための唯一の関門）。
                     if (_demuxInterruptFlag != 0)
                     {
+                        if (myGen != _generation) return; // 旧世代は共有フラグ/確認応答に触れずに終了する
                         _demuxAcked = 1;
                         while (myGen == _generation && _demuxInterruptFlag != 0)
                             Thread.Sleep(1);
-                        _demuxAcked = 0;
+                        if (myGen == _generation)
+                            _demuxAcked = 0;
                         continue;
                     }
 
@@ -1893,6 +1908,7 @@ namespace VerticalPlayer.Media
         private bool TryDequeuePrefetchedPacket(Channel<DemuxedPacket> channel, int myGen, AVPacket* pkt, out bool eof)
         {
             eof = false;
+            int spins = 0;
             while (myGen == _generation)
             {
                 if (channel.Reader.TryRead(out var item))
@@ -1908,6 +1924,10 @@ namespace VerticalPlayer.Media
                     return false;
                 }
                 Thread.Sleep(2);
+
+                // パケットが来ない状態が続いても、呼び出し元のループ先頭（保留中のSeek処理・一時停止判定）へ
+                // 定期的に戻る。ここで無期限に待つと、Demux側が止まった場合にSeekも処理できず固まる。
+                if (++spins >= 10) return false;
             }
             return false;
         }
