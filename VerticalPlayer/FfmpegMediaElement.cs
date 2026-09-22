@@ -145,6 +145,13 @@ namespace VerticalPlayer.Media
             set => _engine.PrefetchEnabled = value;
         }
 
+        /// <summary>次に開くファイルから使用する音声出力バックエンド。AVEngine.AudioBackendへの薄い委譲。</summary>
+        public AudioBackendKind AudioBackend
+        {
+            get => _engine.AudioBackend;
+            set => _engine.AudioBackend = value;
+        }
+
         private double _contrast, _saturation, _gamma;
         public double Contrast
         {

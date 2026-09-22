@@ -91,6 +91,7 @@ namespace VerticalPlayer
         public bool IsForceVertical { get; set; }
         public double Rotation { get; set; }
         public bool HwAccel { get; set; } = true;
+        public string AudioBackend { get; set; } = "XAudio2"; // AudioBackendKindのenum名をそのまま保存
         public bool PacketPrefetch { get; set; } // 新機能のため既定はOFF（動作確認が済むまでは明示的にONにしてもらう）
         public bool ShowFpsCounter { get; set; } = true;
 
@@ -481,6 +482,8 @@ namespace VerticalPlayer
             PlayerRotation.Angle = _currentRotation;
             Player.DisplayRotation = _currentRotation;
             HwAccelCheck.IsChecked = s.HwAccel;
+            AudioBackendCombo.SelectedIndex = Enum.TryParse<VerticalPlayer.AudioBackendKind>(s.AudioBackend, out var restoredBackend)
+                ? (int)restoredBackend : 0;
             PrefetchCheck.IsChecked = s.PacketPrefetch;
             FpsCounterCheck.IsChecked = s.ShowFpsCounter;
             ActualFpsLabel.Visibility = s.ShowFpsCounter ? Visibility.Visible : Visibility.Collapsed;
@@ -651,6 +654,7 @@ namespace VerticalPlayer
                 IsForceVertical = ForceVerticalMode.IsChecked ?? false,
                 Rotation = _currentRotation,
                 HwAccel = HwAccelCheck.IsChecked ?? false,
+                AudioBackend = (AudioBackendCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "XAudio2",
                 PacketPrefetch = PrefetchCheck.IsChecked ?? false,
                 ShowFpsCounter = FpsCounterCheck.IsChecked ?? true,
                 TrtCacheBackupDir = string.IsNullOrWhiteSpace(TrtCacheBackupDirBox.Text)
@@ -1588,6 +1592,34 @@ namespace VerticalPlayer
             else
             {
                 Trace($"HwAccel_Changed: requested={Player.HardwareAcceleration}（次に開くファイルから適用）");
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // 音声出力バックエンド設定（次に開くファイルから適用。HwAccel_Changedと同じ即時反映方式）
+        // ─────────────────────────────────────────────────────────────────
+        private void AudioBackend_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (AudioBackendCombo.SelectedItem is not ComboBoxItem item
+                || !Enum.TryParse<VerticalPlayer.AudioBackendKind>((string)item.Tag, out var backend))
+                return;
+
+            Player.AudioBackend = backend;
+            DashcamView.AudioBackend = backend; // ドラレコモード側のFrontにも同じ設定を反映する（Rearは元々音声無し）
+
+            if (Player.Source != null)
+            {
+                var pos = Player.Position;
+                bool wasPlaying = _isPlaying;
+                var src = Player.Source;
+                Trace($"AudioBackend_Changed: requested={backend} - 現在のファイルを再オープンして即時反映 pos={pos}");
+                Player.Source = src;
+                Player.Position = pos;
+                if (wasPlaying) { Player.Play(); _isPlaying = true; } else { _isPlaying = false; }
+            }
+            else
+            {
+                Trace($"AudioBackend_Changed: requested={backend}（次に開くファイルから適用）");
             }
         }
 

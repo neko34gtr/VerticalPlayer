@@ -1,0 +1,64 @@
+<UserControl x:Class="VerticalPlayer.Dashcam.MapInfoOverlayControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             IsHitTestVisible="False">
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="DashcamTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
+    <!-- 動画エリア左下に縦積み。SpeedOsd(右上)・RearPip(既定は右下寄り)と重ならない配置。 -->
+    <StackPanel Orientation="Vertical" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="20,0,0,20">
+
+        <!-- 現在地名 -->
+        <Border x:Name="LocationCard" Background="#CC000000" CornerRadius="6" Padding="10,5" Margin="0,0,0,8"
+                HorizontalAlignment="Left">
+            <Border.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="6" ShadowDepth="1" Opacity="0.8"/>
+            </Border.Effect>
+            <TextBlock x:Name="LocationText" Foreground="White" FontSize="14" FontWeight="SemiBold"/>
+        </Border>
+
+        <!-- 次のSA/PA案内: 高速道路標識風の緑背景カード -->
+        <Border x:Name="SaPaCard" Background="#FF007042" BorderBrush="White" BorderThickness="2"
+                CornerRadius="4" Padding="14,8" Margin="0,0,0,8" HorizontalAlignment="Left">
+            <Border.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="8" ShadowDepth="2" Opacity="0.85"/>
+            </Border.Effect>
+            <StackPanel Orientation="Horizontal">
+                <Border Background="White" CornerRadius="3" Padding="6,2" VerticalAlignment="Center" Margin="0,0,10,0">
+                    <TextBlock x:Name="SaPaTypeText" Foreground="#FF007042" FontSize="18" FontWeight="Bold"/>
+                </Border>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock x:Name="SaPaNameText" Foreground="White" FontSize="16" FontWeight="Bold"/>
+                    <TextBlock x:Name="SaPaDistanceText" Foreground="White" FontSize="12" Opacity="0.9"/>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- トンネル接近/通過中カード -->
+        <Border x:Name="TunnelCard" Background="#CC1A1A1A" BorderBrush="{StaticResource TextAccentCyan}"
+                BorderThickness="1" CornerRadius="4" Padding="12,8" HorizontalAlignment="Left">
+            <Border.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="6" ShadowDepth="1" Opacity="0.8"/>
+            </Border.Effect>
+            <StackPanel Orientation="Horizontal">
+                <!-- トンネル・ピクトアイコン: 外部アイコン依存を避け、アーチ型+内側の暗い穴をBorderのみで表現 -->
+                <Grid Width="28" Height="22" Margin="0,0,10,0" VerticalAlignment="Center">
+                    <Border Background="{StaticResource TextAccentCyan}" CornerRadius="14,14,0,0"
+                            Height="18" VerticalAlignment="Top"/>
+                    <Rectangle Fill="{StaticResource TextAccentCyan}" Height="6" VerticalAlignment="Bottom"/>
+                    <Border Background="#1A1A1A" CornerRadius="9,9,0,0" Width="16" Height="14"
+                            VerticalAlignment="Top" HorizontalAlignment="Center"/>
+                </Grid>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock x:Name="TunnelNameText" Foreground="White" FontSize="14" FontWeight="Bold"/>
+                    <TextBlock x:Name="TunnelDetailText" Foreground="{StaticResource TextMuted}" FontSize="11"/>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</UserControl>

@@ -77,6 +77,11 @@ namespace VerticalPlayer.Media
         /// <summary>次にOpen()する際にハードウェアデコードを試みるかどうか。</summary>
         public bool HardwareAccelRequested { get; set; }
 
+        /// <summary>次に開くファイルから使用する音声出力バックエンド。既定はXAudio2（完成済み）。
+        /// HardwareAccelRequestedと同じ設計方針で、値はOpen()実行時にのみ読み取られ
+        /// （OpenAndRunスレッドへローカル変数として渡す）、再生中のファイルには反映されない。</summary>
+        public AudioBackendKind AudioBackend { get; set; } = AudioBackendKind.XAudio2;
+
         // ── Stage1: パケット先読み（Demux/Decode分離パイプライン） ──
         // HDD等の低速ストレージでの av_read_frame の I/O 遅延（ディスクI/Oスパイク）が
         // そのままデコード全体・キャッチアップドロップに直結していた問題への対策。
@@ -476,7 +481,8 @@ namespace VerticalPlayer.Media
             bool wantHw = HardwareAccelRequested;
             bool wantDenoise = DenoiseRequested;
             bool wantPrefetch = PrefetchEnabled;
-            var t = new Thread(() => OpenAndRun(source.LocalPath, myGen, wantHw, wantDenoise, wantPrefetch, wantAudio))
+            var wantAudioBackend = AudioBackend;
+            var t = new Thread(() => OpenAndRun(source.LocalPath, myGen, wantHw, wantDenoise, wantPrefetch, wantAudio, wantAudioBackend))
             {
                 IsBackground = true,
                 Name = "AVEngine-VideoDecode"
@@ -577,7 +583,8 @@ namespace VerticalPlayer.Media
         // ─────────────────────────────────────────────────────────────
         // デコードスレッド本体（映像のみ）
         // ─────────────────────────────────────────────────────────────
-        private void OpenAndRun(string path, int myGen, bool wantHw, bool wantDenoise, bool wantPrefetch, bool wantAudio = true)
+        private void OpenAndRun(string path, int myGen, bool wantHw, bool wantDenoise, bool wantPrefetch, bool wantAudio = true,
+            AudioBackendKind wantAudioBackend = AudioBackendKind.XAudio2)
         {
             AVFormatContext* fmt = null;
             AVCodecContext* vctx = null;
@@ -795,7 +802,7 @@ namespace VerticalPlayer.Media
                                 if (swrRet == 0 && swr != null && ffmpeg.swr_init(swr) == 0)
                                 {
                                     audioFrame = ffmpeg.av_frame_alloc();
-                                    audioOutput = new XAudio2AudioOutput();
+                                    audioOutput = AudioOutputFactory.Create(wantAudioBackend);
                                     audioOutput.Open(AudioOutSampleRate, AudioOutChannels);
                                     Trace($"Audio(gen={myGen}): opened idx={audioIdx} srcRate={actx->sample_rate} -> {AudioOutSampleRate}Hz/{AudioOutChannels}ch");
 

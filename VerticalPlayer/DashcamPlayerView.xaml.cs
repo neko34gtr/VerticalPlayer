@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -178,6 +179,20 @@ namespace VerticalPlayer.Dashcam
             {
                 PlayerFront.HardwareAcceleration = value;
                 PlayerRear.HardwareAcceleration = value;
+                ReapplyDecodeModeToOpenFiles();
+            }
+        }
+
+        /// <summary>音声出力バックエンド。MainWindow本体のAudioBackendComboと共有する設定。
+        /// Rearは機種仕様上そもそも音声トラックを持たないため、Frontのみに反映すれば十分だが、
+        /// 将来Rearに音声が付く機種が出てきた場合に備えPlayerRearにも同じ値を設定しておく。</summary>
+        public VerticalPlayer.AudioBackendKind AudioBackend
+        {
+            get => PlayerFront.AudioBackend;
+            set
+            {
+                PlayerFront.AudioBackend = value;
+                PlayerRear.AudioBackend = value;
                 ReapplyDecodeModeToOpenFiles();
             }
         }
@@ -1722,6 +1737,8 @@ namespace VerticalPlayer.Dashcam
             }
             AccelChart.SetPlayhead(TimeSpan.Zero);
             Hud.UpdateFrame(null);
+            _mapInfoProvider.UpdateFrame(null);
+            MapInfo.Apply(_mapInfoProvider.State, _mapInfoProvider.ShouldShowOverlay);
             _currentRearClipPath = null;
             _frontStart = null;          // 次に再生を始めるときは連続再生扱いにしない
             _rearExhaustedPath = null;
@@ -2352,6 +2369,10 @@ namespace VerticalPlayer.Dashcam
 
         // ---- 車速OSD ----
 
+        // ── 地図情報通知（地名・SA/PA・トンネル） ──
+        private readonly MapInfoProvider _mapInfoProvider = new();
+        private CancellationTokenSource? _mapInfoLoadCts;
+
         private DashcamSensorFrame? _lastOsdFrame;
 
         private void SpeedOsdCheck_Changed(object sender, RoutedEventArgs e) => UpdateSpeedOsd(_lastOsdFrame);
@@ -2409,6 +2430,8 @@ namespace VerticalPlayer.Dashcam
             var frame = DashcamSensorLookup.FindNearest(_sensorFrames, pos);
             Hud.UpdateFrame(frame); // Hud側は速度・加速度3軸のみ表示する想定（日時/緯度経度は下記の地図上パネルへ分離）
             UpdateSpeedOsd(frame);
+            _mapInfoProvider.UpdateFrame(frame); // 通信なし・ローカル計算のみ（Overpass取得はLoadMapInfoAsync側で1回だけ）
+            MapInfo.Apply(_mapInfoProvider.State, _mapInfoProvider.ShouldShowOverlay);
             if (frame != null)
             {
                 GeoDateTimeText.Text = frame.Timestamp.ToString("yyyy/MM/dd HH:mm:ss");
@@ -2547,6 +2570,28 @@ namespace VerticalPlayer.Dashcam
             }
 
             MapView.SetRoute(DashcamMapPointBuilder.BuildSegments(merged));
+
+            // 地図情報通知（地名・SA/PA・トンネル）用にOverpassへ1回だけ問い合わせる。
+            // 再生自体をブロックしないようfire-and-forgetにし、切替が連続した場合は前回分をキャンセルする。
+            _mapInfoLoadCts?.Cancel();
+            var mapInfoCts = new CancellationTokenSource();
+            _mapInfoLoadCts = mapInfoCts;
+            _ = LoadMapInfoAsync(merged, mapInfoCts);
+        }
+
+        /// <summary>RefreshMapBufferAsyncが確定させたルートに対し、Overpass APIへ1回だけ問い合わせる。
+        /// ファイル切替や連続シークでキャンセルされた場合はOperationCanceledExceptionを静かに無視する
+        /// （MapInfoProvider.LoadRouteAsync自体はネットワークエラー時も例外を投げない設計だが、
+        /// キャンセルはCancellationTokenの仕組み上例外として届くため、ここでだけ吸収する）。</summary>
+        private async Task LoadMapInfoAsync(List<DashcamSensorFrame> merged, CancellationTokenSource cts)
+        {
+            try
+            {
+                await _mapInfoProvider.LoadRouteAsync(merged, cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+            }
         }
 
         // ---- 地図の縦長/横長切替（自動判定＋手動上書き。Hudの位置には一切影響しない） ----

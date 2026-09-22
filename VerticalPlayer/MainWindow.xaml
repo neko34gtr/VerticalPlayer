@@ -1032,6 +1032,16 @@
                                                Foreground="{StaticResource TextPrimary}"
                                                FontSize="16" FontWeight="Bold" FontFamily="Consolas" Margin="0,0,0,4"/>
 
+                                    <TextBlock Text="音声エンジン" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,4,0,4"/>
+                                    <ComboBox x:Name="AudioBackendCombo" Margin="0,0,0,6"
+                                              SelectionChanged="AudioBackend_Changed" SelectedIndex="0">
+                                        <ComboBoxItem Content="XAudio2（既定）" Tag="XAudio2"/>
+                                        <ComboBoxItem Content="WASAPI（共有モード）" Tag="WasapiShared"/>
+                                        <ComboBoxItem Content="WASAPI（排他モード・低レイテンシー）" Tag="WasapiExclusive"/>
+                                    </ComboBox>
+
+
                                     <CheckBox x:Name="PrefetchCheck" Content="パケット先読み（低速ストレージ対策）"
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="Prefetch_Changed" Unchecked="Prefetch_Changed"/>

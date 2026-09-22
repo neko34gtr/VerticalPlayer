@@ -191,6 +191,10 @@
                         <DropShadowEffect Color="Black" BlurRadius="8" ShadowDepth="2" Opacity="0.95"/>
                     </ctl:SevenSegmentSpeedOsd.Effect>
                 </ctl:SevenSegmentSpeedOsd>
+
+                <!-- 地図情報通知: 現在地名・次のSA/PA・接近中/通過中トンネル。
+                     IsHitTestVisible=Falseなので下の映像/PiPへクリックは素通しする。 -->
+                <dash:MapInfoOverlayControl x:Name="MapInfo"/>
             </Grid>
 
             <!-- 右サイドバー: 上段=日時・緯度経度（常時固定表示）、下段=走行軌跡マップ。
