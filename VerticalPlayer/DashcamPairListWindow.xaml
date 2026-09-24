@@ -1,8 +1,8 @@
 <Window x:Class="VerticalPlayer.Dashcam.DashcamPairListWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Front/Rear ペア一覧" Height="620" Width="1000"
-        WindowStyle="None" AllowsTransparency="False" ResizeMode="CanResize"
+        Title="情報一覧" Height="640" Width="1040"
+        WindowStyle="None" AllowsTransparency="True" ResizeMode="CanResizeWithGrip"
         Background="{DynamicResource BgDeep}"
         WindowStartupLocation="CenterOwner">
     <Window.Resources>
@@ -41,14 +41,74 @@
                     </Trigger>
                 </Style.Triggers>
             </Style>
+
+            <!-- 通知情報タブの上段カード -->
+            <Style x:Key="DebugStatCard" TargetType="Border">
+                <Setter Property="Background" Value="{StaticResource BgCard}"/>
+                <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="CornerRadius" Value="6"/>
+                <Setter Property="Padding" Value="10,6"/>
+                <Setter Property="Margin" Value="0,0,8,0"/>
+            </Style>
+
+            <!-- ========== TabControl（MainWindow.xamlのPanelTab/PanelTabItemと同じ見た目に合わせる） ========== -->
+            <Style x:Key="PanelTab" TargetType="TabControl">
+                <Setter Property="Background" Value="Transparent"/>
+                <Setter Property="BorderThickness" Value="0"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="TabControl">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <Border Grid.Row="0" Background="#0F1623" CornerRadius="10,10,0,0" Padding="4">
+                                    <TabPanel IsItemsHost="True" HorizontalAlignment="Stretch"/>
+                                </Border>
+                                <Border Grid.Row="1" Background="#141C2E" CornerRadius="0,0,10,10" Padding="12">
+                                    <ContentPresenter ContentSource="SelectedContent"/>
+                                </Border>
+                            </Grid>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <Style x:Key="PanelTabItem" TargetType="TabItem">
+                <Setter Property="Foreground" Value="{StaticResource TextMuted}"/>
+                <Setter Property="FontSize" Value="11"/>
+                <Setter Property="FontWeight" Value="Medium"/>
+                <Setter Property="Cursor" Value="Hand"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="TabItem">
+                            <Border x:Name="Bd" CornerRadius="7" Padding="10,6" Margin="2">
+                                <ContentPresenter ContentSource="Header" HorizontalAlignment="Center"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsSelected" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="#1A2438"/>
+                                    <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+                                </Trigger>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="#1E2B42"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
         </ResourceDictionary>
     </Window.Resources>
 
-    <!-- ファイル名の時刻から算出したFront/Rearの対応関係（表示専用）。
-         Frontに対して重なるRear、Rearに対して重なるFrontを、重なる区間ごとに1行で表示する（n対n）。
+    <!-- 内部データ確認用の「情報一覧」（旧ペア一覧）。
          標準のOSタイトルバーではなく、メインウィンドウと同じ自前タイトルバー(ドラッグ移動・
-         最小化/閉じる)にしてアプリ全体の見た目と統一している。 -->
-    <Border Background="{StaticResource BgDeep}" BorderBrush="{StaticResource Border}" BorderThickness="1">
+         最小化/閉じる)にしてアプリ全体の見た目と統一している。
+         AllowsTransparency=Trueにしないと、WindowStyle=None環境でタイトルバー上端に
+         Windowsのネイティブなリサイズ枠の白い帯が残る（MainWindowと同じ理由で合わせてある）。 -->
+    <Border Background="{StaticResource BgDeep}" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="8">
         <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="36"/>
@@ -57,13 +117,13 @@
 
             <!-- カスタムタイトルバー -->
             <Border Grid.Row="0" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1"
-                    MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+                    CornerRadius="8,8,0,0" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="Front / Rear ペア一覧" Foreground="{StaticResource TextPrimary}"
+                    <TextBlock Grid.Column="0" Text="情報一覧" Foreground="{StaticResource TextPrimary}"
                                FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="14,0"/>
                     <StackPanel Grid.Column="1" Orientation="Horizontal">
                         <Button Content="—" Width="40" Style="{StaticResource IconBtn}" Click="Minimize_Click"/>
@@ -72,53 +132,155 @@
                 </Grid>
             </Border>
 
-            <!-- 本体 -->
-            <Grid Grid.Row="1" Margin="14">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="Auto"/>
-                </Grid.RowDefinitions>
+            <!-- 本体（通知情報／ペア） -->
+            <TabControl Grid.Row="1" Margin="14" Style="{StaticResource PanelTab}">
 
-                <TextBlock Grid.Row="0" x:Name="NoteText"
-                           Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,0,0,10" TextWrapping="Wrap"/>
+                <TabItem Header="通知情報" Style="{StaticResource PanelTabItem}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
 
-                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
-                    <TextBlock Text="並び順" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                    <RadioButton x:Name="ViewFrontRadio" Content="Front基準（Frontに対して重なるRear）" IsChecked="True"
-                                 Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center" Margin="0,0,16,0"
-                                 Checked="ViewMode_Changed"/>
-                    <RadioButton x:Name="ViewRearRadio" Content="Rear基準（Rearに対して重なるFront）"
-                                 Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
-                                 Checked="ViewMode_Changed"/>
-                </StackPanel>
+                        <TextBlock Grid.Row="0" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,0,0,10" TextWrapping="Wrap"
+                                   Text="地図情報通知(MapInfoProvider)が内部で保持・計算している生データです。再生中は自動で更新されます（このウィンドウを開いている間だけ）。"/>
 
-                <DataGrid x:Name="Grid_Rows" Grid.Row="2" AutoGenerateColumns="False" CanUserAddRows="False"
-                          IsReadOnly="True" SelectionUnit="FullRow"
-                          Background="{StaticResource BgSurface}" Foreground="{StaticResource TextPrimary}"
-                          RowBackground="{StaticResource BgPanel}" AlternatingRowBackground="{StaticResource BgCard}"
-                          GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="{StaticResource Border}"
-                          HeadersVisibility="Column" RowHeaderWidth="0" BorderThickness="1"
-                          BorderBrush="{StaticResource Border}"
-                          ColumnHeaderStyle="{StaticResource ThemedColumnHeader}"
-                          CellStyle="{StaticResource ThemedCell}">
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Header="No" Binding="{Binding No}" Width="46"/>
-                        <DataGridTextColumn Header="Front" Binding="{Binding FrontFileName}" Width="*"/>
-                        <DataGridTextColumn Header="Front開始" Binding="{Binding FrontStartText}" Width="74"/>
-                        <DataGridTextColumn Header="Rear" Binding="{Binding RearFileName}" Width="*"/>
-                        <DataGridTextColumn Header="Rear開始" Binding="{Binding RearStartText}" Width="74"/>
-                        <DataGridTextColumn Header="ずれ(秒)" Binding="{Binding OffsetText}" Width="64"/>
-                        <DataGridTextColumn Header="Front区間" Binding="{Binding FrontRangeText}" Width="96"/>
-                        <DataGridTextColumn Header="Rear区間" Binding="{Binding RearRangeText}" Width="96"/>
-                    </DataGrid.Columns>
-                </DataGrid>
+                        <!-- 現在値・フラグ一覧 -->
+                        <UniformGrid Grid.Row="1" Columns="4" Margin="0,0,0,10">
+                            <Border Style="{StaticResource DebugStatCard}">
+                                <StackPanel>
+                                    <TextBlock Text="現在座標" Foreground="{StaticResource TextMuted}" FontSize="10"/>
+                                    <TextBlock x:Name="DebugLatLngText" Foreground="{StaticResource TextPrimary}" FontFamily="Consolas" FontSize="12"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource DebugStatCard}">
+                                <StackPanel>
+                                    <TextBlock Text="累積距離(cumKm) / Heading" Foreground="{StaticResource TextMuted}" FontSize="10"/>
+                                    <TextBlock x:Name="DebugCumKmText" Foreground="{StaticResource TextPrimary}" FontFamily="Consolas" FontSize="12"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource DebugStatCard}">
+                                <StackPanel>
+                                    <TextBlock Text="ルート/データ件数" Foreground="{StaticResource TextMuted}" FontSize="10"/>
+                                    <TextBlock x:Name="DebugCountsText" Foreground="{StaticResource TextPrimary}" FontFamily="Consolas" FontSize="12"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource DebugStatCard}">
+                                <StackPanel>
+                                    <TextBlock Text="フラグ" Foreground="{StaticResource TextMuted}" FontSize="10"/>
+                                    <TextBlock x:Name="DebugFlagsText" Foreground="{StaticResource TextAccentCyan}" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </Border>
+                        </UniformGrid>
 
-                <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-                    <Button Content="閉じる" Width="90" Style="{StaticResource SecondaryBtn}" Click="CloseButton_Click"/>
-                </StackPanel>
-            </Grid>
+                        <Grid Grid.Row="2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="10"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <Grid Grid.Column="0">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="近傍のトンネル候補（EntryCumKm順）" Foreground="{StaticResource TextAccentCyan}" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                <DataGrid x:Name="TunnelDebugGrid" Grid.Row="1" AutoGenerateColumns="False" CanUserAddRows="False"
+                                          IsReadOnly="True" SelectionUnit="FullRow"
+                                          Background="{StaticResource BgSurface}" Foreground="{StaticResource TextPrimary}"
+                                          RowBackground="{StaticResource BgPanel}" AlternatingRowBackground="{StaticResource BgCard}"
+                                          GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="{StaticResource Border}"
+                                          HeadersVisibility="Column" RowHeaderWidth="0" BorderThickness="1"
+                                          BorderBrush="{StaticResource Border}"
+                                          ColumnHeaderStyle="{StaticResource ThemedColumnHeader}" CellStyle="{StaticResource ThemedCell}">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="*"/>
+                                        <DataGridTextColumn Header="道路" Binding="{Binding RoadName}" Width="90"/>
+                                        <DataGridTextColumn Header="高速" Binding="{Binding IsMotorwayTunnel}" Width="44"/>
+                                        <DataGridTextColumn Header="全長m" Binding="{Binding LengthMeters}" Width="60"/>
+                                        <DataGridTextColumn Header="この先km" Binding="{Binding DistanceAheadKm, StringFormat={}{0:F2}}" Width="70"/>
+                                        <DataGridTextColumn Header="通過中" Binding="{Binding IsPassing}" Width="50"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </Grid>
+
+                            <Grid Grid.Column="2">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="近傍のSA/PA候補（CumKm順）" Foreground="{StaticResource TextAccentCyan}" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                <DataGrid x:Name="SaPaDebugGrid" Grid.Row="1" AutoGenerateColumns="False" CanUserAddRows="False"
+                                          IsReadOnly="True" SelectionUnit="FullRow"
+                                          Background="{StaticResource BgSurface}" Foreground="{StaticResource TextPrimary}"
+                                          RowBackground="{StaticResource BgPanel}" AlternatingRowBackground="{StaticResource BgCard}"
+                                          GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="{StaticResource Border}"
+                                          HeadersVisibility="Column" RowHeaderWidth="0" BorderThickness="1"
+                                          BorderBrush="{StaticResource Border}"
+                                          ColumnHeaderStyle="{StaticResource ThemedColumnHeader}" CellStyle="{StaticResource ThemedCell}">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="*"/>
+                                        <DataGridTextColumn Header="種別" Binding="{Binding Type}" Width="44"/>
+                                        <DataGridTextColumn Header="道路" Binding="{Binding RoadName}" Width="90"/>
+                                        <DataGridTextColumn Header="この先km" Binding="{Binding DistanceAheadKm, StringFormat={}{0:F2}}" Width="70"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </Grid>
+                        </Grid>
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="ペア" Style="{StaticResource PanelTabItem}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" x:Name="NoteText"
+                                   Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,0,0,10" TextWrapping="Wrap"/>
+
+                        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock Text="並び順" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <RadioButton x:Name="ViewFrontRadio" Content="Front基準（Frontに対して重なるRear）" IsChecked="True"
+                                         Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center" Margin="0,0,16,0"
+                                         Checked="ViewMode_Changed"/>
+                            <RadioButton x:Name="ViewRearRadio" Content="Rear基準（Rearに対して重なるFront）"
+                                         Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
+                                         Checked="ViewMode_Changed"/>
+                        </StackPanel>
+
+                        <DataGrid x:Name="Grid_Rows" Grid.Row="2" AutoGenerateColumns="False" CanUserAddRows="False"
+                                  IsReadOnly="True" SelectionUnit="FullRow"
+                                  Background="{StaticResource BgSurface}" Foreground="{StaticResource TextPrimary}"
+                                  RowBackground="{StaticResource BgPanel}" AlternatingRowBackground="{StaticResource BgCard}"
+                                  GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="{StaticResource Border}"
+                                  HeadersVisibility="Column" RowHeaderWidth="0" BorderThickness="1"
+                                  BorderBrush="{StaticResource Border}"
+                                  ColumnHeaderStyle="{StaticResource ThemedColumnHeader}"
+                                  CellStyle="{StaticResource ThemedCell}">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="No" Binding="{Binding No}" Width="46"/>
+                                <DataGridTextColumn Header="Front" Binding="{Binding FrontFileName}" Width="*"/>
+                                <DataGridTextColumn Header="Front開始" Binding="{Binding FrontStartText}" Width="74"/>
+                                <DataGridTextColumn Header="Rear" Binding="{Binding RearFileName}" Width="*"/>
+                                <DataGridTextColumn Header="Rear開始" Binding="{Binding RearStartText}" Width="74"/>
+                                <DataGridTextColumn Header="ずれ(秒)" Binding="{Binding OffsetText}" Width="64"/>
+                                <DataGridTextColumn Header="Front区間" Binding="{Binding FrontRangeText}" Width="96"/>
+                                <DataGridTextColumn Header="Rear区間" Binding="{Binding RearRangeText}" Width="96"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+
+                        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+                            <Button Content="閉じる" Width="90" Style="{StaticResource SecondaryBtn}" Click="CloseButton_Click"/>
+                        </StackPanel>
+                    </Grid>
+                </TabItem>
+            </TabControl>
         </Grid>
     </Border>
 </Window>

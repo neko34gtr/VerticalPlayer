@@ -46,8 +46,8 @@
                           DisplayMemberPath="DisplayName" SelectionChanged="DriveCombo_SelectionChanged"/>
                 <Button x:Name="RefreshDrivesButton" Content="⟳" Width="28" Style="{StaticResource IconBtn}"
                         Click="RefreshDrivesButton_Click" ToolTip="ドライブ一覧を更新" Margin="0,0,16,0"/>
-                <Button x:Name="PairListButton" Content="ペア一覧" Style="{StaticResource SecondaryBtn}"
-                        Click="PairListButton_Click" ToolTip="SD_DBLIST.DBのFront/Rear組み合わせを確認・編集" Margin="0,0,16,0"/>
+                <Button x:Name="PairListButton" Content="情報一覧" Style="{StaticResource SecondaryBtn}"
+                        Click="PairListButton_Click" ToolTip="Front/Rear組み合わせの確認・地図情報通知の内部データ確認" Margin="0,0,16,0"/>
 
                 <CheckBox x:Name="RearLinkedCheck" Content="リア追従" IsChecked="True" Style="{StaticResource ModernCheck}"
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
@@ -84,6 +84,27 @@
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
                           Checked="SpeedOsdCheck_Changed" Unchecked="SpeedOsdCheck_Changed" Margin="0,0,16,0"
                           ToolTip="映像の右上に走行速度を大きく表示"/>
+
+                <!-- 地図情報通知（地名・SA/PA・トンネル・利用中の道路名）の表示位置とサイズ -->
+                <TextBlock Text="地図位置" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox x:Name="MapInfoCornerCombo" Width="90" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
+                          SelectionChanged="MapInfoCornerCombo_Changed" SelectedIndex="2"
+                          ToolTip="地図情報通知オーバーレイの表示位置">
+                    <ComboBoxItem Content="左上" Tag="TopLeft"/>
+                    <ComboBoxItem Content="右上" Tag="TopRight"/>
+                    <ComboBoxItem Content="左下" Tag="BottomLeft"/>
+                    <ComboBoxItem Content="右下" Tag="BottomRight"/>
+                </ComboBox>
+
+                <TextBlock Text="地図倍率" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox x:Name="MapInfoScaleCombo" Width="90" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
+                          SelectionChanged="MapInfoScaleCombo_Changed" SelectedIndex="1"
+                          ToolTip="地図情報通知オーバーレイの拡大率">
+                    <ComboBoxItem Content="0.75x" Tag="0.75"/>
+                    <ComboBoxItem Content="1.0x" Tag="1.00"/>
+                    <ComboBoxItem Content="1.25x" Tag="1.25"/>
+                    <ComboBoxItem Content="1.5x" Tag="1.50"/>
+                </ComboBox>
 
                 <CheckBox x:Name="DnnEnabledCheck" Content="AI推論(超解像)" Style="{StaticResource ModernCheck}"
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"

@@ -303,6 +303,63 @@ namespace VerticalPlayer.Dashcam
             set => SpeedOsdCheck.IsChecked = value;
         }
 
+        private MapInfoCorner _mapInfoCorner = MapInfoCorner.BottomLeft;
+        /// <summary>地図情報通知オーバーレイの表示位置（四隅）。永続化対象。
+        /// AppSettings.MapInfoCornerと文字列(enum名)で対応させる。</summary>
+        public MapInfoCorner MapInfoCornerSetting
+        {
+            get => _mapInfoCorner;
+            set
+            {
+                _mapInfoCorner = value;
+                MapInfo.SetLayout(_mapInfoCorner, _mapInfoScale);
+                UpdateMapInfoLayoutCombosSelection();
+            }
+        }
+
+        private double _mapInfoScale = 1.0;
+        /// <summary>地図情報通知オーバーレイの拡縮率（0.5〜2.0）。永続化対象。AppSettings.MapInfoScaleと対応。</summary>
+        public double MapInfoScaleSetting
+        {
+            get => _mapInfoScale;
+            set
+            {
+                _mapInfoScale = double.IsNaN(value) || value <= 0 ? 1.0 : Math.Clamp(value, 0.5, 2.0);
+                MapInfo.SetLayout(_mapInfoCorner, _mapInfoScale);
+                UpdateMapInfoLayoutCombosSelection();
+            }
+        }
+
+        private void UpdateMapInfoLayoutCombosSelection()
+        {
+            foreach (ComboBoxItem item in MapInfoCornerCombo.Items)
+            {
+                if ((string)item.Tag == _mapInfoCorner.ToString()) { MapInfoCornerCombo.SelectedItem = item; break; }
+            }
+            string scaleTag = _mapInfoScale.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+            foreach (ComboBoxItem item in MapInfoScaleCombo.Items)
+            {
+                if ((string)item.Tag == scaleTag) { MapInfoScaleCombo.SelectedItem = item; break; }
+            }
+        }
+
+        private void MapInfoCornerCombo_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (MapInfoCornerCombo.SelectedItem is not ComboBoxItem item
+                || !Enum.TryParse<MapInfoCorner>((string)item.Tag, out var corner)) return;
+            _mapInfoCorner = corner;
+            MapInfo?.SetLayout(_mapInfoCorner, _mapInfoScale); // InitializeComponent中はMapInfoが未構築の場合があるためnull条件で保護
+        }
+
+        private void MapInfoScaleCombo_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (MapInfoScaleCombo.SelectedItem is not ComboBoxItem item
+                || !double.TryParse((string)item.Tag, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var scale)) return;
+            _mapInfoScale = scale;
+            MapInfo?.SetLayout(_mapInfoCorner, _mapInfoScale); // 同上
+        }
+
         /// <summary>リア(PiP)の水平位置（永続化対象）。映像エリアの空き幅に対する比率0..1、-1=未設定(既定の左下)。</summary>
         public double RearPipPosX
         {
@@ -352,6 +409,20 @@ namespace VerticalPlayer.Dashcam
         public string? CurrentGroupKey => _currentFrontGroup?.TimestampKey;
         public double CurrentPositionSeconds => PlayerFront.NaturalDuration.HasTimeSpan ? PlayerFront.Position.TotalSeconds : 0;
         public string CurrentEventFolderName => CurrentEventFolder.ToString();
+
+        // ── 地図情報通知のレジューム保存・復元用（MainWindow.SaveSettings/RestoreSettingsから使う） ──
+        public string MapInfoHighwayName => _mapInfoProvider.State.HighwayName;
+        public bool MapInfoIsOnExpressway => _mapInfoProvider.IsOnExpressway;
+        public string MapInfoCurrentLocationName => _mapInfoProvider.State.CurrentLocationName;
+
+        /// <summary>起動時のレジューム復元専用。TryResumeAsyncと同じタイミングで呼ぶ想定。
+        /// 実際のGPSフレームが届く前に、前回終了時点の「利用中」表示を即座に出す
+        /// （詳しくはMapInfoProvider.ApplyResumedStateのコメント参照）。</summary>
+        public void ApplyResumedMapInfo(string? highwayName, bool isOnExpressway, string? locationName)
+        {
+            _mapInfoProvider.ApplyResumedState(highwayName ?? string.Empty, isOnExpressway, locationName ?? string.Empty);
+            MapInfo.Apply(_mapInfoProvider.State, _mapInfoProvider.ShouldShowOverlay);
+        }
 
         public DashcamPlayerView()
         {
@@ -408,6 +479,11 @@ namespace VerticalPlayer.Dashcam
             _syncTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _syncTimer.Tick += SyncTimer_Tick;
             _syncTimer.Start();
+
+            // 地図情報通知オーバーレイの初期配置（既定=左下・等倍）。MainWindow.RestoreSettingsが
+            // 保存済みの位置・サイズを持っていれば、この直後にMapInfoCornerSetting/MapInfoScaleSetting
+            // 経由で上書きされる。
+            MapInfo.SetLayout(_mapInfoCorner, _mapInfoScale);
         }
 
         private void DashcamPlayerView_Loaded(object sender, RoutedEventArgs e)
@@ -1229,6 +1305,7 @@ namespace VerticalPlayer.Dashcam
 
             if (_suppressSelectionEvent) return;
             if (FrontList.SelectedItem is not DashcamMediaGroup group) return;
+            _mapInfoProvider.Reset(); // 手動でのファイル切替は明確な非連続点なので、通過中フラグ等をここでクリアする
             PlayFrontGroup(group);
         }
 
@@ -1399,7 +1476,8 @@ namespace VerticalPlayer.Dashcam
 
             if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
             {
-                RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
+                //RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
+                RequestFitToVideoSize();
                 UpdateZoomAvailability();
             }
 
@@ -1522,9 +1600,17 @@ namespace VerticalPlayer.Dashcam
             AdvanceToNextFrontScene();
         }
 
-        private void NextSceneButton_Click(object sender, RoutedEventArgs e) => AdvanceToNextFrontScene();
+        private void NextSceneButton_Click(object sender, RoutedEventArgs e)
+        {
+            _mapInfoProvider.Reset(); // 手動でのシーン切替は明確な非連続点なので、通過中フラグ等をここでクリアする
+            AdvanceToNextFrontScene();
+        }
 
-        private void PrevSceneButton_Click(object sender, RoutedEventArgs e) => GoToPreviousFrontScene();
+        private void PrevSceneButton_Click(object sender, RoutedEventArgs e)
+        {
+            _mapInfoProvider.Reset();
+            GoToPreviousFrontScene();
+        }
 
         /// <summary>Frontリストの1つ前のグループを再生する（次のシーンの逆方向）。</summary>
         private void GoToPreviousFrontScene()
@@ -1737,7 +1823,7 @@ namespace VerticalPlayer.Dashcam
             }
             AccelChart.SetPlayhead(TimeSpan.Zero);
             Hud.UpdateFrame(null);
-            _mapInfoProvider.UpdateFrame(null);
+            _mapInfoProvider.Reset(); // 明確な非連続点なのでトンネル通過中フラグ等もここでクリアする
             MapInfo.Apply(_mapInfoProvider.State, _mapInfoProvider.ShouldShowOverlay);
             _currentRearClipPath = null;
             _frontStart = null;          // 次に再生を始めるときは連続再生扱いにしない
@@ -1971,8 +2057,10 @@ namespace VerticalPlayer.Dashcam
         {
             if (PlayerFront == null) return;
 
-            if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
-                RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
+            //if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
+            //    RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
+            RequestFitToVideoSize();
+
         }
 
         /// <summary>
@@ -2193,7 +2281,7 @@ namespace VerticalPlayer.Dashcam
                 _fsLastActivityTick = Environment.TickCount64;
                 ControlBar.Visibility = Visibility.Visible;
 
-                UpdateFullScreenMapOverlay();
+                UpdateFullScreenMapOverlay(); // 内部でMapInfoの下部インセットも合わせて更新する
 
                 PreviewMouseMove += FullScreen_PreviewMouseMove;
                 _fsControlsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
@@ -2229,6 +2317,7 @@ namespace VerticalPlayer.Dashcam
                 if (_fsSavedControlBarBackground != null)
                     ControlBar.Background = _fsSavedControlBarBackground;
                 ChartStrip.Opacity = 1.0;
+                MapInfo.SetFullScreenBottomInset(0); // 通常表示に戻るので下部インセットは不要
             }
         }
 
@@ -2244,6 +2333,12 @@ namespace VerticalPlayer.Dashcam
         private void UpdateFullScreenMapOverlay()
         {
             if (!_isFullScreen) return;
+
+            // 地図情報通知(MapInfo)は「地図・日時オーバーレイ(Mキー)」の表示/非表示とは独立して
+            // 常時出しうるため、この計算はRightSidebarHostの表示状態に関わらず毎回行う。
+            double bottomReserve = ChartStrip.ActualHeight + 56 + 16; // チャート＋コントロールバー＋余白
+            MapInfo.SetFullScreenBottomInset(bottomReserve);
+
             if (!_fsMapOverlayVisible)
             {
                 RightSidebarHost.Visibility = Visibility.Collapsed;
@@ -2254,7 +2349,6 @@ namespace VerticalPlayer.Dashcam
             double top = SpeedOsdEnabled && SpeedOsd != null
                 ? 10 + SpeedOsd.Height + 8 // OSD(数字の高さ＋余白)の下
                 : 12;
-            double bottomReserve = ChartStrip.ActualHeight + 56 + 16; // チャート＋コントロールバー＋余白
             double available = MainRowGrid.ActualHeight - top - bottomReserve;
             double height = Math.Clamp(width * 1.25, 200, Math.Max(200, available));
 
@@ -2466,6 +2560,10 @@ namespace VerticalPlayer.Dashcam
 
             if (RearLinked && !_isDragging)
                 ReconcileRear(); // Frontの現在時刻に対してリアclipを切り替える/外す
+
+            // 「情報一覧」ウィンドウの通知情報タブは、開いている間だけこの周期(500ms)で更新する。
+            // 毎フレーム(OnFrontFrameDisplayed)から呼ぶとDataGridの再バインドが重くなるため。
+            _pairListWindow?.UpdateDebugSnapshot(_mapInfoProvider.GetDebugSnapshot());
 
             bool timeAligned = UseTimeAlignedRear && _currentRearClipPath != null;
             bool rearReady = timeAligned ? _rearAvailable : HasActiveRear();
@@ -2748,6 +2846,72 @@ namespace VerticalPlayer.Dashcam
             // フロント/リアリストが表示される（ファイルの自動選択・再生は行わない）。
             DriveCombo.SelectedItem = target;
         }
+        /// <summary>
+        /// 動画のアスペクト比(16:9等)と画面内の非動画UI(ツールバー・コントロールバー・チャート・サイドバー・カスタムタイトルバー)の
+        /// サイズから、映像エリア(VideoArea)に黒帯が一切出ない最適なウィンドウサイズを算出してホスト(MainWindow)へ要求します。
+        /// ディスプレイの作業領域を超えて高さ・幅が制限される場合も、アスペクト比を維持して正しく縮小します。
+        /// </summary>
+        private void RequestFitToVideoSize()
+        {
+            if (PlayerFront.NaturalVideoWidth <= 0 || PlayerFront.NaturalVideoHeight <= 0) return;
 
+            // レイアウト未確定時はLoaded優先度で遅延実行
+            if (ActualWidth <= 0 || VideoArea.ActualHeight <= 0)
+            {
+                Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(RequestFitToVideoSize));
+                return;
+            }
+
+            var window = Window.GetWindow(this);
+            if (window == null) return;
+
+            // 1. 動画本来のアスペクト比
+            double videoAspect = (double)PlayerFront.NaturalVideoWidth / PlayerFront.NaturalVideoHeight;
+
+            // 2. 目的とする動画表示エリアの基本サイズ（ズーム倍率考慮）
+            double zoom = ZoomScale;
+            double targetVideoW = PlayerFront.NaturalVideoWidth * zoom;
+            double targetVideoH = PlayerFront.NaturalVideoHeight * zoom;
+
+            // 3. ドラレコ画面内の非動画UI幅（左サイドバー + 右サイドバー）
+            double rightSidebarWidth = RightSidebarColumnDef.ActualWidth > 0
+                ? RightSidebarColumnDef.ActualWidth
+                : (_mapHorizontal ? 420 : 260);
+            double nonVideoWidth = LeftSidebarColumn.ActualWidth + rightSidebarWidth;
+
+            // 4. ドラレコ画面内の非動画UI高さ（上部ツールバー + 下部コントロールバー + チャート）
+            double nonVideoHeight = (ToolbarBar.Visibility == Visibility.Visible ? ToolbarBar.ActualHeight : 0)
+                                  + (ControlBar.Visibility == Visibility.Visible ? ControlBar.ActualHeight : 0)
+                                  + (ChartStrip.Visibility == Visibility.Visible ? ChartStrip.ActualHeight : 0);
+            if (nonVideoHeight <= 0) nonVideoHeight = 38 + 56 + 130;
+
+            // 5. カスタムタイトルバー等のウィンドウ高さ差分
+            double titleBarHeight = Math.Max(0, window.ActualHeight - ActualHeight);
+            if (titleBarHeight <= 0) titleBarHeight = 32;
+
+            // 6. ディスプレイ作業領域による最大サイズ制約（画面外へのはみ出し防止）
+            double maxWindowW = SystemParameters.WorkArea.Width;
+            double maxWindowH = SystemParameters.WorkArea.Height;
+
+            double maxVideoW = Math.Max(100, maxWindowW - nonVideoWidth);
+            double maxVideoH = Math.Max(100, maxWindowH - nonVideoHeight - titleBarHeight);
+
+            // 7. 最大サイズを超える場合は、アスペクト比(videoAspect)を保ったまま全体を縮小
+            if (targetVideoW > maxVideoW || targetVideoH > maxVideoH)
+            {
+                double scaleFactor = Math.Min(maxVideoW / targetVideoW, maxVideoH / targetVideoH);
+                targetVideoW *= scaleFactor;
+                targetVideoH *= scaleFactor;
+            }
+
+            // 映像エリアのアスペクト比を厳密に動画の縦横比に合わせる
+            targetVideoW = targetVideoH * videoAspect;
+
+            // 8. 最終的なウィンドウ全体の要求幅・高さ
+            double totalWidth = Math.Round(targetVideoW + nonVideoWidth);
+            double totalHeight = Math.Round(targetVideoH + nonVideoHeight + titleBarHeight);
+
+            RequestWindowFit?.Invoke(totalWidth, totalHeight);
+        }
     }
 }

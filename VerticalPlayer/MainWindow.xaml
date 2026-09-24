@@ -1022,6 +1022,51 @@
                                               Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
                                               Checked="DynamicContrast_Changed" Unchecked="DynamicContrast_Changed"/>
 
+                                    <CheckBox x:Name="AlwaysOnTopCheck" Content="常に最前面"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                              Checked="AlwaysOnTop_Changed" Unchecked="AlwaysOnTop_Changed"/>
+                                    <CheckBox x:Name="FitWindowToVideoCheck" Content="ウィンドウを動画表示部にフィット"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
+                                              Checked="FitWindowToVideo_Changed" Unchecked="FitWindowToVideo_Changed"/>
+                                    <CheckBox x:Name="FpsCounterCheck" Content="fpsカウンタ表示"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
+                                              Checked="FpsCounter_Changed" Unchecked="FpsCounter_Changed"/>
+
+                                    <Border Style="{StaticResource Separator}"/>
+
+                                    <TextBlock Text="超解像（Lanczos＋アンシャープ / DNN・GPU）" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
+                                    <ComboBox x:Name="SuperResolutionCombo" Margin="0,0,0,6"
+                                              SelectionChanged="SuperResolution_Changed" SelectedIndex="0">
+                                        <ComboBoxItem Content="なし" Tag="1.0"/>
+                                        <ComboBoxItem Content="1.5倍" Tag="1.5"/>
+                                        <ComboBoxItem Content="2.0倍" Tag="2.0"/>
+                                        <ComboBoxItem x:Name="DnnComboItem" Content="DNN/TensorRT" Tag="dnn"/>
+                                    </ComboBox>
+                                    <TextBlock Text="DNNモデル（差し替え用、modelsフォルダを自動スキャン）" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
+                                    <ComboBox x:Name="DnnModelCombo" Margin="0,0,0,6"
+                                              SelectionChanged="DnnModel_Changed"/>
+
+                                    <TextBlock Text="比較ビュー（TrueTheater風）" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
+                                    <ComboBox x:Name="CompareModeCombo" Margin="0,0,0,6"
+                                              SelectionChanged="CompareMode_Changed" SelectedIndex="0">
+                                        <ComboBoxItem Content="通常" Tag="0"/>
+                                        <ComboBoxItem Content="1枚分割（ワイプ）" Tag="1"/>
+                                        <ComboBoxItem Content="2枚分割（フル画像）" Tag="2"/>
+                                    </ComboBox>
+
+                                    <Border Style="{StaticResource Separator}"/>
+                                    <Button Content="ウィンドウを画面中央へ" Style="{StaticResource SecondaryBtn}"
+                                            Click="CenterWindow_Click" Margin="0,4"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </TabItem>
+
+                        <TabItem Header="システム" Style="{StaticResource PanelTabItem}">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <StackPanel>
                                     <CheckBox x:Name="DnnWaitForBuildCheck" Content="DNN切替再生待ち"
                                               Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"/>
 
@@ -1041,26 +1086,18 @@
                                         <ComboBoxItem Content="WASAPI（排他モード・低レイテンシー）" Tag="WasapiExclusive"/>
                                     </ComboBox>
 
-
                                     <CheckBox x:Name="PrefetchCheck" Content="パケット先読み（低速ストレージ対策）"
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="Prefetch_Changed" Unchecked="Prefetch_Changed"/>
 
-                                    <CheckBox x:Name="AlwaysOnTopCheck" Content="常に最前面"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4"
-                                              Checked="AlwaysOnTop_Changed" Unchecked="AlwaysOnTop_Changed"/>
-                                    <CheckBox x:Name="FitWindowToVideoCheck" Content="ウィンドウを動画表示部にフィット"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
-                                              Checked="FitWindowToVideo_Changed" Unchecked="FitWindowToVideo_Changed"/>
+                                    <Border Style="{StaticResource Separator}"/>
+
                                     <CheckBox x:Name="AutoPlayNextCheck" Content="次ファイル自動再生"
                                               Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
                                               Checked="AutoPlayNext_Changed" Unchecked="AutoPlayNext_Changed"/>
                                     <CheckBox x:Name="DisableAutoResumeCheck" Content="起動時のレジューム自動再生を無効化"
                                               Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
                                               Checked="DisableAutoResume_Changed" Unchecked="DisableAutoResume_Changed"/>
-                                    <CheckBox x:Name="FpsCounterCheck" Content="fpsカウンタ表示"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
-                                              Checked="FpsCounter_Changed" Unchecked="FpsCounter_Changed"/>
 
                                     <!-- ログ出力先（trace.log / play_error.txt。通常/ドラレコ共通）。
                                          空欄＝自動（Xドライブ[RAMディスク]があれば X:\temp\VerticalPlayer、無ければ実行ファイル直下） -->
@@ -1079,20 +1116,6 @@
 
                                     <Border Style="{StaticResource Separator}"/>
 
-                                    <TextBlock Text="超解像（Lanczos＋アンシャープ / DNN・GPU）" Foreground="{StaticResource TextMuted}"
-                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
-                                    <ComboBox x:Name="SuperResolutionCombo" Margin="0,0,0,6"
-                                              SelectionChanged="SuperResolution_Changed" SelectedIndex="0">
-                                        <ComboBoxItem Content="なし" Tag="1.0"/>
-                                        <ComboBoxItem Content="1.5倍" Tag="1.5"/>
-                                        <ComboBoxItem Content="2.0倍" Tag="2.0"/>
-                                        <ComboBoxItem x:Name="DnnComboItem" Content="DNN/TensorRT" Tag="dnn"/>
-                                    </ComboBox>
-                                    <TextBlock Text="DNNモデル（差し替え用、modelsフォルダを自動スキャン）" Foreground="{StaticResource TextMuted}"
-                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
-                                    <ComboBox x:Name="DnnModelCombo" Margin="0,0,0,6"
-                                              SelectionChanged="DnnModel_Changed"/>
-
                                     <!-- TensorRTキャッシュのバックアップ先（RAMディスク運用時の保険）。
                                          既定はビルド構成に依存しない%LOCALAPPDATA%配下の固定パスだが、
                                          任意のフォルダへ変更できるようにしている。 -->
@@ -1110,17 +1133,7 @@
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="DnnFastBuild_Changed" Unchecked="DnnFastBuild_Changed"/>
 
-                                    <TextBlock Text="比較ビュー（TrueTheater風）" Foreground="{StaticResource TextMuted}"
-                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
-                                    <ComboBox x:Name="CompareModeCombo" Margin="0,0,0,6"
-                                              SelectionChanged="CompareMode_Changed" SelectedIndex="0">
-                                        <ComboBoxItem Content="通常" Tag="0"/>
-                                        <ComboBoxItem Content="1枚分割（ワイプ）" Tag="1"/>
-                                        <ComboBoxItem Content="2枚分割（フル画像）" Tag="2"/>
-                                    </ComboBox>
-
                                     <Border Style="{StaticResource Separator}"/>
-
 
                                     <!-- 再生速度 -->
                                     <DockPanel Margin="0,0,0,4">
@@ -1134,14 +1147,9 @@
                                             Minimum="0.1" Maximum="4.0" Value="1.0"
                                             IsSnapToTickEnabled="True" TickFrequency="0.1"
                                             ValueChanged="Speed_Changed" Margin="0,4"/>
-
-                                    <Border Style="{StaticResource Separator}"/>
-                                    <Button Content="ウィンドウを画面中央へ" Style="{StaticResource SecondaryBtn}"
-                                            Click="CenterWindow_Click" Margin="0,4"/>
                                 </StackPanel>
                             </ScrollViewer>
                         </TabItem>
-
                         <TabItem Header="エフェクト" Style="{StaticResource PanelTabItem}">
                             <ScrollViewer VerticalScrollBarVisibility="Auto">
                                 <StackPanel>

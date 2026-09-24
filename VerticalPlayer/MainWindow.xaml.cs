@@ -56,6 +56,8 @@ namespace VerticalPlayer
         // ── 再生まわりの追加機能 ──
         /// <summary>ドラレコモードの車速OSD（映像右上の走行速度表示）のON/OFF。</summary>
         public bool EnableOSD { get; set; } = true;
+        public string MapInfoCorner { get; set; } = "BottomLeft"; // Dashcam.MapInfoCornerのenum名をそのまま保存
+        public double MapInfoScale { get; set; } = 1.0;
         /// <summary>再生中、無操作でマウスカーソルを隠すまでの時間(秒)。0以下で無効。</summary>
         public double CursorHideDelaySec { get; set; } = 2.5;
         /// <summary>再生中のスリープ(画面オフ/システムスリープ)防止。</summary>
@@ -78,6 +80,9 @@ namespace VerticalPlayer
         public string? DashcamLastGroupKey { get; set; }
         public double DashcamLastPosition { get; set; }
         public string? DashcamLastEventFolder { get; set; }
+        public string? MapInfoHighwayName { get; set; }
+        public bool MapInfoIsOnExpressway { get; set; }
+        public string? MapInfoCurrentLocationName { get; set; }
 
         // ── 再生 ──
         public double Volume { get; set; } = 0.7;
@@ -547,6 +552,9 @@ namespace VerticalPlayer
             DashcamView.RearPipPosX = s.DashcamRearPipX;
             DashcamView.RearPipPosY = s.DashcamRearPipY;
             DashcamView.SpeedOsdEnabled = s.EnableOSD;
+            DashcamView.MapInfoCornerSetting = Enum.TryParse<VerticalPlayer.Dashcam.MapInfoCorner>(s.MapInfoCorner, out var restoredCorner)
+                ? restoredCorner : VerticalPlayer.Dashcam.MapInfoCorner.BottomLeft;
+            DashcamView.MapInfoScaleSetting = s.MapInfoScale;
             _speedEstimateMaxGapSec = s.SpeedEstimateMaxGapSec;
             LogDirBox.Text = s.LogDirectory ?? "";
             AppLogPaths.ConfiguredDirectory = LogDirBox.Text;
@@ -577,6 +585,7 @@ namespace VerticalPlayer
                 string? groupKey = s.DashcamLastGroupKey;
                 double pos = s.DashcamLastPosition;
                 string? eventFolder = s.DashcamLastEventFolder;
+                DashcamView.ApplyResumedMapInfo(s.MapInfoHighwayName, s.MapInfoIsOnExpressway, s.MapInfoCurrentLocationName);
                 _ = DashcamView.TryResumeAsync(drivePath, groupKey, pos, eventFolder);
             }
 
@@ -630,6 +639,8 @@ namespace VerticalPlayer
                 DashcamRearPipX = DashcamView.RearPipPosX,
                 DashcamRearPipY = DashcamView.RearPipPosY,
                 EnableOSD = DashcamView.SpeedOsdEnabled,
+                MapInfoCorner = DashcamView.MapInfoCornerSetting.ToString(),
+                MapInfoScale = DashcamView.MapInfoScaleSetting,
                 CursorHideDelaySec = _cursorHideDelaySec,
                 EnableSleepPrevention = _enableSleepPrevention,
                 SpeedEstimateMaxGapSec = _speedEstimateMaxGapSec,
@@ -641,6 +652,9 @@ namespace VerticalPlayer
                 DashcamLastGroupKey = DashcamView.CurrentGroupKey,
                 DashcamLastPosition = DashcamView.CurrentPositionSeconds,
                 DashcamLastEventFolder = DashcamView.CurrentEventFolderName,
+                MapInfoHighwayName = DashcamView.MapInfoHighwayName,
+                MapInfoIsOnExpressway = DashcamView.MapInfoIsOnExpressway,
+                MapInfoCurrentLocationName = DashcamView.MapInfoCurrentLocationName,
 
                 // 再生
                 Volume = VolumeSlider.Value,

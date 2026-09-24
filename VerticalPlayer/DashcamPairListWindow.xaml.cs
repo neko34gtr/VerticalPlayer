@@ -96,6 +96,24 @@ namespace VerticalPlayer.Dashcam
             Grid_Rows.ItemsSource = list;
         }
 
+        /// <summary>「通知情報」タブの内容を最新のスナップショットへ更新する。
+        /// DashcamPlayerView側が、このウィンドウが開いている間だけ定期的に呼ぶ想定
+        /// （閉じている間は呼ばれない＝コストをかけない）。</summary>
+        public void UpdateDebugSnapshot(MapInfoDebugSnapshot s)
+        {
+            DebugLatLngText.Text = s.HasLastFrame
+                ? $"{s.CurrentLat:F6}, {s.CurrentLng:F6}  (GPS:{(s.HasGpsFix ? "有効" : "ロスト")})"
+                : "(フレーム無し)";
+            DebugCumKmText.Text = $"{s.CurrentCumKm:F3} km  /  {(s.HeadingDeg.HasValue ? s.HeadingDeg.Value.ToString("F0") + "°" : "-")}";
+            DebugCountsText.Text = $"route:{s.RoutePointCount}pt  tunnel:{s.TunnelCount}  SA/PA:{s.SaPaCount}  place:{s.PlaceCount}  road:{s.HighwayWayCount}";
+            DebugFlagsText.Text =
+                $"RouteReady={s.RouteReady}  IsOnExpressway={s.IsOnExpressway}  IsPassingTunnel={s.IsPassingTunnel}  ShouldShowOverlay={s.ShouldShowOverlay}\n" +
+                $"HighwayName=\"{s.HighwayName}\"  Location=\"{s.CurrentLocationName}\"";
+
+            TunnelDebugGrid.ItemsSource = s.NearbyTunnels;
+            SaPaDebugGrid.ItemsSource = s.NearbySaPas;
+        }
+
         private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e) => DragMove();
 
         private void Minimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;

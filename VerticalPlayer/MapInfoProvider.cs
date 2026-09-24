@@ -47,12 +47,17 @@ namespace VerticalPlayer.Dashcam
         // ── 定数 ──
 
         private const double TunnelApproachThresholdMeters = 1000.0; // 「接近中」とみなす距離
-        private const double SaPaApproachThresholdKm = 30.0;         // SA/PA案内を出し始める手前距離
+        private const double TunnelEntryDetectionThresholdKm = 3.0; // GPSロスト時の「トンネル進入」検出に使う広めの閾値 4.0→3.0km 80キロで2分走ると仮定して2.8キロなので3とした
+        private const double SaPaApproachThresholdKm = 30.0;         // SA/PA案内を出し始める手前距離 30→5km
         private const double PlaceMatchRadiusKm = 6.0;               // Overpassのplaceノードを採用する最大距離
         private const double MinBearingSampleMeters = 8.0;           // Heading再計算に使う最小移動量
         private const double HeadingLockSpeedKmh = 3.0;              // これ未満の速度ではHeadingをロック
         private const double BboxPaddingDeg = 0.03;                  // 約3km相当の余白（トンネル入口が測位断続範囲の外に出るのを防ぐ）
-        private static readonly TimeSpan FrameContinuityThreshold = TimeSpan.FromSeconds(2); // seek判定用
+        // seek判定用。VideoOffsetは連結ルートのローカル座標で、ファイル切替のたびに0起点で
+        // 作り直されるため比較に使えない（切替直後を「シークした」と誤判定してしまう）。
+        // Timestampは絶対時刻でファイル切替をまたいでも連続なので、こちらを使う。
+        // ファイル境界のわずかな録画ギャップも許容できるよう少し余裕を持たせている。
+        private static readonly TimeSpan FrameContinuityThreshold = TimeSpan.FromSeconds(5);
 
         private static readonly HttpClient Http = new(new HttpClientHandler { AutomaticDecompression = System.Net.DecompressionMethods.All })
         {
@@ -86,8 +91,10 @@ namespace VerticalPlayer.Dashcam
 
         // ── トンネル通過中の状態保持 ──
 
-        private ProjectedTunnel? _passingTunnel;
+        private ProjectedTunnel? _passingTunnel; // 「今ロック中（接近中〜通過中）のトンネル」として厳密に扱います
+        private bool _isInsideTunnelInstance;    // 実際にGPSロスト等で「通過中」フラグが立ったかどうかの内部管理用
         private DashcamSensorFrame? _lastFrame;
+        private double _lastCumKm; // 「情報一覧」の通知情報タブ表示用（GetDebugSnapshot参照）
 
         /// <summary>常に同じインスタンスを使い回す（毎フレームのGC割り当てを避けるため）。
         /// UpdateFrame()の戻り値ではなく、このプロパティを都度読み直して使うこと。</summary>
@@ -97,53 +104,164 @@ namespace VerticalPlayer.Dashcam
         /// Collapsedにしてよい（直前の値は保持されるが表示はしない）。</summary>
         public bool ShouldShowOverlay { get; private set; }
 
-        /// <summary>ファイル（または前後を連結したルート）を開いた直後に1回だけ呼ぶ。
-        /// Overpassへの通信はこの中でのみ発生し、失敗・タイムアウトしても例外は投げず、
-        /// 以後のUpdateFrame()は常にShouldShowOverlay=falseを返す（サイレントに非表示）。</summary>
-        public async Task LoadRouteAsync(IReadOnlyList<DashcamSensorFrame> mergedFrames, CancellationToken ct = default)
+        /// <summary>現在、高速道路(motorway)本線上を走行中とみなしているか。UpdateHighwayName内で
+        /// 更新される。下道走行時に高速道路専用トンネルを通知対象から除外する判定や、
+        /// 「情報一覧」の内部データ確認タブで使う。GPSロスト中（トンネル通過中含む）は
+        /// 直前の値を保持する。</summary>
+        public bool IsOnExpressway { get; private set; }
+
+        /// <summary>「情報一覧」ウィンドウの通知情報タブに出す、内部で保持・計算しているデータの
+        /// スナップショットを返す。呼び出し自体は読み取り専用でUpdateFrame等の動作に影響しない。
+        /// ウィンドウが開いている間だけ、DashcamPlayerView側が定期的にこれを呼んで表示を更新する想定。</summary>
+        public MapInfoDebugSnapshot GetDebugSnapshot()
         {
-            _routeReady = false;
+            var nearTunnels = _projectedTunnels
+                .Select(t => new MapInfoDebugTunnelRow
+                {
+                    Name = string.IsNullOrEmpty(t.Raw.Name) ? "(無名)" : t.Raw.Name,
+                    RoadName = t.RoadName,
+                    IsMotorwayTunnel = t.Raw.IsMotorwayTunnel,
+                    LengthMeters = t.Raw.LengthMeters,
+                    EntryCumKm = t.EntryCumKm,
+                    DistanceAheadKm = t.EntryCumKm - _lastCumKm,
+                    IsPassing = ReferenceEquals(t, _passingTunnel),
+                })
+                .OrderBy(r => Math.Abs(r.DistanceAheadKm))
+                .Take(20)
+                .ToList();
+
+            var nearSaPas = _projectedSaPas
+                .Select(s => new MapInfoDebugSaPaRow
+                {
+                    Name = s.Raw.Name,
+                    Type = s.Raw.Type,
+                    RoadName = s.RoadName,
+                    CumKm = s.CumKm,
+                    DistanceAheadKm = s.CumKm - _lastCumKm,
+                })
+                .OrderBy(r => Math.Abs(r.DistanceAheadKm))
+                .Take(20)
+                .ToList();
+
+            return new MapInfoDebugSnapshot
+            {
+                RouteReady = _routeReady,
+                RoutePointCount = _route.Count,
+                TunnelCount = _bundle.Tunnels.Count,
+                SaPaCount = _bundle.SaPas.Count,
+                PlaceCount = _bundle.Places.Count,
+                HighwayWayCount = _bundle.Highways.Count,
+                HasLastFrame = _lastFrame != null,
+                CurrentLat = _lastFrame?.Latitude ?? 0,
+                CurrentLng = _lastFrame?.Longitude ?? 0,
+                HasGpsFix = _lastFrame?.HasGpsFix ?? false,
+                CurrentCumKm = _lastCumKm,
+                HeadingDeg = _lastHeadingDeg,
+                IsOnExpressway = IsOnExpressway,
+                IsPassingTunnel = _passingTunnel != null,
+                ShouldShowOverlay = ShouldShowOverlay,
+                HighwayName = State.HighwayName,
+                CurrentLocationName = State.CurrentLocationName,
+                HasNextSaPa = State.HasNextSaPa,
+                NextSaPaName = State.NextSaPaName,
+                NextSaPaType = State.NextSaPaType,
+                NextSaPaDistanceKm = State.NextSaPaDistanceKm,
+                HasUpcomingTunnel = State.HasUpcomingTunnel,
+                NextTunnelName = State.NextTunnelName,
+                NextTunnelLengthMeters = State.NextTunnelLengthMeters,
+                DistanceToTunnelMeters = State.DistanceToTunnelMeters,
+                NearbyTunnels = nearTunnels,
+                NearbySaPas = nearSaPas,
+            };
+        }
+
+        /// <summary>再生停止・全く別のドライブを開いた時など、明確に非連続なタイミングでのみ呼ぶ。
+        /// トンネル通過中フラグやHeadingロックなど「今まさに継続している状態」をクリアする。
+        /// 通常のシーケンシャル再生中は前後窓の連結範囲がファイル境界ごとに動くたびLoadRouteAsyncが
+        /// 呼ばれるが、それだけでは呼ばない（呼んでしまうと、トンネル内でちょうどファイルが
+        /// 切り替わった瞬間に「通過中」表示が消えてしまっていた）。</summary>
+        public void Reset()
+        {
             _passingTunnel = null;
             _prevFixFrame = null;
             _lastHeadingDeg = null;
             _lastFrame = null;
-            _route = BuildRoutePolyline(mergedFrames);
+            IsOnExpressway = false;
+            ShouldShowOverlay = false;
+        }
 
-            if (_route.Count < 2)
+        /// <summary>起動時のレジューム復元専用。前回終了時点の「利用中」道路名・地名を、
+        /// 実際のGPSフレームがまだ1枚も届いていない起動直後の段階で即座に表示へ反映する
+        /// （でなければ、Overpassの再取得とルート再構築が終わるまでの間、毎回いったん
+        /// 空の状態から始まってしまう）。ここで入れた値は、最初の有効なGPSフレームが
+        /// UpdateFrame()に届いた時点で、通常どおりライブ判定の結果に上書きされる
+        /// （＝間違った値を復元してしまっても、実際の位置情報が届けばすぐ正しく直る）。
+        /// トンネル通過中フラグ・次のSA/PA等の一時的な情報は復元しない（実データに基づく
+        /// ものではなく起動直後は再計算されるまで確定できないため、意図的に対象外にしている）。</summary>
+        public void ApplyResumedState(string highwayName, bool isOnExpressway, string locationName)
+        {
+            State.HighwayName = highwayName ?? string.Empty;
+            IsOnExpressway = isOnExpressway;
+            State.CurrentLocationName = locationName ?? string.Empty;
+            ShouldShowOverlay = !string.IsNullOrEmpty(State.HighwayName) || !string.IsNullOrEmpty(State.CurrentLocationName);
+        }
+
+        /// <summary>ファイル（または前後を連結したルート）を開いた直後に呼ぶ。通常のシーケンシャル
+        /// 再生では前後窓がスライドするたびに呼ばれるため、トンネル通過中フラグ等の継続的な状態は
+        /// ここではクリアしない（クリアしたい場合はReset()を先に呼ぶこと。例: StopPlayback）。
+        /// Overpassへの通信はこの中でのみ発生し、失敗・タイムアウトしても例外は投げない。
+        ///
+        /// 【重要】この処理の間、_routeReadyをfalseに戻すことはしない。以前はここでfalseにしていたため、
+        /// GPSが生きている区間でもファイル切替のたび（前後窓の再構築・Overpass再取得中）は必ず
+        /// UpdateFrame()がShouldShowOverlay=falseを返し、地図情報通知が毎回消えてしまっていた。
+        /// 今は「今持っているroute/bundle/投影データをそのまま使い続け、新しいデータが揃った時だけ
+        /// 差し替える」方式にしている。ルートが組めない窓（長いトンネルが複数ファイルにまたがって
+        /// 続く場合、この窓に有効なGPS点が1つも無いことがある）や、Overpass通信の失敗時も、
+        /// 直前まで持っていたデータをそのまま使い続ける（空にはしない）。</summary>
+        public async Task LoadRouteAsync(IReadOnlyList<DashcamSensorFrame> mergedFrames, CancellationToken ct = default)
+        {
+            var newRoute = BuildRoutePolyline(mergedFrames);
+
+            if (newRoute.Count < 2)
             {
-                _bundle = OverpassBundle.Empty;
-                _projectedTunnels = new();
-                _projectedSaPas = new();
-                _routeReady = true; // ルートが無いだけで「失敗」ではないので、以後は静かに非表示のまま動く
+                // この窓には有効なGPS点が無い（例: 長いトンネルの中だけで完結する窓）。
+                // 今のroute/bundleを維持したまま何もしない。初回読み込みで一度もrouteが
+                // 組めたことが無ければ_routeReadyはfalseのままで、UpdateFrameは非表示を返す。
                 return;
             }
 
-            double minLat = _route.Min(p => p.Lat) - BboxPaddingDeg;
-            double maxLat = _route.Max(p => p.Lat) + BboxPaddingDeg;
-            double minLng = _route.Min(p => p.Lng) - BboxPaddingDeg;
-            double maxLng = _route.Max(p => p.Lng) + BboxPaddingDeg;
+            double minLat = newRoute.Min(p => p.Lat) - BboxPaddingDeg;
+            double maxLat = newRoute.Max(p => p.Lat) + BboxPaddingDeg;
+            double minLng = newRoute.Min(p => p.Lng) - BboxPaddingDeg;
+            double maxLng = newRoute.Max(p => p.Lng) + BboxPaddingDeg;
             string cacheKey = string.Create(CultureInfo.InvariantCulture,
                 $"{minLat:F2},{minLng:F2},{maxLat:F2},{maxLng:F2}");
 
+            OverpassBundle? newBundle = null;
             if (RouteCache.TryGetValue(cacheKey, out var cached))
             {
-                _bundle = cached;
+                newBundle = cached;
             }
             else
             {
                 try
                 {
-                    _bundle = await FetchOverpassAsync(minLat, minLng, maxLat, maxLng, ct).ConfigureAwait(false);
-                    RouteCache[cacheKey] = _bundle;
+                    newBundle = await FetchOverpassAsync(minLat, minLng, maxLat, maxLng, ct).ConfigureAwait(false);
+                    RouteCache[cacheKey] = newBundle;
                 }
                 catch (Exception ex)
                 {
-                    // 【要件4】ネットワークエラー・タイムアウト時は例外を投げずサイレントに非表示のまま続行する
-                    System.Diagnostics.Debug.WriteLine($"[MapInfoProvider] Overpass取得失敗（オーバーレイ非表示のまま続行）: {ex.Message}");
-                    _bundle = OverpassBundle.Empty;
+                    // 【要件4】ネットワークエラー・タイムアウト時は例外を投げず、直前のbundleを
+                    // そのまま使い続ける（ここでEmptyに差し替えると、通信が一時的に不安定なだけで
+                    // 既に取得済みのトンネル/SA-PA情報まで失われてしまう）。
+                    System.Diagnostics.Debug.WriteLine($"[MapInfoProvider] Overpass取得失敗（直前のデータを維持して続行）: {ex.Message}");
                 }
             }
 
+            // ここまで来て初めて、route（と、取得できていればbundle）を実際に差し替える。
+            // 取得に失敗した場合はnewBundleがnullのままなので、_bundleは直前の値を保持する。
+            _route = newRoute;
+            if (newBundle != null) _bundle = newBundle;
             ProjectBundleOntoRoute();
             _routeReady = true;
         }
@@ -153,16 +271,50 @@ namespace VerticalPlayer.Dashcam
         /// 組み合わせによって毎回変わり得るため、この投影だけはLoadRouteAsyncのたびに必ず行う。</summary>
         private void ProjectBundleOntoRoute()
         {
-            _projectedTunnels = _bundle.Tunnels.Select(t =>
+            var validTunnels = new List<ProjectedTunnel>();
+            foreach (var t in _bundle.Tunnels)
             {
-                double cumA = ProjectToRoute(t.EntryLat, t.EntryLng).CumKm;
-                double cumB = ProjectToRoute(t.ExitLat, t.ExitLng).CumKm;
-                return new ProjectedTunnel(t, Math.Min(cumA, cumB));
-            }).ToList();
+                // ProjectToRouteの第2戻り値（d.DistKm）は「ルート折れ線からその点までの物理的な直線距離(km)」
+                var projA = ProjectToRoute(t.EntryLat, t.EntryLng);
+                var projB = ProjectToRoute(t.ExitLat, t.ExitLng);
 
-            _projectedSaPas = _bundle.SaPas.Select(s =>
-                new ProjectedSaPa(s, ProjectToRoute(s.Lat, s.Lng).CumKm)
-            ).ToList();
+                // ❗【絶対防壁】トンネルの入口または出口が、走行中のルートから「100m (0.1km)」以上
+                // 離れている場合は、並走する下道や、広域BBOXに巻き込まれただけの無関係なトンネル（須原トンネル等）
+                // と断定し、経路上の候補から【完全に除外】する。
+                if (projA.DistKm > 0.1 || projB.DistKm > 0.1)
+                {
+                    continue;
+                }
+
+                double entryCum = Math.Min(projA.CumKm, projB.CumKm);
+                double exitCum = Math.Max(projA.CumKm, projB.CumKm);
+
+                double midLat = (t.EntryLat + t.ExitLat) / 2.0;
+                double midLng = (t.EntryLng + t.ExitLng) / 2.0;
+                string roadName = FindNearestHighwayName(midLat, midLng);
+
+                validTunnels.Add(new ProjectedTunnel(t, entryCum, exitCum, roadName));
+            }
+            _projectedTunnels = validTunnels;
+
+            // ── SA/PA 側も同様に、ルートから 800m 以上離れている無関係な施設を排除 ──
+            // ❗【修正点】ひるが野高原SAや飛騨白川PAのように、地形の制約で本線から大きく奥まった場所に
+            // 配置されている主要な施設がフィルターで誤って消滅してしまうのを防ぐため、
+            // 距離判定の防壁を 300m から 「800m (0.8km)」 へと安全に拡張します。
+            var validSaPas = new List<ProjectedSaPa>();
+            foreach (var s in _bundle.SaPas)
+            {
+                var proj = ProjectToRoute(s.Lat, s.Lng);
+
+                if (proj.DistKm > 0.8) // 0.3 から 0.8 へ拡張
+                {
+                    continue; // ルートから完全に遠い、無関係な一般道の道の駅などを排除
+                }
+
+                string roadName = FindNearestHighwayName(s.Lat, s.Lng);
+                validSaPas.Add(new ProjectedSaPa(s, proj.CumKm, roadName));
+            }
+            _projectedSaPas = validSaPas;
         }
 
         /// <summary>毎フレーム呼ぶ。ネットワーク通信は行わない（地名のNominatimフォールバックのみ、
@@ -180,7 +332,7 @@ namespace VerticalPlayer.Dashcam
             // 前フレームからの連続性チェック（シーク直後の大ジャンプでは「接近中→通過中」の
             // 引き継ぎ判定を行わない。無関係な地点の接近フラグを誤って引き継がないため）。
             bool continuous = _lastFrame != null &&
-                (frame.VideoOffset - _lastFrame.VideoOffset).Duration() <= FrameContinuityThreshold;
+                (frame.Timestamp - _lastFrame.Timestamp).Duration() <= FrameContinuityThreshold;
 
             if (!frame.HasGpsFix)
             {
@@ -192,10 +344,12 @@ namespace VerticalPlayer.Dashcam
                     return;
                 }
                 if (continuous && _lastFrame != null && _lastFrame.HasGpsFix &&
-                    State.HasUpcomingTunnel && State.DistanceToTunnelMeters <= TunnelApproachThresholdMeters &&
                     TryFindTunnelNear(_lastFrame, out var enteredTunnel))
                 {
-                    // 【要件5】接近中の直後にGPSロスト→トンネル進入とみなし、通過中表示へ切り替える
+                    // 【要件5】GPSロスト直前位置のすぐ先にトンネルがある→進入とみなし、通過中表示へ切り替える。
+                    // 「接近中(1km以内)」表示が出ていたかどうかは問わない（山間部ではトンネル手前で
+                    // GPS感度が落ち、1km以内の測位が1点も取れないままロストすることが多いため、
+                    // 接近中バナーの有無とは切り離して判定する。閾値はTryFindTunnelNear内で別管理）。
                     _passingTunnel = enteredTunnel;
                     ApplyPassingTunnelState();
                     _lastFrame = frame;
@@ -213,13 +367,15 @@ namespace VerticalPlayer.Dashcam
             UpdateHeading(frame);
 
             double cumKm = ProjectToRoute(frame.Latitude, frame.Longitude).CumKm;
+            _lastCumKm = cumKm;
 
             UpdateLocationName(frame);
-            UpdateTunnelState(cumKm);
-            UpdateSaPaState(cumKm);
             UpdateHighwayName(frame);
+            UpdateTunnelState(cumKm); // トンネル接近時はここでHighwayNameを上書きする（並走道路の誤検出対策）
+            UpdateSaPaState(cumKm);
 
-            ShouldShowOverlay = State.HasNextSaPa || State.HasUpcomingTunnel || !string.IsNullOrEmpty(State.CurrentLocationName);
+            ShouldShowOverlay = State.HasNextSaPa || State.HasUpcomingTunnel
+                || !string.IsNullOrEmpty(State.CurrentLocationName) || !string.IsNullOrEmpty(State.HighwayName);
             _lastFrame = frame;
         }
 
@@ -230,6 +386,8 @@ namespace VerticalPlayer.Dashcam
             State.NextTunnelName = _passingTunnel.Raw.Name;
             State.NextTunnelLengthMeters = _passingTunnel.Raw.LengthMeters;
             State.DistanceToTunnelMeters = 0; // 0＝MapInfoOverlayControl側で「通過中」表記に切り替える合図
+            if (!string.IsNullOrEmpty(_passingTunnel.RoadName))
+                State.HighwayName = _passingTunnel.RoadName; // GPS喪失中でも「利用中」表示だけは維持する
             // SA/PA・地名はGPSが無いため更新できない。直前値をそのまま保持して表示を続ける。
             ShouldShowOverlay = true;
         }
@@ -237,11 +395,50 @@ namespace VerticalPlayer.Dashcam
         private bool TryFindTunnelNear(DashcamSensorFrame lastFixFrame, out ProjectedTunnel? tunnel)
         {
             double cumKm = ProjectToRoute(lastFixFrame.Latitude, lastFixFrame.Longitude).CumKm;
-            tunnel = _projectedTunnels
-                .Where(t => t.EntryCumKm >= cumKm - 0.05) // 直前フレーム位置より少し手前まで許容
+            // 「接近中」表示の閾値(1km)とは別枠。山間部トンネルは入口の数km手前からGPS感度が
+            // 落ち始め、1km以内の測位点が1つも取れないままロストすることが多いため、
+            // 進入検出だけはこちらの広い閾値で判定する。
+            // ❗【バグ修正】3km先まで探してしまうと連続トンネルで1本先を誤ロックするため、
+            // GPSロスト直前の足元「500m (0.5km) 以内」にある直近のトンネルだけに厳密に限定します。
+            tunnel = FilterTunnelCandidatesForCurrentRoad(_projectedTunnels)
+                .Where(t => t.EntryCumKm >= cumKm - 0.05 && t.EntryCumKm - cumKm <= 0.5) // 3.0 から 0.5 へ修正
                 .OrderBy(t => t.EntryCumKm)
                 .FirstOrDefault();
             return tunnel != null;
+        }
+
+        /// <summary>【要件5】下道(一般道)走行中は、高速道路専用のトンネル(TunnelCandidate.IsMotorwayTunnel)を
+        /// 通知対象から除外する。さらに、現在走行中の一般道路線名(State.HighwayName)が分かっている場合は、
+        /// その道路線上のトンネルだけに厳密に限定する（名前が取れず判定できない場合のみ、
+        /// IsMotorwayTunnel=falseという緩い条件まで許容する）。高速道路走行中はこのフィルタを適用しない
+        /// （motorway/trunk双方のトンネルを候補として扱う。ジャンクション付近の一時的な誤判定を過度に
+        /// 締め出さないため）。</summary>
+        private IEnumerable<ProjectedTunnel> FilterTunnelCandidatesForCurrentRoad(IEnumerable<ProjectedTunnel> source)
+        {
+            if (string.IsNullOrEmpty(State.HighwayName))
+                return Enumerable.Empty<ProjectedTunnel>();
+
+            if (IsOnExpressway)
+            {
+                // 【高速道路・都市高速を走行中】
+                return source.Where(t =>
+                    // A. トンネル側の道路名が空欄なら、経路上にあると信じて救済
+                    string.IsNullOrEmpty(t.RoadName) ||
+                    // B. 「名古屋高速」などのキーワードが相互に部分一致すればOK
+                    t.RoadName.Contains(State.HighwayName) ||
+                    State.HighwayName.Contains(t.RoadName) ||
+                    // C. 走行中の名前に「高速」が入っていれば、トンネル側が IsMotorwayTunnel であれば救済
+                    (State.HighwayName.Contains("高速") && t.Raw.IsMotorwayTunnel)
+                );
+            }
+            else
+            {
+                // 【一般道（下道）走行時】
+                // 高速道路専用トンネルを確実に除外し、下道名が部分一致するもの
+                return source.Where(t => !t.Raw.IsMotorwayTunnel &&
+                                        !string.IsNullOrEmpty(t.RoadName) &&
+                                        (t.RoadName.Contains(State.HighwayName) || State.HighwayName.Contains(t.RoadName)));
+            }
         }
 
         // ── 各要素の更新 ──
@@ -288,36 +485,78 @@ namespace VerticalPlayer.Dashcam
             });
         }
 
+        // ── UpdateTunnelState 全面差し替え ──
         private void UpdateTunnelState(double cumKm)
         {
-            var next = _projectedTunnels
-                .Where(t => t.EntryCumKm > cumKm)
+            // ❗【シンプルイズベスト刷新】
+            // 短いトンネルの連続区間やジッタによる誤判定を防ぐため、複雑な常時ロック機構や
+            // GPSのFix条件によるパージ判定をすべて撤廃。ジッタっぽい動きは完全に無視します。
+            // 毎フレーム、車の累積距離(cumKm)を基準にして、現在地が「手前1km以内(接近中)」または
+            // 「入口から出口の間(通過中)」に物理的に合致する直近のトンネルをクエリから1本だけ素直に選び直します。
+
+            var currentOrNextTunnel = FilterTunnelCandidatesForCurrentRoad(_projectedTunnels)
+                .Where(t =>
+                    // ケース1: まだ入口の手前にいる（接近中）
+                    (t.EntryCumKm > cumKm - 0.05) ||
+                    // ケース2: 物理的に入口と出口の間にいる（GPSがロストしていても、累積距離の軸上で内側にあれば通過中とみなす）
+                    (cumKm >= t.EntryCumKm - 0.05 && cumKm <= t.ExitCumKm + 0.05)
+                )
                 .OrderBy(t => t.EntryCumKm)
                 .FirstOrDefault();
 
-            if (next == null)
+            // 3. 対象となるトンネルが前方（または足元）に無いなら非表示にして終了
+            if (currentOrNextTunnel == null)
             {
+                _passingTunnel = null;
                 State.HasUpcomingTunnel = false;
                 return;
             }
 
-            double distM = (next.EntryCumKm - cumKm) * 1000.0;
+            // フィールドの _passingTunnel も最新の状態に同期
+            _passingTunnel = currentOrNextTunnel;
+
+            // 4. ロック中トンネルとの手前までの距離を計算
+            double distM = (_passingTunnel.EntryCumKm - cumKm) * 1000.0;
+
+            // 5. すでに車がトンネルの入り口を通過している（またはまさに足元にある）場合
+            if (distM <= 0 || (cumKm >= _passingTunnel.EntryCumKm && cumKm <= _passingTunnel.ExitCumKm))
+            {
+                State.HasUpcomingTunnel = true;
+                State.NextTunnelName = _passingTunnel.Raw.Name;
+                State.NextTunnelLengthMeters = _passingTunnel.Raw.LengthMeters;
+                State.DistanceToTunnelMeters = 0; // 0 = 通過中フラグ
+                return;
+            }
+
+            // 6. まだ入口の手前にいる場合（接近中判定）
             if (distM > TunnelApproachThresholdMeters)
             {
+                // 1km以上手前なら、バックグラウンドでロック（予約）は保持するが画面にはまだ出さない
                 State.HasUpcomingTunnel = false;
                 return;
             }
 
+            // 1km以内の接近中画面を表示
             State.HasUpcomingTunnel = true;
-            State.NextTunnelName = next.Raw.Name;
-            State.NextTunnelLengthMeters = next.Raw.LengthMeters;
-            State.DistanceToTunnelMeters = Math.Max(1, (int)Math.Round(distM)); // 0は「通過中」の合図と衝突するため最小1にする
+            State.NextTunnelName = _passingTunnel.Raw.Name;
+            State.NextTunnelLengthMeters = _passingTunnel.Raw.LengthMeters;
+            State.DistanceToTunnelMeters = Math.Max(1, (int)Math.Round(distM));
         }
 
         private void UpdateSaPaState(double cumKm)
         {
+            if (!IsOnExpressway || string.IsNullOrEmpty(State.HighwayName))
+            {
+                State.HasNextSaPa = false;
+                return;
+            }
+
+            // 部分一致、またはSA/PA側の所属道路名が空欄の場合も救済して対象にする
             var next = _projectedSaPas
-                .Where(s => s.CumKm > cumKm)
+                .Where(s => s.CumKm > cumKm &&
+                            (string.IsNullOrEmpty(s.RoadName) ||
+                             s.RoadName.Contains(State.HighwayName) ||
+                             State.HighwayName.Contains(s.RoadName)))
                 .OrderBy(s => s.CumKm)
                 .FirstOrDefault();
 
@@ -342,25 +581,72 @@ namespace VerticalPlayer.Dashcam
 
         private void UpdateHighwayName(DashcamSensorFrame frame)
         {
-            // 150m以内にある名称付き道路のうち、Headingに最も近い向きのものを採用する
-            // （ジャンクション付近で並走する道路が複数候補に挙がる場合の絞り込み用途）。
+            // 150m以内にある名称付き道路のうち、motorway(高速道路本線)をtrunk(国道等)より常に
+            // 優先する。同格(motorway同士/trunk同士)の場合のみHeadingに最も近い向きのものを選ぶ
+            // （並走区間・ジャンクション付近の絞り込み用途）。
             var candidates = _bundle.Highways
                 .Select(h => (Way: h, DistM: HaversineKm(frame.Latitude, frame.Longitude, h.NearLat, h.NearLng) * 1000.0))
                 .Where(x => x.DistM <= 150.0)
                 .ToList();
 
-            if (candidates.Count == 0) { State.HighwayName = string.Empty; return; }
-
-            if (candidates.Count == 1 || _lastHeadingDeg == null)
+            // ❗【修正点】150m以内に道路候補が1件もない場合の処理を安全にフォールバック
+            if (candidates.Count == 0)
             {
-                State.HighwayName = candidates.OrderBy(x => x.DistM).First().Way.Name;
+                // データの読み込み待ちなどで一時的に0件になった場合は、
+                // 道路名(HighwayName)の表示だけは直前値をキープしてチラつきを防ぎます。
+                // 判定自体をフリーズ（return）させず、後続のIsOnExpresswayの評価へ流します。
+                if (string.IsNullOrEmpty(State.HighwayName))
+                {
+                    IsOnExpressway = false;
+                }
                 return;
             }
 
-            State.HighwayName = candidates
+            // ── ここから高速道路の再チェック処理（必ず毎フレーム走るようになります） ──
+
+            // motorway だけでなく、名称に「高速」や「有料」が含まれる trunk も高速道路扱いにする
+            bool anyMotorway = candidates.Any(x => x.Way.IsMotorway || x.Way.Name.Contains("高速") || x.Way.Name.Contains("有料"));
+            IsOnExpressway = anyMotorway;
+
+            var filtered = anyMotorway
+                ? candidates.Where(x => x.Way.IsMotorway || x.Way.Name.Contains("高速") || x.Way.Name.Contains("有料")).ToList()
+                : candidates;
+
+            // ⭕【バグ修正】filteredが空(0件)になった場合の配列空っぽエラー(例外落ち)を完全に防ぐ
+            if (filtered.Count == 0)
+            {
+                var fallback = candidates.Where(x => !string.IsNullOrEmpty(x.Way.Name)).OrderBy(x => x.DistM).FirstOrDefault();
+                if (fallback.Way != null)
+                {
+                    State.HighwayName = fallback.Way.Name;
+                }
+                return;
+            }
+
+            if (filtered.Count == 1 || _lastHeadingDeg == null)
+            {
+                State.HighwayName = filtered.OrderBy(x => x.DistM).First().Way.Name;
+                return;
+            }
+
+            // ⭕ 正しい位置：elseによる強制遮断を完全に撤廃し、方位が確定した後の並走時の絞り込みを毎フレーム確実に実行させます
+            State.HighwayName = filtered
                 .OrderBy(x => AngleDiffDeg(x.Way.BearingDeg, _lastHeadingDeg.Value))
                 .ThenBy(x => x.DistM)
                 .First().Way.Name;
+        }
+
+        /// <summary>与えられた地点周辺で、motorwayを最優先に最も近い名称付き道路名を返す（見つからなければ空文字）。
+        /// トンネルの道路名をあらかじめ解決する用途（ProjectBundleOntoRoute）専用。1km以内を対象とする。</summary>
+        private string FindNearestHighwayName(double lat, double lng)
+        {
+            var best = _bundle.Highways
+                .Select(h => (Way: h, DistKm: HaversineKm(lat, lng, h.NearLat, h.NearLng)))
+                .Where(x => x.DistKm <= 1.0)
+                .OrderByDescending(x => x.Way.IsMotorway)
+                .ThenBy(x => x.DistKm)
+                .FirstOrDefault();
+            return best.Way?.Name ?? string.Empty;
         }
 
         private void UpdateHeading(DashcamSensorFrame frame)
@@ -506,51 +792,78 @@ namespace VerticalPlayer.Dashcam
                 var tags = el.TryGetProperty("tags", out var tg) ? tg : default;
                 string GetTag(string key) => tags.ValueKind == JsonValueKind.Object && tags.TryGetProperty(key, out var v) ? v.GetString() ?? "" : "";
 
-                bool isTunnelWay = type == "way" && GetTag("tunnel") == "yes" && !string.IsNullOrEmpty(GetTag("highway"));
-                if (isTunnelWay)
+                string highway = GetTag("highway");
+                string tunnel = GetTag("tunnel");
+
+                // 1. トンネルの判定 (Way型で tunnel=yes 属性を持つもの)
+                if (type == "way" && tunnel == "yes" && !string.IsNullOrEmpty(highway))
                 {
-                    if (!el.TryGetProperty("geometry", out var geom) || geom.GetArrayLength() < 2) continue;
-                    var pts = geom.EnumerateArray()
-                        .Select(g => (Lat: g.GetProperty("lat").GetDouble(), Lng: g.GetProperty("lon").GetDouble()))
-                        .ToList();
-                    int lengthM = 0;
-                    for (int i = 1; i < pts.Count; i++)
-                        lengthM += (int)Math.Round(HaversineKm(pts[i - 1].Lat, pts[i - 1].Lng, pts[i].Lat, pts[i].Lng) * 1000.0);
-                    string name = GetTag("name");
-                    if (string.IsNullOrEmpty(name)) name = GetTag("tunnel:name");
-                    tunnels.Add(new TunnelCandidate(name, lengthM, pts[0].Lat, pts[0].Lng, pts[^1].Lat, pts[^1].Lng));
-                    continue;
+                    if (el.TryGetProperty("geometry", out var geom) && geom.GetArrayLength() >= 2)
+                    {
+                        var pts = geom.EnumerateArray()
+                            .Select(g => (Lat: g.GetProperty("lat").GetDouble(), Lng: g.GetProperty("lon").GetDouble()))
+                            .ToList();
+
+                        int lengthM = 0;
+                        for (int i = 1; i < pts.Count; i++)
+                            lengthM += (int)Math.Round(HaversineKm(pts[i - 1].Lat, pts[i - 1].Lng, pts[i].Lat, pts[i].Lng) * 1000.0);
+
+                        // 日本のトンネルは tunnel:name に入っていることが多いのでまずこちらを見る
+                        string name = GetTag("tunnel:name");
+                        if (string.IsNullOrEmpty(name)) name = GetTag("name");
+
+                        // ❗【修正点】名前に「トンネル」が含まれているものだけを本物のトンネルとして採用する
+                        // 「〇〇線」や「〇〇高速」などが誤ってトンネル名として登録されているノイズを完全に除外します。
+                        if (!string.IsNullOrEmpty(name) && name.Contains("トンネル"))
+                        {
+                            bool isMotorwayTunnel = highway == "motorway";
+                            tunnels.Add(new TunnelCandidate(name, lengthM, pts[0].Lat, pts[0].Lng, pts[^1].Lat, pts[^1].Lng, isMotorwayTunnel));
+                        }
+                    }
                 }
 
-                string highway = GetTag("highway");
+                // 2. SA/PAの判定 (敷地がWayやRelationで登録されていても、out centerにより一律 center から座標が取れる)
                 if (highway is "services" or "rest_area")
                 {
                     double? lat = TryGetLat(el), lng = TryGetLng(el);
-                    if (lat == null || lng == null) continue;
-                    string name = GetTag("name");
-                    if (string.IsNullOrEmpty(name)) continue;
-                    string spType = highway == "services" ? "SA" : "PA";
-                    if (name.Contains("SA", StringComparison.OrdinalIgnoreCase)) spType = "SA";
-                    else if (name.Contains("PA", StringComparison.OrdinalIgnoreCase)) spType = "PA";
-                    saPas.Add(new SaPaCandidate(name, spType, lat.Value, lng.Value));
+                    if (lat != null && lng != null)
+                    {
+                        string name = GetTag("name");
+                        if (!string.IsNullOrEmpty(name))
+                        {
+                            string spType = highway == "services" ? "SA" : "PA";
+                            if (name.Contains("SA", StringComparison.OrdinalIgnoreCase)) spType = "SA";
+                            else if (name.Contains("PA", StringComparison.OrdinalIgnoreCase)) spType = "PA";
+                            saPas.Add(new SaPaCandidate(name, spType, lat.Value, lng.Value));
+                        }
+                    }
                 }
+                // 3. 地名の判定
                 else if (!string.IsNullOrEmpty(GetTag("place")))
                 {
                     double? lat = TryGetLat(el), lng = TryGetLng(el);
-                    if (lat == null || lng == null) continue;
-                    string name = GetTag("name");
-                    if (string.IsNullOrEmpty(name)) continue;
-                    places.Add(new PlaceCandidate(name, lat.Value, lng.Value));
+                    if (lat != null && lng != null)
+                    {
+                        string name = GetTag("name");
+                        if (!string.IsNullOrEmpty(name))
+                        {
+                            places.Add(new PlaceCandidate(name, lat.Value, lng.Value));
+                        }
+                    }
                 }
-                else if (highway is "motorway" or "trunk" && !string.IsNullOrEmpty(GetTag("name")))
+
+                // 4. 道路名の判定 (トンネルとして処理されたWayも、道路名判定のために別途ここで重複して処理させる)
+                if (highway is "motorway" or "trunk" && !string.IsNullOrEmpty(GetTag("name")))
                 {
-                    if (!el.TryGetProperty("geometry", out var geom) || geom.GetArrayLength() < 2) continue;
-                    var pts = geom.EnumerateArray()
-                        .Select(g => (Lat: g.GetProperty("lat").GetDouble(), Lng: g.GetProperty("lon").GetDouble()))
-                        .ToList();
-                    int mid = pts.Count / 2;
-                    double bearing = BearingDeg(pts[0].Lat, pts[0].Lng, pts[^1].Lat, pts[^1].Lng);
-                    highways.Add(new HighwayCandidate(GetTag("name"), pts[mid].Lat, pts[mid].Lng, bearing));
+                    if (el.TryGetProperty("geometry", out var geom) && geom.GetArrayLength() >= 2)
+                    {
+                        var pts = geom.EnumerateArray()
+                            .Select(g => (Lat: g.GetProperty("lat").GetDouble(), Lng: g.GetProperty("lon").GetDouble()))
+                            .ToList();
+                        int mid = pts.Count / 2;
+                        double bearing = BearingDeg(pts[0].Lat, pts[0].Lng, pts[^1].Lat, pts[^1].Lng);
+                        highways.Add(new HighwayCandidate(GetTag("name"), pts[mid].Lat, pts[mid].Lng, bearing, highway == "motorway"));
+                    }
                 }
             }
 
@@ -559,15 +872,17 @@ namespace VerticalPlayer.Dashcam
 
         private static double? TryGetLat(JsonElement el)
         {
-            if (el.TryGetProperty("lat", out var lat)) return lat.GetDouble();
+            // 1. centerプロパティがあれば、そこから取る（WayやRelationのSA/PA用）
             if (el.TryGetProperty("center", out var c) && c.TryGetProperty("lat", out var cl)) return cl.GetDouble();
+            // 2. 直下に lat があれば、そこから取る（Node用）
+            if (el.TryGetProperty("lat", out var lat)) return lat.GetDouble();
             return null;
         }
 
         private static double? TryGetLng(JsonElement el)
         {
-            if (el.TryGetProperty("lon", out var lng)) return lng.GetDouble();
             if (el.TryGetProperty("center", out var c) && c.TryGetProperty("lon", out var cl)) return cl.GetDouble();
+            if (el.TryGetProperty("lon", out var lng)) return lng.GetDouble();
             return null;
         }
 
@@ -596,15 +911,15 @@ namespace VerticalPlayer.Dashcam
         // 「現在のルート折れ線に投影した累積距離」(Projected)を分けて持つ。
         // Candidate側はRouteCacheで使い回せるが、Projected側はルートが変わるたび作り直す。
 
-        private sealed record TunnelCandidate(string Name, int LengthMeters, double EntryLat, double EntryLng, double ExitLat, double ExitLng);
-        private sealed record ProjectedTunnel(TunnelCandidate Raw, double EntryCumKm);
+        private sealed record TunnelCandidate(string Name, int LengthMeters, double EntryLat, double EntryLng, double ExitLat, double ExitLng, bool IsMotorwayTunnel);
+        private sealed record ProjectedTunnel(TunnelCandidate Raw, double EntryCumKm, double ExitCumKm, string RoadName);
 
         private sealed record SaPaCandidate(string Name, string Type, double Lat, double Lng);
-        private sealed record ProjectedSaPa(SaPaCandidate Raw, double CumKm);
-
+        // ── RoadName を追加 ──
+        private sealed record ProjectedSaPa(SaPaCandidate Raw, double CumKm, string RoadName);
         private sealed record PlaceCandidate(string Name, double Lat, double Lng);
 
-        private sealed record HighwayCandidate(string Name, double NearLat, double NearLng, double BearingDeg);
+        private sealed record HighwayCandidate(string Name, double NearLat, double NearLng, double BearingDeg, bool IsMotorway);
 
         private sealed class OverpassBundle
         {
