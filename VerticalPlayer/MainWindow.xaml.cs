@@ -1358,6 +1358,15 @@ namespace VerticalPlayer
 
         private void ResizeToVideo()
         {
+            // 【今回追加】ドラレコモード中、通常モードPlayerは非表示のバックグラウンド状態で
+            // ファイルを保持していることがある（AudioBackend/HardwareAcceleration等の設定変更で
+            // 現在ファイルを再オープンするPlayer_MediaOpened→ApplyLayout()→ResizeToVideo()の
+            // 経路がその例）。ここにガードが無かったため、非表示のPlayerが持つ動画のアスペクト比
+            // （例: 640x480）でウィンドウ全体がリサイズされてしまい、実際に表示中のDashcamView
+            // （Front/Rear、通常16:9）側と縦横比が食い違って黒帯が出る不具合になっていた
+            // （trace.log: containerのアスペクト比がratioと食い違ったまま固定されるのを確認）。
+            // DashcamView_RequestWindowFit()側は同種のガードを既に持っている。
+            if (_isDashcamMode) return;
             if (Player.NaturalVideoWidth == 0 || Player.NaturalVideoHeight == 0) return;
             if (!(FitWindowToVideoCheck.IsChecked ?? true)) return; // OFF時はウィンドウサイズを自動変更しない
 
@@ -1395,8 +1404,19 @@ namespace VerticalPlayer
         {
             double sw = SystemParameters.PrimaryScreenWidth;
             double sh = SystemParameters.PrimaryScreenHeight;
-            if (this.Width > sw) this.Width = sw;
-            if (this.Height > sh) this.Height = sh;
+
+            // 【今回修正】以前はWidth/Heightを独立にクランプしており、ResizeToVideo()/
+            // DashcamView_RequestWindowFit()が縦横比を保って計算した直後にここで比率を
+            // 崩し、動画エリアに黒帯が出る不具合の再発ポイントになっていた
+            // （DashcamView_RequestWindowFit側で一度直したのと同じ種類のバグが
+            //  ここに残っていた）。縦横比を保ったまま、はみ出す倍率で一括縮小する。
+            double scale = Math.Min(this.Width > 0 ? sw / this.Width : 1.0, this.Height > 0 ? sh / this.Height : 1.0);
+            if (scale < 1.0)
+            {
+                this.Width *= scale;
+                this.Height *= scale;
+            }
+
             if (this.Left < 0) this.Left = 0;
             if (this.Top < 0) this.Top = 0;
             if (this.Left + this.Width > sw) this.Left = sw - this.Width;

@@ -104,8 +104,10 @@ namespace VerticalPlayer
             _samplesPlayedOffset = 0;
             IsActive = true;
 
-            // 【以前修正済】ボイスは生成直後に一度Start()したら、以後は基本的に動かしっぱなしにする。
-            // 「音を止める」はSubmitSamples側の送出自体を止めるだけにする方式（Pause()参照）。
+            // 【以前修正済】ボイスは生成直後に一度Start()する。以前は「以後は動かしっぱなしにし、
+            // 音を止めるのはSubmitSamples側の送出停止だけで行う」方式だったが、それだと一時停止時に
+            // 既にキュー済みのバッファがそのまま鳴り続けてしまうため、現在はPause()で実際に
+            // Stop()する方式に変更している（Pause()のコメント参照）。
             _sourceVoice.Start();
         }
 
@@ -288,8 +290,27 @@ namespace VerticalPlayer
 
         public void Pause()
         {
-            // ボイス自体は止めない（Stop/Startの連打が原因の再生停止不具合を避けるため）。
-            // 「音を止める」は呼び出し元(AudioDecodeLoop)がSubmitSamples自体を呼ばないことで実現する。
+            // 【今回修正】以前はボイス自体を止めず、SubmitSamples側の送出を止めるだけで
+            // 「音を止める」方式にしていた（ドラッグシーク中の連打Stop/Startでボイスが
+            // 詰まる不具合の回避策）。しかしAVEngine側は既にaudioRunningフラグにより
+            // 実際の状態遷移1回につき1回しかPause()/Start()を呼ばないようdebounce済みで、
+            // 連打を引き起こしていた実体はドラッグシーク時のSeek()都度のFlush()（ソース
+            // ボイス再作成）であり、Pause()/Start()自体の連打ではなかった。そのFlush()側は
+            // 既に別途対策済み（RecreateSourceVoiceLockedで都度クリーンに作り直す設計）のため、
+            // ここでボイスを実際に止めても連打問題とは無関係で安全と判断した。
+            // 素通しのまま（送出停止だけ）だと、一時停止した瞬間に既にキュー済みの再生中
+            // バッファ（最大約58個分、数百ms～1秒強）がそのまま鳴り続けてしまい、「一時停止を
+            // 押しても音声だけしばらく再生される」不具合になっていた。Stop()はキュー済みの
+            // バッファを破棄しないため、再開(Start())時は続きからシームレスに再生される。
+            lock (_lock)
+            {
+                try { _sourceVoice?.Stop(); }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[XAudio2AudioOutput] Pause失敗（{ex.Message}）。エンジン再構築をトリガーします。");
+                    TriggerFullRecreateAsync("Pause失敗: " + ex.Message);
+                }
+            }
         }
 
         public void Flush()

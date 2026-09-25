@@ -67,7 +67,7 @@ namespace VerticalPlayer
         private SampleFormat _sampleFormat = SampleFormat.Float32;
 
         private long _totalFramesWritten; // Open/Flush以降、ReleaseBufferで実際に書き込んだ総フレーム数
-        //private bool _started; // 不使用
+        private bool _started;
         private bool _recreatedSinceLastCheck;
         private double _speedRatio = 1.0;
         private double _volume = 1.0;
@@ -178,7 +178,7 @@ namespace VerticalPlayer
             // グリッチを避ける。「音を止める」は呼び出し側がSubmitSamplesを呼ばないことで実現する。
             hr = _audioClient.Start();
             ComUtil.ThrowIfFailed(hr, "IAudioClient.Start");
-            // _started = true; 値は代入しているすが、どこからも参照されていないので、コメントアウト
+            _started = true;
         }
 
         private WaveFormatChoice BuildSharedFormat(int sampleRate, int channels)
@@ -595,7 +595,7 @@ namespace VerticalPlayer
                     if (_audioClient != null) { try { Marshal.ReleaseComObject(_audioClient); } catch { } _audioClient = null; }
                     if (_device != null) { try { Marshal.ReleaseComObject(_device); } catch { } _device = null; }
                     if (_enumerator != null) { try { Marshal.ReleaseComObject(_enumerator); } catch { } _enumerator = null; }
-                    // _started = false; 値は代入しているすが、どこからも参照されていないので、コメントアウト
+                    _started = false;
                     IsActive = false;
 
                     if (_sampleRate <= 0)
@@ -665,8 +665,25 @@ namespace VerticalPlayer
 
         public void Pause()
         {
-            // ボイス（ストリーム）自体は止めない。「音を止める」は呼び出し元がSubmitSamplesを
-            // 呼ばないことで実現する（XAudio2版と同じ設計。Stop/Start連打によるグリッチ回避）。
+            // 【今回修正】以前はストリーム自体を止めず、SubmitSamples側の送出を止めるだけで
+            // 「音を止める」方式にしていた（XAudio2AudioOutput.Pause()と同じ理由の回避策）。
+            // AVEngine側は既にaudioRunningフラグでPause()/Start()を状態遷移1回につき1回しか
+            // 呼ばないようdebounce済みで、連打を引き起こしていた実体はドラッグシーク時の
+            // Seek()都度のFlush()（クライアント再作成）でありPause()/Start()自体の連打では
+            // なかったため、ここでストリームを実際に止めても安全と判断した。
+            // 素通しのまま（送出停止だけ）だと、一時停止した瞬間に既にレンダリングバッファへ
+            // 書き込み済みの音声がそのまま鳴り続けてしまい、「一時停止を押しても音声だけ
+            // しばらく再生される」不具合になっていた。IAudioClient.Stop()はバッファ内容を
+            // 破棄しない（Reset()と違う）ため、再開(Start())時は続きからシームレスに再生される。
+            lock (_lock)
+            {
+                try { _audioClient?.Stop(); }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[WasapiAudioOutput] Pause失敗（{ex.Message}）。エンジン再構築をトリガーします。");
+                    TriggerFullRecreateAsync("Pause失敗: " + ex.Message);
+                }
+            }
         }
 
         public void Flush()
@@ -748,7 +765,7 @@ namespace VerticalPlayer
             if (_device != null) { Marshal.ReleaseComObject(_device); _device = null; }
             if (_enumerator != null) { Marshal.ReleaseComObject(_enumerator); _enumerator = null; }
 
-            //_started = false;
+            _started = false;
             IsActive = false;
         }
 
