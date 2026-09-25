@@ -67,6 +67,10 @@ namespace VerticalPlayer.Media
         /// メインループの再アンカー時にaudioOutput.GetPositionSeconds()へ加算する。</summary>
         private double _audioContentOffsetSeconds;
 
+        // 【今回追加】シーク直後にAudioDecodeLoop側で実pts再取得が走っても、この値より
+        // 手前へは巻き戻さないためのクランプ下限。ファイルオープン時は無効化(-∞)する。
+        private double _lastSeekTargetSeconds = double.NegativeInfinity;
+
         /// <summary>音声ストリームを実際に開けているか（Open時にfalseへ戻し、音声デコードスレッド起動時にtrue）。</summary>
         private volatile bool _hasAudioStream;
 
@@ -823,6 +827,7 @@ namespace VerticalPlayer.Media
                                     var adChannel = audioPktChannel;
                                     double adTimeBase = ffmpeg.av_q2d(fmt->streams[audioIdx]->time_base);
                                     _audioContentOffsetSeconds = 0;
+                                    _lastSeekTargetSeconds = double.NegativeInfinity; // 【今回追加】初回オープン時はクランプ無効
                                     _audioSeekInterruptFlag = 0;
                                     _audioSeekAcked = 0;
                                     audioDecodeThread = new Thread(() => AudioDecodeLoop(adActx, adSwr, adFrame, adOutput, adChannel, myGen, adTimeBase))
@@ -994,6 +999,16 @@ namespace VerticalPlayer.Media
                                     // ── 改善: シーク時にオーディオのバッファをフラッシュし、音声オフセットをターゲット秒数で強制固定 ──
                                     audioOutput?.Flush();
                                     _audioContentOffsetSeconds = target; // ターゲット秒数でオフセットを強制固定
+                                    _lastSeekTargetSeconds = target; // 【今回追加】以降の実pts再取得の下限
+                                    // 【今回追加】直前のaudioOutput.Flush()自体がソースボイス/クライアントの
+                                    // 再作成フラグ(_recreatedSinceLastCheck)を立てる。ここで消費せず残すと、
+                                    // AudioDecodeLoop側が「予期しない復旧」と誤認し、次に処理する音声フレームの
+                                    // 実ptsで上のtarget固定を上書きしてしまう。実ptsはシーク先キーフレームより
+                                    // 手前のことがあり、audio駆動のマスタークロックがその差分だけ実時間で
+                                    // 「追いつくまで」映像を待たせる不具合になっていた
+                                    // （trace.log: contentOffsetがtargetより最大1.18秒手前にずれ、
+                                    //  そのままの秒数だけshowsが激減していた）。
+                                    audioOutput?.ConsumeRecreated();
 
                                     ResumeAudioDecodeAfterSeek();
                                     audioRunning = false;
@@ -1007,6 +1022,8 @@ namespace VerticalPlayer.Media
                                     //自前改善ポイント
                                     // ── 追加: シーク先のターゲット秒数を音声オフセットとして強制設定 ──
                                     _audioContentOffsetSeconds = target;
+                                    _lastSeekTargetSeconds = target; // 【今回追加】念のためここでも下限を更新
+                                    audioOutput?.ConsumeRecreated(); // 【今回追加】念のためここでも消費
 
                                     Trace($"Seek -> {target:F2}s (prefetch)");
                                 }
@@ -1021,6 +1038,8 @@ namespace VerticalPlayer.Media
                                 PauseAudioDecodeForSeek();
                                 if (actx != null) ffmpeg.avcodec_flush_buffers(actx);
                                 audioOutput?.Flush();
+                                _lastSeekTargetSeconds = target; // 【今回追加】非prefetchフォールバック側も同様に対処
+                                audioOutput?.ConsumeRecreated(); // 【今回追加】Flush()自体が立てた再作成フラグをここで消費
                                 ResumeAudioDecodeAfterSeek();
                                 audioRunning = false;
                                 lastAnchoredAudioPos = double.NaN;
@@ -1732,19 +1751,32 @@ namespace VerticalPlayer.Media
                         {
                             if (needOffsetCapture)
                             {
-                                // このフレームがXAudio2へ送る最初のサンプルになる時点で、
-                                // GetPositionSeconds()はまだ0（このフレーム分もこれから送出する
-                                // ため）。よってこのフレームの実pts＝コンテンツ上の開始オフセット
-                                // として、以降ずっとこの分を加算する。
-                                // 初回オープン時（_audioContentOffsetSecondsがまだ0の場合）、または
-                                // ボイス再作成直後（forceOffsetRecapture）は音声の実ptsから取得し、
-                                // 通常のシーク後の場合はメインスレッド側（Seekで設定したターゲット秒数）を維持する
-                                if (_audioContentOffsetSeconds == 0.0 || forceOffsetRecapture)
+                                long rawPts = audioFrame->pts != ffmpeg.AV_NOPTS_VALUE ? audioFrame->pts : audioFrame->best_effort_timestamp;
+                                double framePts = rawPts != ffmpeg.AV_NOPTS_VALUE ? rawPts * audioTimeBase : double.NaN;
+
+                                // 【今回追加・根本対応】シーク直後、_lastSeekTargetSeconds（シーク目標秒数）
+                                // より手前のフレームは実際に読み捨てる（映像側のcatch-upと同じ方式）。
+                                // 以前は「ラベル(_audioContentOffsetSeconds)だけtargetに固定し、中身は
+                                // targetより手前の実際の音声をそのまま送出する」実装だったため、シーク直後
+                                // 最大1秒強、本来より手前の内容の音声がそのまま鳴ってしまっていた
+                                // （ラベルと中身が食い違うこと自体がズレの正体だった）。ここで中身自体を
+                                // target以降に揃えることで、ラベルと中身を一致させてズレそのものを解消する。
+                                // ファイルオープン直後は_lastSeekTargetSecondsが-∞なので、この分岐には
+                                // 入らず最初のフレームがそのまま採用される（従来通り）。
+                                if (!double.IsNaN(framePts) && framePts < _lastSeekTargetSeconds)
                                 {
-                                    long rawPts = audioFrame->pts != ffmpeg.AV_NOPTS_VALUE ? audioFrame->pts : audioFrame->best_effort_timestamp;
-                                    _audioContentOffsetSeconds = rawPts != ffmpeg.AV_NOPTS_VALUE ? rawPts * audioTimeBase : 0.0;
-                                    forceOffsetRecapture = false;
+                                    ffmpeg.av_frame_unref(audioFrame);
+                                    continue; // 提出せず次のフレームへ。needOffsetCaptureはtrueのまま維持
                                 }
+
+                                // このフレームがXAudio2/WASAPIへ送る最初のサンプルになる時点で、
+                                // GetPositionSeconds()はまだ0（このフレーム分もこれから送出するため）。
+                                // よってこのフレームの実pts＝コンテンツ上の開始オフセットとして、
+                                // 以降ずっとこの分を加算する（target以上のフレームまで読み捨て済みなので、
+                                // このptsは必ずtarget以上＝以前のMath.Maxクランプは以降不要だが、
+                                // 万一framePtsがNaNだった場合の保険として値を維持する形は残す）。
+                                _audioContentOffsetSeconds = double.IsNaN(framePts) ? _audioContentOffsetSeconds : framePts;
+                                forceOffsetRecapture = false;
                                 needOffsetCapture = false;
                             }
                             // withAudio:false（コマ送り/シークバードラッグ中のプレビュー）中は

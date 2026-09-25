@@ -400,6 +400,44 @@ namespace VerticalPlayer.Dashcam
             }
         }
 
+        /// <summary>
+        /// 画面内の非動画UI（上部ツールバー・下部コントロールバー・加速度チャート）の実際の合計高さを動的に取得します。
+        /// </summary>
+        public double NonVideoHeight
+        {
+            get
+            {
+                double h = 0;
+                if (ToolbarBar != null && ToolbarBar.Visibility == Visibility.Visible)
+                    h += ToolbarBar.ActualHeight > 0 ? ToolbarBar.ActualHeight : 38;
+                if (ControlBar != null && ControlBar.Visibility == Visibility.Visible)
+                    h += ControlBar.ActualHeight > 0 ? ControlBar.ActualHeight : 56;
+                if (ChartStrip != null && ChartStrip.Visibility == Visibility.Visible)
+                    h += ChartStrip.ActualHeight > 0 ? ChartStrip.ActualHeight : 130;
+
+                return h > 0 ? h : (38 + 56 + 130);
+            }
+        }
+
+        /// <summary>
+        /// 画面内の非動画UI（左サイドバー・右サイドバー）の実際の合計幅を動的に取得します。
+        /// </summary>
+        public double NonVideoWidth
+        {
+            get
+            {
+                double left = LeftSidebarColumn != null && LeftSidebarColumn.ActualWidth > 0
+                    ? LeftSidebarColumn.ActualWidth
+                    : 16;
+
+                double right = RightSidebarActualWidth > 0
+                    ? RightSidebarActualWidth
+                    : (_mapHorizontal ? 420 : 260);
+
+                return left + right;
+            }
+        }
+
         private DashcamEventFolder CurrentEventFolder =>
             EventFolderCombo.SelectedItem is ComboBoxItem ci && Enum.TryParse<DashcamEventFolder>((string)ci.Tag, out var v)
                 ? v : DashcamEventFolder.Normal;
@@ -409,6 +447,14 @@ namespace VerticalPlayer.Dashcam
         public string? CurrentGroupKey => _currentFrontGroup?.TimestampKey;
         public double CurrentPositionSeconds => PlayerFront.NaturalDuration.HasTimeSpan ? PlayerFront.Position.TotalSeconds : 0;
         public string CurrentEventFolderName => CurrentEventFolder.ToString();
+
+        /// <summary>右サイドバー(地図・センサー情報パネル)列の実際の幅(px)。地図の向き(縦長/横長ルート)に
+        /// 応じて260/420で動的に変わる（全画面中は0になるが、RequestWindowFit側は全画面中
+        /// 呼ばれないため考慮不要）。MainWindow.DashcamView_RequestWindowFitが、ウィンドウを
+        /// 動画にフィットさせる計算で使う実クロム幅。ActualWidthではなく設定値そのもの
+        /// (GridLength.Value)を返す。ActualWidthはレイアウト確定後でないと更新されず、
+        /// 向き切替直後にRequestWindowFitが呼ばれた場合に古い値を拾うおそれがあるため。</summary>
+        public double RightSidebarActualWidth => RightSidebarColumnDef.Width.Value;
 
         // ── 地図情報通知のレジューム保存・復元用（MainWindow.SaveSettings/RestoreSettingsから使う） ──
         public string MapInfoHighwayName => _mapInfoProvider.State.HighwayName;
@@ -433,7 +479,7 @@ namespace VerticalPlayer.Dashcam
             SidebarContent.Opacity = 0;
 
             // ドラレコは1ファイルあたり約2分間隔で次々切り替わり、かつSDカード等の低速
-            // ストレージ運用が前提のため、既存の「パケット先読み（低速ストレージ対策）」
+            // ストレージ運用が前提のため、既存の「パケット先読み（音声demuxで必須）」
             // パイプラインをこの画面のFront/Rear両方で既定ONにする。
             PlayerFront.PacketPrefetch = true;
             PlayerRear.PacketPrefetch = true;
@@ -1476,8 +1522,7 @@ namespace VerticalPlayer.Dashcam
 
             if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
             {
-                //RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
-                RequestFitToVideoSize();
+                RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
                 UpdateZoomAvailability();
             }
 
@@ -2057,10 +2102,8 @@ namespace VerticalPlayer.Dashcam
         {
             if (PlayerFront == null) return;
 
-            //if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
-            //    RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
-            RequestFitToVideoSize();
-
+            if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
+                RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
         }
 
         /// <summary>
@@ -2846,72 +2889,6 @@ namespace VerticalPlayer.Dashcam
             // フロント/リアリストが表示される（ファイルの自動選択・再生は行わない）。
             DriveCombo.SelectedItem = target;
         }
-        /// <summary>
-        /// 動画のアスペクト比(16:9等)と画面内の非動画UI(ツールバー・コントロールバー・チャート・サイドバー・カスタムタイトルバー)の
-        /// サイズから、映像エリア(VideoArea)に黒帯が一切出ない最適なウィンドウサイズを算出してホスト(MainWindow)へ要求します。
-        /// ディスプレイの作業領域を超えて高さ・幅が制限される場合も、アスペクト比を維持して正しく縮小します。
-        /// </summary>
-        private void RequestFitToVideoSize()
-        {
-            if (PlayerFront.NaturalVideoWidth <= 0 || PlayerFront.NaturalVideoHeight <= 0) return;
 
-            // レイアウト未確定時はLoaded優先度で遅延実行
-            if (ActualWidth <= 0 || VideoArea.ActualHeight <= 0)
-            {
-                Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(RequestFitToVideoSize));
-                return;
-            }
-
-            var window = Window.GetWindow(this);
-            if (window == null) return;
-
-            // 1. 動画本来のアスペクト比
-            double videoAspect = (double)PlayerFront.NaturalVideoWidth / PlayerFront.NaturalVideoHeight;
-
-            // 2. 目的とする動画表示エリアの基本サイズ（ズーム倍率考慮）
-            double zoom = ZoomScale;
-            double targetVideoW = PlayerFront.NaturalVideoWidth * zoom;
-            double targetVideoH = PlayerFront.NaturalVideoHeight * zoom;
-
-            // 3. ドラレコ画面内の非動画UI幅（左サイドバー + 右サイドバー）
-            double rightSidebarWidth = RightSidebarColumnDef.ActualWidth > 0
-                ? RightSidebarColumnDef.ActualWidth
-                : (_mapHorizontal ? 420 : 260);
-            double nonVideoWidth = LeftSidebarColumn.ActualWidth + rightSidebarWidth;
-
-            // 4. ドラレコ画面内の非動画UI高さ（上部ツールバー + 下部コントロールバー + チャート）
-            double nonVideoHeight = (ToolbarBar.Visibility == Visibility.Visible ? ToolbarBar.ActualHeight : 0)
-                                  + (ControlBar.Visibility == Visibility.Visible ? ControlBar.ActualHeight : 0)
-                                  + (ChartStrip.Visibility == Visibility.Visible ? ChartStrip.ActualHeight : 0);
-            if (nonVideoHeight <= 0) nonVideoHeight = 38 + 56 + 130;
-
-            // 5. カスタムタイトルバー等のウィンドウ高さ差分
-            double titleBarHeight = Math.Max(0, window.ActualHeight - ActualHeight);
-            if (titleBarHeight <= 0) titleBarHeight = 32;
-
-            // 6. ディスプレイ作業領域による最大サイズ制約（画面外へのはみ出し防止）
-            double maxWindowW = SystemParameters.WorkArea.Width;
-            double maxWindowH = SystemParameters.WorkArea.Height;
-
-            double maxVideoW = Math.Max(100, maxWindowW - nonVideoWidth);
-            double maxVideoH = Math.Max(100, maxWindowH - nonVideoHeight - titleBarHeight);
-
-            // 7. 最大サイズを超える場合は、アスペクト比(videoAspect)を保ったまま全体を縮小
-            if (targetVideoW > maxVideoW || targetVideoH > maxVideoH)
-            {
-                double scaleFactor = Math.Min(maxVideoW / targetVideoW, maxVideoH / targetVideoH);
-                targetVideoW *= scaleFactor;
-                targetVideoH *= scaleFactor;
-            }
-
-            // 映像エリアのアスペクト比を厳密に動画の縦横比に合わせる
-            targetVideoW = targetVideoH * videoAspect;
-
-            // 8. 最終的なウィンドウ全体の要求幅・高さ
-            double totalWidth = Math.Round(targetVideoW + nonVideoWidth);
-            double totalHeight = Math.Round(targetVideoH + nonVideoHeight + titleBarHeight);
-
-            RequestWindowFit?.Invoke(totalWidth, totalHeight);
-        }
     }
 }

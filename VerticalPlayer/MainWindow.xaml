@@ -973,6 +973,93 @@
 
                     <!-- タブコンテンツ -->
                     <TabControl Grid.Row="1" Style="{StaticResource PanelTab}">
+                        <TabItem Header="システム" Style="{StaticResource PanelTabItem}">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <StackPanel>
+                                    <CheckBox x:Name="DnnWaitForBuildCheck" Content="DNN切替再生待ち"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"/>
+
+                                    <CheckBox x:Name="HwAccelCheck" Content="ハードウェアデコード"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
+                                              Checked="HwAccel_Changed" Unchecked="HwAccel_Changed"/>
+                                    <TextBlock x:Name="DecodeModeText" Text="デコード: -"
+                                               Foreground="{StaticResource TextPrimary}"
+                                               FontSize="16" FontWeight="Bold" FontFamily="Consolas" Margin="0,0,0,4"/>
+
+                                    <TextBlock Text="音声エンジン" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,4,0,4"/>
+                                    <ComboBox x:Name="AudioBackendCombo" Margin="0,0,0,6"
+                                              SelectionChanged="AudioBackend_Changed" SelectedIndex="0">
+                                        <ComboBoxItem Content="XAudio2（既定）" Tag="XAudio2"/>
+                                        <ComboBoxItem Content="WASAPI（共有モード）" Tag="WasapiShared"/>
+                                        <ComboBoxItem Content="WASAPI（排他モード・低レイテンシー）" Tag="WasapiExclusive"/>
+                                    </ComboBox>
+
+                                    <CheckBox x:Name="PrefetchCheck" Content="パケット先読み（音声demuxで必須）"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                              Checked="Prefetch_Changed" Unchecked="Prefetch_Changed"/>
+
+                                    <Border Style="{StaticResource Separator}"/>
+
+                                    <CheckBox x:Name="AutoPlayNextCheck" Content="次ファイル自動再生"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
+                                              Checked="AutoPlayNext_Changed" Unchecked="AutoPlayNext_Changed"/>
+                                    <CheckBox x:Name="DisableAutoResumeCheck" Content="起動時のレジューム自動再生を無効化"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
+                                              Checked="DisableAutoResume_Changed" Unchecked="DisableAutoResume_Changed"/>
+
+                                    <!-- ログ出力先（trace.log / play_error.txt。通常/ドラレコ共通）。
+                                         空欄＝自動（Xドライブ[RAMディスク]があれば X:\temp\VerticalPlayer、無ければ実行ファイル直下） -->
+                                    <TextBlock Text="ログ出力先（空欄＝自動）" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
+                                    <TextBox x:Name="LogDirBox" Style="{StaticResource ModernTextBox}"
+                                             Margin="0,0,0,4" LostFocus="LogDir_Changed"/>
+                                    <TextBlock x:Name="LogDirResolvedText" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                        <Button Content="開く" Style="{StaticResource SecondaryBtn}"
+                                                Margin="0,0,6,0" Click="OpenLogDir_Click"/>
+                                        <Button Content="自動に戻す" Style="{StaticResource SecondaryBtn}"
+                                                Click="ResetLogDir_Click"/>
+                                    </StackPanel>
+
+                                    <Border Style="{StaticResource Separator}"/>
+
+                                    <!-- TensorRTキャッシュのバックアップ先（RAMディスク運用時の保険）。
+                                         既定はビルド構成に依存しない%LOCALAPPDATA%配下の固定パスだが、
+                                         任意のフォルダへ変更できるようにしている。 -->
+                                    <TextBlock Text="TensorRTキャッシュのバックアップ先" Foreground="{StaticResource TextMuted}"
+                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
+                                    <TextBox x:Name="TrtCacheBackupDirBox" Style="{StaticResource ModernTextBox}"
+                                             Margin="0,0,0,4" LostFocus="TrtCacheBackupDir_Changed"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                        <Button Content="開く" Style="{StaticResource SecondaryBtn}"
+                                                Margin="0,0,6,0" Click="OpenTrtCacheBackupDir_Click"/>
+                                        <Button Content="既定に戻す" Style="{StaticResource SecondaryBtn}"
+                                                Click="ResetTrtCacheBackupDir_Click"/>
+                                    </StackPanel>
+                                    <CheckBox x:Name="DnnFastBuildCheck" Content="DNNビルドを高速化（推論速度は僅かに低下）"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                              Checked="DnnFastBuild_Changed" Unchecked="DnnFastBuild_Changed"/>
+
+                                    <Border Style="{StaticResource Separator}"/>
+
+                                    <!-- 再生速度 -->
+                                    <DockPanel Margin="0,0,0,4">
+                                        <TextBlock Text="再生速度" Foreground="{StaticResource TextMuted}"
+                                                   FontSize="10" FontWeight="SemiBold"/>
+                                        <TextBlock x:Name="SpeedLabel" DockPanel.Dock="Right"
+                                                   Foreground="{StaticResource AccentBlue}"
+                                                   FontSize="14" FontWeight="Bold" FontFamily="Consolas" Text="1.0×"/>
+                                    </DockPanel>
+                                    <Slider x:Name="SpeedSlider" Style="{StaticResource ModernSlider}"
+                                            Minimum="0.1" Maximum="4.0" Value="1.0"
+                                            IsSnapToTickEnabled="True" TickFrequency="0.1"
+                                            ValueChanged="Speed_Changed" Margin="0,4"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </TabItem>
+
                         <TabItem Header="表示" Style="{StaticResource PanelTabItem}">
                             <ScrollViewer VerticalScrollBarVisibility="Auto">
                                 <StackPanel>
@@ -1060,93 +1147,6 @@
                                     <Border Style="{StaticResource Separator}"/>
                                     <Button Content="ウィンドウを画面中央へ" Style="{StaticResource SecondaryBtn}"
                                             Click="CenterWindow_Click" Margin="0,4"/>
-                                </StackPanel>
-                            </ScrollViewer>
-                        </TabItem>
-
-                        <TabItem Header="システム" Style="{StaticResource PanelTabItem}">
-                            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                <StackPanel>
-                                    <CheckBox x:Name="DnnWaitForBuildCheck" Content="DNN切替再生待ち"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"/>
-
-                                    <CheckBox x:Name="HwAccelCheck" Content="ハードウェアデコード"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
-                                              Checked="HwAccel_Changed" Unchecked="HwAccel_Changed"/>
-                                    <TextBlock x:Name="DecodeModeText" Text="デコード: -"
-                                               Foreground="{StaticResource TextPrimary}"
-                                               FontSize="16" FontWeight="Bold" FontFamily="Consolas" Margin="0,0,0,4"/>
-
-                                    <TextBlock Text="音声エンジン" Foreground="{StaticResource TextMuted}"
-                                               FontSize="10" FontWeight="SemiBold" Margin="0,4,0,4"/>
-                                    <ComboBox x:Name="AudioBackendCombo" Margin="0,0,0,6"
-                                              SelectionChanged="AudioBackend_Changed" SelectedIndex="0">
-                                        <ComboBoxItem Content="XAudio2（既定）" Tag="XAudio2"/>
-                                        <ComboBoxItem Content="WASAPI（共有モード）" Tag="WasapiShared"/>
-                                        <ComboBoxItem Content="WASAPI（排他モード・低レイテンシー）" Tag="WasapiExclusive"/>
-                                    </ComboBox>
-
-                                    <CheckBox x:Name="PrefetchCheck" Content="パケット先読み（低速ストレージ対策）"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4"
-                                              Checked="Prefetch_Changed" Unchecked="Prefetch_Changed"/>
-
-                                    <Border Style="{StaticResource Separator}"/>
-
-                                    <CheckBox x:Name="AutoPlayNextCheck" Content="次ファイル自動再生"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
-                                              Checked="AutoPlayNext_Changed" Unchecked="AutoPlayNext_Changed"/>
-                                    <CheckBox x:Name="DisableAutoResumeCheck" Content="起動時のレジューム自動再生を無効化"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
-                                              Checked="DisableAutoResume_Changed" Unchecked="DisableAutoResume_Changed"/>
-
-                                    <!-- ログ出力先（trace.log / play_error.txt。通常/ドラレコ共通）。
-                                         空欄＝自動（Xドライブ[RAMディスク]があれば X:\temp\VerticalPlayer、無ければ実行ファイル直下） -->
-                                    <TextBlock Text="ログ出力先（空欄＝自動）" Foreground="{StaticResource TextMuted}"
-                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
-                                    <TextBox x:Name="LogDirBox" Style="{StaticResource ModernTextBox}"
-                                             Margin="0,0,0,4" LostFocus="LogDir_Changed"/>
-                                    <TextBlock x:Name="LogDirResolvedText" Foreground="{StaticResource TextMuted}"
-                                               FontSize="10" TextWrapping="Wrap" Margin="0,0,0,4"/>
-                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-                                        <Button Content="開く" Style="{StaticResource SecondaryBtn}"
-                                                Margin="0,0,6,0" Click="OpenLogDir_Click"/>
-                                        <Button Content="自動に戻す" Style="{StaticResource SecondaryBtn}"
-                                                Click="ResetLogDir_Click"/>
-                                    </StackPanel>
-
-                                    <Border Style="{StaticResource Separator}"/>
-
-                                    <!-- TensorRTキャッシュのバックアップ先（RAMディスク運用時の保険）。
-                                         既定はビルド構成に依存しない%LOCALAPPDATA%配下の固定パスだが、
-                                         任意のフォルダへ変更できるようにしている。 -->
-                                    <TextBlock Text="TensorRTキャッシュのバックアップ先" Foreground="{StaticResource TextMuted}"
-                                               FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
-                                    <TextBox x:Name="TrtCacheBackupDirBox" Style="{StaticResource ModernTextBox}"
-                                             Margin="0,0,0,4" LostFocus="TrtCacheBackupDir_Changed"/>
-                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-                                        <Button Content="開く" Style="{StaticResource SecondaryBtn}"
-                                                Margin="0,0,6,0" Click="OpenTrtCacheBackupDir_Click"/>
-                                        <Button Content="既定に戻す" Style="{StaticResource SecondaryBtn}"
-                                                Click="ResetTrtCacheBackupDir_Click"/>
-                                    </StackPanel>
-                                    <CheckBox x:Name="DnnFastBuildCheck" Content="DNNビルドを高速化（推論速度は僅かに低下）"
-                                              Style="{StaticResource ModernCheck}" Margin="0,4"
-                                              Checked="DnnFastBuild_Changed" Unchecked="DnnFastBuild_Changed"/>
-
-                                    <Border Style="{StaticResource Separator}"/>
-
-                                    <!-- 再生速度 -->
-                                    <DockPanel Margin="0,0,0,4">
-                                        <TextBlock Text="再生速度" Foreground="{StaticResource TextMuted}"
-                                                   FontSize="10" FontWeight="SemiBold"/>
-                                        <TextBlock x:Name="SpeedLabel" DockPanel.Dock="Right"
-                                                   Foreground="{StaticResource AccentBlue}"
-                                                   FontSize="14" FontWeight="Bold" FontFamily="Consolas" Text="1.0×"/>
-                                    </DockPanel>
-                                    <Slider x:Name="SpeedSlider" Style="{StaticResource ModernSlider}"
-                                            Minimum="0.1" Maximum="4.0" Value="1.0"
-                                            IsSnapToTickEnabled="True" TickFrequency="0.1"
-                                            ValueChanged="Speed_Changed" Margin="0,4"/>
                                 </StackPanel>
                             </ScrollViewer>
                         </TabItem>

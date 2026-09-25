@@ -31,6 +31,21 @@ namespace VerticalPlayer
     /// （XAudio2版と同じくピッチも変化する簡易実装。IAudioOutput.csのSetSpeedRatioのドキュメント
     /// コメント参照）。
     ///
+    /// 【今回追加】再生中に出力デバイスが切り替わる（既定デバイス変更／切断）と、
+    /// GetCurrentPadding/GetBuffer等が失敗HRESULTを返すようになる。このクラスのCOM
+    /// インターフェースはメソッドをintで宣言しており失敗HRでも例外化されないため、以前は
+    /// SubmitSamples/GetPositionSeconds側で失敗を検知しても「その回だけ諦めてreturn」する
+    /// だけで、誰も復旧を試みず無音のまま戻らなくなっていた。加えて、500msタイムアウト時の
+    /// 既存の軽い復旧（RecreateAudioClient、Stop→Reset→Start）も同一の（死んでいるかもしれない）
+    /// _audioClientを叩き直すだけで、新しい既定デバイスへの再バインドはしていなかった。
+    /// 対策は二段構え（XAudio2AudioOutput.csと同じ方針）：
+    ///   (1) AudioDeviceChangeNotifier経由でWindowsの既定デバイス変更通知を受け、検知した
+    ///       時点でバックグラウンドにIMMDeviceEnumerator列挙からやり直して丸ごと再構築する
+    ///   (2) GetCurrentPadding/GetBuffer等の失敗HRESULT検知、および万一のCOM例外そのものも
+    ///       保険として同じ再構築をトリガーする（呼び出し元スレッドは落とさない）
+    /// 再構築後はConsumeRecreated()経由で呼び出し元にオフセット再取得を促す、という既存の
+    /// 仕組みをそのまま利用している。
+    ///
     /// 【要実機確認】この環境からWindowsオーディオデバイスへ到達できずコンパイル・動作未検証。
     /// COMインターフェースのvtableスロット順序はWindows SDK mmdeviceapi.h/audioclient.hの定義に
     /// 基づいているが、実機ビルドで動作確認の上、問題があれば調整してください。
@@ -52,7 +67,7 @@ namespace VerticalPlayer
         private SampleFormat _sampleFormat = SampleFormat.Float32;
 
         private long _totalFramesWritten; // Open/Flush以降、ReleaseBufferで実際に書き込んだ総フレーム数
-        private bool _started;
+        //private bool _started; // 不使用
         private bool _recreatedSinceLastCheck;
         private double _speedRatio = 1.0;
         private double _volume = 1.0;
@@ -60,6 +75,10 @@ namespace VerticalPlayer
         // 変換用スクラッチバッファ（毎フレーム確保しないよう使い回す）
         private byte[]? _convertScratch;
         private float[]? _resampleScratch;
+
+        // 【今回追加】既定デバイス変更の検知と、再構築の多重実行防止
+        private AudioDeviceChangeNotifier? _deviceNotifier;
+        private int _recoveringFlag; // 0=待機中, 1=再構築処理中（Interlockedで排他）
 
         public WasapiAudioOutput(bool exclusive)
         {
@@ -87,60 +106,79 @@ namespace VerticalPlayer
                 _sampleRate = sampleRate;
                 _channels = channels;
 
-                _enumerator = (IMMDeviceEnumerator)Activator.CreateInstance(
-                    Type.GetTypeFromCLSID(ComGuids.CLSID_MMDeviceEnumerator, throwOnError: true)!)!;
-
-                int hr = _enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out _device);
-                ComUtil.ThrowIfFailed(hr, "GetDefaultAudioEndpoint");
-
-                var iid = ComGuids.IID_IAudioClient;
-                hr = _device!.Activate(ref iid, ClsCtx.CLSCTX_ALL, IntPtr.Zero, out object audioClientObj);
-                ComUtil.ThrowIfFailed(hr, "IMMDevice.Activate(IAudioClient)");
-                _audioClient = (IAudioClient)audioClientObj;
-
-                var shareMode = _exclusive ? AudioClientShareMode.Exclusive : AudioClientShareMode.Shared;
-                WaveFormatChoice fmt = _exclusive
-                    ? NegotiateExclusiveFormat(_audioClient, sampleRate, channels)
-                    : BuildSharedFormat(sampleRate, channels);
-                _sampleFormat = fmt.SampleFormat;
-                _blockAlign = fmt.Header.nBlockAlign;
-
-                const long REFTIMES_PER_SEC = 10_000_000; // 100ns単位。1秒分
-                // 共有モード: バッファ長はOS任せでよいので200ms程度の余裕を持たせる。
-                // 排他モード: デバイスが受け付けるバッファ長を都度調整する必要があるが、
-                // ここでは実用上問題の出にくい100msを要求値とし、失敗時は0（デバイス既定）で再試行する。
-                long bufferDuration = _exclusive ? REFTIMES_PER_SEC / 10 : REFTIMES_PER_SEC / 5;
-
-                uint streamFlags = _exclusive
-                    ? 0u
-                    : AudioClientStreamFlags.AUTOCONVERTPCM | AudioClientStreamFlags.SRC_DEFAULT_QUALITY;
-
-                hr = InitializeAudioClient(_audioClient, shareMode, streamFlags, bufferDuration, ref fmt);
-                if (hr == unchecked((int)0x88890019) /* AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED */ && _exclusive)
-                {
-                    // 排他モードはデバイスの内部周期に整数倍で合わせないと初期化に失敗することがある。
-                    // 一度破棄し、GetBufferSizeで教えられた実際の必要長で作り直す（Windows SDKドキュメント記載の定石）。
-                    hr = RetryExclusiveAfterAlignmentError(ref fmt, REFTIMES_PER_SEC);
-                }
-                ComUtil.ThrowIfFailed(hr, $"IAudioClient.Initialize(shareMode={shareMode})");
-
-                hr = _audioClient!.GetBufferSize(out _bufferFrameCount);
-                ComUtil.ThrowIfFailed(hr, "GetBufferSize");
-
-                var renderIid = ComGuids.IID_IAudioRenderClient;
-                hr = _audioClient.GetService(ref renderIid, out object renderObj);
-                ComUtil.ThrowIfFailed(hr, "GetService(IAudioRenderClient)");
-                _renderClient = (IAudioRenderClient)renderObj;
-
-                _totalFramesWritten = 0;
-                IsActive = true;
-
-                // XAudio2版と同じ方針: 一度Start()したら動かしっぱなしにし、Pause/Start連打による
-                // グリッチを避ける。「音を止める」は呼び出し側がSubmitSamplesを呼ばないことで実現する。
-                hr = _audioClient.Start();
-                ComUtil.ThrowIfFailed(hr, "IAudioClient.Start");
-                _started = true;
+                OpenAudioClientLocked();
             }
+
+            // 【今回追加】既定デバイス変更通知の登録はこのインスタンスの生存期間中1回だけでよい
+            // （Open()はファイル切替のたびに呼ばれるため、_lockの外・かつnullチェックしてから）。
+            // COM登録呼び出しを_lock内で行うと、通知コールバックが別スレッドから飛んできて
+            // TriggerFullRecreateAsync→lock取得という経路でデッドロックする余地があるため、
+            // 意図的に_lockの外に出している。
+            if (_deviceNotifier == null)
+            {
+                _deviceNotifier = new AudioDeviceChangeNotifier(OnDefaultAudioDeviceChanged);
+            }
+        }
+
+        /// <summary>【今回追加】_enumerator〜_renderClientまでを新規に組み立ててStart()する。
+        /// 呼び出し元が既に_lockを保持している前提のヘルパー（Open()・RecreateAudioClientFullyLockedから使用）。
+        /// _sampleRate/_channelsは事前に設定済みである前提。フォーマットもここで毎回ネゴシエートし
+        /// 直す（切替後の既定デバイスが以前と同じ形式に対応しているとは限らないため）。</summary>
+        private void OpenAudioClientLocked()
+        {
+            _enumerator = (IMMDeviceEnumerator)Activator.CreateInstance(
+                Type.GetTypeFromCLSID(ComGuids.CLSID_MMDeviceEnumerator, throwOnError: true)!)!;
+
+            int hr = _enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out _device);
+            ComUtil.ThrowIfFailed(hr, "GetDefaultAudioEndpoint");
+
+            var iid = ComGuids.IID_IAudioClient;
+            hr = _device!.Activate(ref iid, ClsCtx.CLSCTX_ALL, IntPtr.Zero, out object audioClientObj);
+            ComUtil.ThrowIfFailed(hr, "IMMDevice.Activate(IAudioClient)");
+            _audioClient = (IAudioClient)audioClientObj;
+
+            var shareMode = _exclusive ? AudioClientShareMode.Exclusive : AudioClientShareMode.Shared;
+            WaveFormatChoice fmt = _exclusive
+                ? NegotiateExclusiveFormat(_audioClient, _sampleRate, _channels)
+                : BuildSharedFormat(_sampleRate, _channels);
+            _sampleFormat = fmt.SampleFormat;
+            _blockAlign = fmt.Header.nBlockAlign;
+
+            const long REFTIMES_PER_SEC = 10_000_000; // 100ns単位。1秒分
+            // 共有モード: バッファ長はOS任せでよいので200ms程度の余裕を持たせる。
+            // 排他モード: デバイスが受け付けるバッファ長を都度調整する必要があるが、
+            // ここでは実用上問題の出にくい100msを要求値とし、失敗時は0（デバイス既定）で再試行する。
+            long bufferDuration = _exclusive ? REFTIMES_PER_SEC / 10 : REFTIMES_PER_SEC / 5;
+
+            uint streamFlags = _exclusive
+                ? 0u
+                : AudioClientStreamFlags.AUTOCONVERTPCM | AudioClientStreamFlags.SRC_DEFAULT_QUALITY;
+
+            hr = InitializeAudioClient(_audioClient, shareMode, streamFlags, bufferDuration, ref fmt);
+            if (hr == unchecked((int)0x88890019) /* AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED */ && _exclusive)
+            {
+                // 排他モードはデバイスの内部周期に整数倍で合わせないと初期化に失敗することがある。
+                // 一度破棄し、GetBufferSizeで教えられた実際の必要長で作り直す（Windows SDKドキュメント記載の定石）。
+                hr = RetryExclusiveAfterAlignmentError(ref fmt, REFTIMES_PER_SEC);
+            }
+            ComUtil.ThrowIfFailed(hr, $"IAudioClient.Initialize(shareMode={shareMode})");
+
+            hr = _audioClient!.GetBufferSize(out _bufferFrameCount);
+            ComUtil.ThrowIfFailed(hr, "GetBufferSize");
+
+            var renderIid = ComGuids.IID_IAudioRenderClient;
+            hr = _audioClient.GetService(ref renderIid, out object renderObj);
+            ComUtil.ThrowIfFailed(hr, "GetService(IAudioRenderClient)");
+            _renderClient = (IAudioRenderClient)renderObj;
+
+            _totalFramesWritten = 0;
+            IsActive = true;
+
+            // XAudio2版と同じ方針: 一度Start()したら動かしっぱなしにし、Pause/Start連打による
+            // グリッチを避ける。「音を止める」は呼び出し側がSubmitSamplesを呼ばないことで実現する。
+            hr = _audioClient.Start();
+            ComUtil.ThrowIfFailed(hr, "IAudioClient.Start");
+            // _started = true; 値は代入しているすが、どこからも参照されていないので、コメントアウト
         }
 
         private WaveFormatChoice BuildSharedFormat(int sampleRate, int channels)
@@ -342,58 +380,96 @@ namespace VerticalPlayer
         {
             if (!IsActive) return;
 
-            // ── 速度倍率が1.0でなければ、先に線形補間でフレーム数そのものを伸縮する ──
-            float[] src = interleaved;
-            int srcFrames = frameCount;
-            double ratio;
-            lock (_lock) { ratio = _speedRatio; }
-            if (Math.Abs(ratio - 1.0) > 0.001)
+            try
             {
-                src = ResampleLinear(interleaved, frameCount, _channels, ratio, out srcFrames);
-            }
-
-            int written = 0;
-            int spinMs = 0;
-            while (written < srcFrames)
-            {
-                uint padding;
-                uint bufferFrames;
-                lock (_lock)
+                // ── 速度倍率が1.0でなければ、先に線形補間でフレーム数そのものを伸縮する ──
+                float[] src = interleaved;
+                int srcFrames = frameCount;
+                double ratio;
+                lock (_lock) { ratio = _speedRatio; }
+                if (Math.Abs(ratio - 1.0) > 0.001)
                 {
-                    if (_audioClient == null || _renderClient == null) return;
-                    if (_audioClient.GetCurrentPadding(out padding) < 0) return;
-                    bufferFrames = _bufferFrameCount;
+                    src = ResampleLinear(interleaved, frameCount, _channels, ratio, out srcFrames);
                 }
 
-                uint available = bufferFrames > padding ? bufferFrames - padding : 0;
-                if (available == 0)
+                int written = 0;
+                int spinMs = 0;
+                while (written < srcFrames)
                 {
-                    if (spinMs >= 500)
+                    uint padding;
+                    uint bufferFrames;
+                    int hrPad;
+                    lock (_lock)
                     {
-                        System.Diagnostics.Debug.WriteLine("[WasapiAudioOutput] 空き待ちが500msでタイムアウト。オーディオクライアントを再作成します。");
-                        if (!RecreateAudioClient()) return;
-                        spinMs = 0;
+                        if (_audioClient == null || _renderClient == null) return;
+                        hrPad = _audioClient.GetCurrentPadding(out padding);
+                        bufferFrames = _bufferFrameCount;
+                    }
+                    if (hrPad < 0)
+                    {
+                        // 【今回追加】GetCurrentPadding失敗＝デバイスが切断/切替された可能性が高い。
+                        // 以前はここでただreturnするだけで、以後SubmitSamplesが呼ばれるたびに
+                        // 毎回同じ失敗を繰り返すだけで誰も復旧を試みず、無音のまま二度と戻らなかった。
+                        System.Diagnostics.Debug.WriteLine($"[WasapiAudioOutput] GetCurrentPadding失敗(0x{hrPad:X8})。エンジン再構築をトリガーします。");
+                        TriggerFullRecreateAsync($"GetCurrentPadding失敗: 0x{hrPad:X8}");
+                        return;
+                    }
+
+                    uint available = bufferFrames > padding ? bufferFrames - padding : 0;
+                    if (available == 0)
+                    {
+                        if (spinMs >= 500)
+                        {
+                            // このタイムアウトはバッファが本当に埋まっているだけの場合と、
+                            // デバイスが死んでいて永遠に空かない場合の両方であり得る。前者は
+                            // 軽いRecreateAudioClient（同一デバイス）で足りるが、後者は
+                            // OpenAudioClientLocked()による既定デバイス再列挙が必要。ここでは
+                            // まず軽い方を試し、次にこのループへ戻ってきてまだ失敗していれば
+                            // 上のhrPad<0分岐がFullRecreateへ誘導してくれる。
+                            System.Diagnostics.Debug.WriteLine("[WasapiAudioOutput] 空き待ちが500msでタイムアウト。オーディオクライアントを再作成します。");
+                            if (!RecreateAudioClient()) return;
+                            spinMs = 0;
+                            continue;
+                        }
+                        Thread.Sleep(1);
+                        spinMs++;
                         continue;
                     }
-                    Thread.Sleep(1);
-                    spinMs++;
-                    continue;
-                }
 
-                int framesThisPass = (int)Math.Min(available, (uint)(srcFrames - written));
-                WriteFrames(src, written, framesThisPass);
-                written += framesThisPass;
-                _totalFramesWritten += framesThisPass;
+                    int framesThisPass = (int)Math.Min(available, (uint)(srcFrames - written));
+                    if (!WriteFrames(src, written, framesThisPass))
+                        return; // 再構築は既にトリガー済み。このチャンクは諦める
+                    written += framesThisPass;
+                    _totalFramesWritten += framesThisPass;
+                }
+            }
+            catch (Exception ex)
+            {
+                // 【今回追加】このクラスのCOMメソッドは基本的に失敗をintのHRESULTで返す設計だが、
+                // COMプロキシ自体が切断済み等の場合は呼び出しそのものが例外を投げることがある。
+                // これを素通りさせず、呼び出し元(AudioDecodeLoop)のスレッドを道連れにしないよう
+                // ここで必ず捕まえる。
+                System.Diagnostics.Debug.WriteLine($"[WasapiAudioOutput] SubmitSamples失敗（{ex.Message}）。エンジン再構築をトリガーします。");
+                TriggerFullRecreateAsync("SubmitSamples失敗: " + ex.Message);
             }
         }
 
-        private unsafe void WriteFrames(float[] src, int startFrame, int frameCount)
+        /// <summary>成功したらtrue。失敗時（GetBufferの失敗HR、または例外）はfalseを返し、
+        /// 【今回追加】エンジン再構築をトリガーする。呼び出し元は戻り値がfalseならこのチャンクを
+        /// 諦めてSubmitSamplesを抜けること（totalFramesWrittenを加算しない＝実際に書けた分だけ
+        /// カウントする、という意味でも以前より正確になっている）。</summary>
+        private unsafe bool WriteFrames(float[] src, int startFrame, int frameCount)
         {
             lock (_lock)
             {
-                if (_renderClient == null) return;
+                if (_renderClient == null) return false;
                 int hr = _renderClient.GetBuffer((uint)frameCount, out IntPtr pData);
-                if (hr < 0) return; // 取得できなければこの分は諦める（次のループでリトライされる）
+                if (hr < 0)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[WasapiAudioOutput] GetBuffer失敗(0x{hr:X8})。エンジン再構築をトリガーします。");
+                    TriggerFullRecreateAsync($"GetBuffer失敗: 0x{hr:X8}");
+                    return false;
+                }
 
                 float vol = (float)_volume; // SetVolume()の値をここで実際にサンプルへ適用する
                 int floatOffset = startFrame * _channels;
@@ -428,6 +504,7 @@ namespace VerticalPlayer
                 }
 
                 _renderClient.ReleaseBuffer((uint)frameCount, 0);
+                return true;
             }
         }
 
@@ -474,8 +551,10 @@ namespace VerticalPlayer
             return _resampleScratch;
         }
 
-        /// <summary>500ms空き待ちタイムアウト時の自己回復（XAudio2版RecreateSourceVoiceLockedに相当）。
-        /// Stop→Reset→Startでクライアントを仕切り直す。成功したらtrue。</summary>
+        /// <summary>500ms空き待ちタイムアウト時の軽い自己回復（XAudio2版RecreateSourceVoiceLockedに相当）。
+        /// 同一デバイス・同一_audioClientのままStop→Reset→Startで仕切り直すだけ。デバイス自体が
+        /// 切断/切替された場合の復旧には力不足（その場合はRecreateAudioClientFullyLockedが必要）。
+        /// 成功したらtrue。</summary>
         private bool RecreateAudioClient()
         {
             lock (_lock)
@@ -500,10 +579,88 @@ namespace VerticalPlayer
             }
         }
 
+        /// <summary>【今回追加】出力デバイス切替／切断時用の重い復旧。IMMDeviceEnumeratorの
+        /// 列挙からやり直し、その時点の既定デバイスへ新規にActivate/Initializeし直す
+        /// （フォーマットのネゴシエーションも含めてOpenAudioClientLocked()で丸ごとやり直す）。
+        /// 呼び出し元は_lockを保持していない状態で呼ぶこと（内部でlockを取る）。</summary>
+        private bool RecreateAudioClientFullyLocked()
+        {
+            lock (_lock)
+            {
+                try
+                {
+                    try { _audioClient?.Stop(); } catch { }
+                    try { _audioClient?.Reset(); } catch { }
+                    if (_renderClient != null) { try { Marshal.ReleaseComObject(_renderClient); } catch { } _renderClient = null; }
+                    if (_audioClient != null) { try { Marshal.ReleaseComObject(_audioClient); } catch { } _audioClient = null; }
+                    if (_device != null) { try { Marshal.ReleaseComObject(_device); } catch { } _device = null; }
+                    if (_enumerator != null) { try { Marshal.ReleaseComObject(_enumerator); } catch { } _enumerator = null; }
+                    // _started = false; 値は代入しているすが、どこからも参照されていないので、コメントアウト
+                    IsActive = false;
+
+                    if (_sampleRate <= 0)
+                    {
+                        // Open()未実施のまま呼ばれた場合は何もできない
+                        return false;
+                    }
+
+                    OpenAudioClientLocked(); // 新しい既定デバイスへ再バインド（フォーマットも再ネゴシエーション）
+                    _recreatedSinceLastCheck = true; // AVEngine側でコンテンツオフセットを取り直させる
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    // 例：切替先も含めて有効な出力デバイスが1つも無い、等。この場合は諦めて
+                    // IsActive=falseにしておき、次のデバイス変更通知 or 次回SubmitSamples呼び出し
+                    // での再試行に委ねる。
+                    System.Diagnostics.Debug.WriteLine($"[WasapiAudioOutput] エンジン再構築に失敗: {ex.Message}");
+                    IsActive = false;
+                    return false;
+                }
+            }
+        }
+
+        /// <summary>【今回追加】AudioDeviceChangeNotifierのコールバック（COM通知スレッドから呼ばれる）。
+        /// 重い処理をこのスレッドで行ってはいけないため、ThreadPoolに投げるだけに留める。</summary>
+        private void OnDefaultAudioDeviceChanged()
+        {
+            TriggerFullRecreateAsync("既定の再生デバイスが変更されました");
+        }
+
+        /// <summary>【今回追加】RecreateAudioClientFullyLockedをバックグラウンドスレッドで実行する。
+        /// _recoveringFlagにより多重実行を防止（デバイス変更通知とSubmitSamples/GetPositionSeconds
+        /// の失敗検知がほぼ同時に発生しても1回しか再構築しない）。</summary>
+        private void TriggerFullRecreateAsync(string reason)
+        {
+            if (Interlocked.CompareExchange(ref _recoveringFlag, 1, 0) != 0)
+                return; // 既に再構築処理中
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    System.Diagnostics.Debug.WriteLine($"[WasapiAudioOutput] 出力クライアントを再構築します（理由: {reason}）");
+                    RecreateAudioClientFullyLocked();
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _recoveringFlag, 0);
+                }
+            });
+        }
+
         public void Start()
         {
             // XAudio2版と同じ方針: 常時Start済みのまま維持する。停止していた場合の保険のみ。
-            lock (_lock) { try { _audioClient?.Start(); } catch { } }
+            lock (_lock)
+            {
+                try { _audioClient?.Start(); }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[WasapiAudioOutput] Start失敗（{ex.Message}）。エンジン再構築をトリガーします。");
+                    TriggerFullRecreateAsync("Start失敗: " + ex.Message);
+                }
+            }
         }
 
         public void Pause()
@@ -516,6 +673,10 @@ namespace VerticalPlayer
         {
             // Seekのたびにクリーンな状態へ戻す。IAudioClient.Reset()はStop()済みでないと失敗するため、
             // 必ずStop→Reset→Startの順で呼ぶ。
+            // 【備考】ここで万一デバイスが死んでいて失敗しても、下のcatchで握りつぶすだけで
+            // 積極的な再構築はトリガーしない。次にSubmitSamples/GetPositionSecondsが呼ばれた
+            // 時点でGetCurrentPadding等の失敗HR検知から自然にRecreateAudioClientFullyLockedへ
+            // つながるため、ここで重ねてトリガーする必要はない。
             lock (_lock)
             {
                 try
@@ -554,10 +715,26 @@ namespace VerticalPlayer
             lock (_lock)
             {
                 if (_audioClient == null || _sampleRate <= 0) return 0.0;
-                if (_audioClient.GetCurrentPadding(out uint padding) < 0) return 0.0;
-                long played = _totalFramesWritten - padding;
-                if (played < 0) played = 0;
-                return (double)played / _sampleRate;
+                try
+                {
+                    int hr = _audioClient.GetCurrentPadding(out uint padding);
+                    if (hr < 0)
+                    {
+                        // 【今回追加】以前はここも0.0を返すだけで復旧を試みなかった。
+                        System.Diagnostics.Debug.WriteLine($"[WasapiAudioOutput] GetPositionSeconds: GetCurrentPadding失敗(0x{hr:X8})。エンジン再構築をトリガーします。");
+                        TriggerFullRecreateAsync($"GetCurrentPadding失敗: 0x{hr:X8}");
+                        return 0.0;
+                    }
+                    long played = _totalFramesWritten - padding;
+                    if (played < 0) played = 0;
+                    return (double)played / _sampleRate;
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[WasapiAudioOutput] GetPositionSeconds失敗（{ex.Message}）。エンジン再構築をトリガーします。");
+                    TriggerFullRecreateAsync("GetPositionSeconds失敗: " + ex.Message);
+                    return 0.0;
+                }
             }
         }
 
@@ -571,13 +748,17 @@ namespace VerticalPlayer
             if (_device != null) { Marshal.ReleaseComObject(_device); _device = null; }
             if (_enumerator != null) { Marshal.ReleaseComObject(_enumerator); _enumerator = null; }
 
-            _started = false;
+            //_started = false;
             IsActive = false;
         }
 
         public void Dispose()
         {
             lock (_lock) { CloseInternal(); }
+            // 【今回追加】デバイス変更通知の登録解除はインスタンス破棄時のみ（Stop()では行わない。
+            // 同一インスタンスが次のOpen()で再利用されるケースがあるため）。
+            _deviceNotifier?.Dispose();
+            _deviceNotifier = null;
         }
 
         // ── 内部データ型 ──

@@ -2053,23 +2053,47 @@ namespace VerticalPlayer
         // 注意: 以前は左サイドバー分(220px)しか加算しておらず、右サイドバーを260pxへ拡張した際に
         // 追従し忘れていたため、大きい倍率（3x/4x等）で画面幅に張り付いて実質ズームが効いていない
         // ように見える不具合があった（右260px分、必要幅を過小評価していた）。
+        //
+        // 【今回修正】幅・高さをそれぞれ独立にMath.Clampして画面内に収めていたため、画面に
+        // 収まりきらない場合（特に縦型動画で高さが先に頭打ちになるケース）に動画の縦横比が
+        // 崩れ、VideoArea内のStretch=Uniformにより、縮まりきらなかった側（幅）に黒帯が
+        // 出てしまっていた。ResizeToVideo()と同じく、動画部分の縦横比を必ず保ったまま
+        // 「高さ基準で計算→画面幅をはみ出す場合だけ幅基準に切替」の順で計算し直す。
         private void DashcamView_RequestWindowFit(double videoWidthPx, double videoHeightPx)
         {
             if (!_isDashcamMode) return;
-            if (_isDashcamFullScreen) return; // 全画面中はウィンドウをモニタ全体に固定
+            if (_isDashcamFullScreen) return; // 全画面中は処理しない
+            if (videoWidthPx <= 0 || videoHeightPx <= 0) return;
 
-            const double leftSidebarWidth = 16; // 通常は折りたたみ状態（ホバー時のみ220pxへ一時的に拡張）
-            const double rightSidebarWidth = 260;
-            const double titleBarHeight = 48;
-            const double controlBarHeight = 56;
-
-            double targetWidth = leftSidebarWidth + rightSidebarWidth + videoWidthPx;
-            double targetHeight = titleBarHeight + videoHeightPx + controlBarHeight;
-
+            double dispRatio = videoWidthPx / videoHeightPx;
             double sw = SystemParameters.WorkArea.Width;
             double sh = SystemParameters.WorkArea.Height;
-            this.Width = Math.Clamp(targetWidth, this.MinWidth, sw);
-            this.Height = Math.Clamp(targetHeight, this.MinHeight, sh);
+
+            // 1. カスタムタイトルバーの実際の高さを取得
+            double titleBarH = (TitleBar != null && TitleBar.Visibility == Visibility.Visible && TitleBar.ActualHeight > 0)
+                ? TitleBar.ActualHeight
+                : 32;
+
+            // 2. DashcamView内の各非動画UIの「実際の描画サイズ」を取得して合算
+            double nonVideoH = titleBarH + DashcamView.NonVideoHeight;
+            double nonVideoW = DashcamView.NonVideoWidth;
+
+            // 3. 動画表示エリアに使える最大領域から、アスペクト比を保った動画サイズを逆算
+            double maxVideoH = sh - nonVideoH;
+            double maxVideoW = maxVideoH * dispRatio;
+
+            if (nonVideoW + maxVideoW > sw)
+            {
+                maxVideoW = sw - nonVideoW;
+                maxVideoH = maxVideoW / dispRatio;
+            }
+
+            double videoW = Math.Min(videoWidthPx, maxVideoW);
+            double videoH = videoW / dispRatio; // 常に動画のアスペクト比に厳密追従
+
+            // 4. 実数値に基づいてウィンドウサイズを決定（端数ピクセルのズレを四捨五入で補正）
+            this.Width = Math.Round(nonVideoW + videoW);
+            this.Height = Math.Round(nonVideoH + videoH);
             EnsureOnScreen();
         }
 

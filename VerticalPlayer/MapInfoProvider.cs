@@ -92,7 +92,7 @@ namespace VerticalPlayer.Dashcam
         // ── トンネル通過中の状態保持 ──
 
         private ProjectedTunnel? _passingTunnel; // 「今ロック中（接近中〜通過中）のトンネル」として厳密に扱います
-        private bool _isInsideTunnelInstance;    // 実際にGPSロスト等で「通過中」フラグが立ったかどうかの内部管理用
+        //private bool _isInsideTunnelInstance;    // 実際にGPSロスト等で「通過中」フラグが立ったかどうかの内部管理用(不使用)
         private DashcamSensorFrame? _lastFrame;
         private double _lastCumKm; // 「情報一覧」の通知情報タブ表示用（GetDebugSnapshot参照）
 
