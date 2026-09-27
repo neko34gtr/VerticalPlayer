@@ -79,6 +79,51 @@
                     </ComboBox>
                 </StackPanel>
 
+                <!-- 【今回追加】リア時間: Front/Rearの録画時刻のズレ（別クロック起因）を手動補正する。
+                     単位は秒。正の値=リア側の時計が進んでいるとみなし、リアの参照時刻を早める方向に補正、
+                     負の値=リア側の時計が遅れているとみなし、リアの参照時刻を遅らせる方向に補正する。
+                     AUTO(既定)=ファイル名時刻同士をそのまま使う（従来通りの動作、手動補正なし）。
+                     リア倍率と同じくリア表示スイッチがONの間だけ表示。 -->
+                <StackPanel x:Name="RearTimeOffsetPanel" Orientation="Horizontal" Visibility="Collapsed">
+                    <TextBlock Text="リア時間" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <ComboBox x:Name="RearTimeOffsetCombo" Width="90" SelectionChanged="RearTimeOffsetCombo_SelectionChanged" Margin="0,0,16,0"
+                              Style="{StaticResource ModernCombo}"
+                              ToolTip="Front/Rearの録画時刻のズレを手動補正します（秒）。AUTOはファイル名時刻をそのまま使用。">
+                        <ComboBoxItem Content="AUTO" Tag="auto" IsSelected="True"/>
+                        <ComboBoxItem Content="-15s" Tag="-15"/>
+                        <ComboBoxItem Content="-14s" Tag="-14"/>
+                        <ComboBoxItem Content="-13s" Tag="-13"/>
+                        <ComboBoxItem Content="-12s" Tag="-12"/>
+                        <ComboBoxItem Content="-11s" Tag="-11"/>
+                        <ComboBoxItem Content="-10s" Tag="-10"/>
+                        <ComboBoxItem Content="-9s" Tag="-9"/>
+                        <ComboBoxItem Content="-8s" Tag="-8"/>
+                        <ComboBoxItem Content="-7s" Tag="-7"/>
+                        <ComboBoxItem Content="-6s" Tag="-6"/>
+                        <ComboBoxItem Content="-5s" Tag="-5"/>
+                        <ComboBoxItem Content="-4s" Tag="-4"/>
+                        <ComboBoxItem Content="-3s" Tag="-3"/>
+                        <ComboBoxItem Content="-2s" Tag="-2"/>
+                        <ComboBoxItem Content="-1s" Tag="-1"/>
+                        <ComboBoxItem Content="0s" Tag="0"/>
+                        <ComboBoxItem Content="+1s" Tag="1"/>
+                        <ComboBoxItem Content="+2s" Tag="2"/>
+                        <ComboBoxItem Content="+3s" Tag="3"/>
+                        <ComboBoxItem Content="+4s" Tag="4"/>
+                        <ComboBoxItem Content="+5s" Tag="5"/>
+                        <ComboBoxItem Content="+6s" Tag="6"/>
+                        <ComboBoxItem Content="+7s" Tag="7"/>
+                        <ComboBoxItem Content="+8s" Tag="8"/>
+                        <ComboBoxItem Content="+9s" Tag="9"/>
+                        <ComboBoxItem Content="+10s" Tag="10"/>
+                        <ComboBoxItem Content="+11s" Tag="11"/>
+                        <ComboBoxItem Content="+12s" Tag="12"/>
+                        <ComboBoxItem Content="+13s" Tag="13"/>
+                        <ComboBoxItem Content="+14s" Tag="14"/>
+                        <ComboBoxItem Content="+15s" Tag="15"/>
+                    </ComboBox>
+                </StackPanel>
+
                 <!-- 車速OSD（映像右上に走行速度を大きく表示）。AppSettings.EnableOSDで永続化 -->
                 <CheckBox x:Name="SpeedOsdCheck" Content="車速OSD" IsChecked="True" Style="{StaticResource ModernCheck}"
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
@@ -104,6 +149,17 @@
                     <ComboBoxItem Content="1.0x" Tag="1.00"/>
                     <ComboBoxItem Content="1.25x" Tag="1.25"/>
                     <ComboBoxItem Content="1.5x" Tag="1.50"/>
+                </ComboBox>
+
+                <!-- トンネル進入検出方式（実験的機能）。従来方式(Legacy)は実績あり・既定。
+                     実験的方式(Experimental)はロスト直前の速度×経過時間で推定した累積距離を使い、
+                     入口の数km手前からGPSが落ちる長い山岳トンネルでの検出漏れ対策として追加。 -->
+                <TextBlock Text="トンネル検出" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox x:Name="TunnelEntryDetectionModeCombo" Width="110" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
+                          SelectionChanged="TunnelEntryDetectionModeCombo_Changed" SelectedIndex="0"
+                          ToolTip="トンネル進入検出方式。「実験的」はGPSロスト中も速度×経過時間で推定位置を計算し続け、長い山岳トンネルでの検出漏れに対応（推定のため誤差はあり得ます）">
+                    <ComboBoxItem Content="従来" Tag="Legacy"/>
+                    <ComboBoxItem Content="動的" Tag="Experimental"/>
                 </ComboBox>
 
                 <CheckBox x:Name="DnnEnabledCheck" Content="AI推論(超解像)" Style="{StaticResource ModernCheck}"

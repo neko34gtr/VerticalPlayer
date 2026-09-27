@@ -1733,6 +1733,21 @@ namespace VerticalPlayer.Media
                         continue;
                     }
 
+                    // 【今回追加】以前はここで_pausedを見ておらず、一時停止中も_audioDesiredが
+                    // trueのままなら際限なくパケットを消費・SubmitSamplesし続けていた。ボイス側は
+                    // Pause()で実際にStop()されるため、キューが全く消化されず（BuffersQueuedが
+                    // 減らない）SubmitSamples内の500msタイムアウト→RecreateSourceVoiceLocked()
+                    // （ボイス再作成＋Start()）が繰り返し発動し、一時停止中に勝手に再生が再開
+                    // されてしまっていた（trace.log: Pause()後もDIAG-Audioでpackets/backlogが
+                    // 減り続け、submitTotalMsが1秒近くに張り付いていたことから確認）。
+                    // AudioBackend切替時の再オープン直後に一時停止中でも少し音が鳴っていたのも
+                    // 同じ経路（新エンジンのAudioDecodeLoopが同様に_pausedを無視していた）。
+                    if (_paused)
+                    {
+                        Thread.Sleep(10);
+                        continue;
+                    }
+
                     if (!channel.Reader.TryRead(out var item))
                     {
                         if (channel.Reader.Completion.IsCompleted) break;

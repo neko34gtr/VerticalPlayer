@@ -296,6 +296,53 @@ namespace VerticalPlayer.Dashcam
             }
         }
 
+        /// <summary>Front/Rearの録画時刻のズレを手動補正する値(秒、永続化対象)。nullはAUTO
+        /// （従来通り、ファイル名から得たFront/Rearそれぞれの開始時刻をそのまま使う）。
+        /// 正の値=リア側の時計がFrontより進んでいるとみなし、リアの参照時刻を早める方向に補正する。
+        /// 負の値=リア側の時計がFrontより遅れているとみなし、リアの参照時刻を遅らせる方向に補正する。
+        /// ReconcileRear()/SeekRearToFrontPositionAsync()/PlayerRear_MediaOpened()/フレーム毎の
+        /// 再同期ループの4箇所で、Front時刻からRear側の目標時刻を求める際にこの値を加算する。</summary>
+        public double? RearTimeOffsetSeconds
+        {
+            get
+            {
+                if (RearTimeOffsetCombo.SelectedItem is ComboBoxItem ci)
+                {
+                    var tag = (string)ci.Tag;
+                    if (tag == "auto") return null;
+                    if (double.TryParse(tag, System.Globalization.CultureInfo.InvariantCulture, out var v)) return v;
+                }
+                return null;
+            }
+            set
+            {
+                foreach (var obj in RearTimeOffsetCombo.Items)
+                {
+                    if (obj is not ComboBoxItem ci) continue;
+                    var tag = (string)ci.Tag;
+                    if (value == null)
+                    {
+                        if (tag == "auto") { RearTimeOffsetCombo.SelectedItem = ci; return; }
+                        continue;
+                    }
+                    if (tag != "auto" && double.TryParse(tag, System.Globalization.CultureInfo.InvariantCulture, out var v)
+                        && Math.Abs(v - value.Value) < 0.001)
+                    {
+                        RearTimeOffsetCombo.SelectedItem = ci;
+                        return;
+                    }
+                }
+                // 一致する項目が無ければAUTOへフォールバック
+                foreach (var obj in RearTimeOffsetCombo.Items)
+                {
+                    if (obj is ComboBoxItem ci2 && (string)ci2.Tag == "auto") { RearTimeOffsetCombo.SelectedItem = ci2; break; }
+                }
+            }
+        }
+
+        /// <summary>RearTimeOffsetSecondsをTimeSpanとして加算しやすい形で返す（null=AUTO時は0扱い）。</summary>
+        private TimeSpan RearTimeOffsetSpan => TimeSpan.FromSeconds(RearTimeOffsetSeconds ?? 0.0);
+
         /// <summary>車速OSDの表示ON/OFF（永続化対象。AppSettings.EnableOSDと対応）。</summary>
         public bool SpeedOsdEnabled
         {
@@ -360,6 +407,29 @@ namespace VerticalPlayer.Dashcam
             MapInfo?.SetLayout(_mapInfoCorner, _mapInfoScale); // 同上
         }
 
+        /// <summary>トンネル進入検出方式（永続化対象。AppSettings.DashcamTunnelEntryDetectionModeと対応）。
+        /// 実体はMapInfoProviderが持つ設定値をそのまま公開するラッパー。地図情報通知はドラレコ専用機能の
+        /// ため、この設定もドラレコ側（このクラス）だけに置く。既定はLegacy（従来方式・実績あり）。</summary>
+        public MapInfoProvider.TunnelEntryDetectionMode TunnelEntryDetectionModeSetting
+        {
+            get => _mapInfoProvider.EntryDetectionMode;
+            set
+            {
+                _mapInfoProvider.EntryDetectionMode = value;
+                foreach (ComboBoxItem item in TunnelEntryDetectionModeCombo.Items)
+                {
+                    if ((string)item.Tag == value.ToString()) { TunnelEntryDetectionModeCombo.SelectedItem = item; break; }
+                }
+            }
+        }
+
+        private void TunnelEntryDetectionModeCombo_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (TunnelEntryDetectionModeCombo.SelectedItem is not ComboBoxItem item
+                || !Enum.TryParse<MapInfoProvider.TunnelEntryDetectionMode>((string)item.Tag, out var mode)) return;
+            _mapInfoProvider.EntryDetectionMode = mode;
+        }
+
         /// <summary>リア(PiP)の水平位置（永続化対象）。映像エリアの空き幅に対する比率0..1、-1=未設定(既定の左下)。</summary>
         public double RearPipPosX
         {
@@ -389,14 +459,21 @@ namespace VerticalPlayer.Dashcam
             get => ZoomCombo.SelectedItem is ComboBoxItem ci && double.TryParse((string)ci.Tag, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 2.0;
             set
             {
+                // 【今回修正】以前は完全一致する選択肢が無い場合、何も選択されず値が無視されていた
+                // （RearZoomScaleと違い最寄り項目へのフォールバックが無かった）。これが原因で
+                // フロント倍率の復元がうまくいかないことがあった。RearZoomScaleと同じ「最寄りの
+                // 項目を選ぶ」フォールバックを追加する。
+                ComboBoxItem? best = null;
+                double bestDiff = double.MaxValue;
                 foreach (var obj in ZoomCombo.Items)
                 {
-                    if (obj is ComboBoxItem ci && double.TryParse((string)ci.Tag, System.Globalization.CultureInfo.InvariantCulture, out var v) && Math.Abs(v - value) < 0.001)
+                    if (obj is ComboBoxItem ci && double.TryParse((string)ci.Tag, System.Globalization.CultureInfo.InvariantCulture, out var v))
                     {
-                        ZoomCombo.SelectedItem = ci;
-                        return;
+                        double diff = Math.Abs(v - value);
+                        if (diff < bestDiff) { bestDiff = diff; best = ci; }
                     }
                 }
+                if (best != null) ZoomCombo.SelectedItem = best;
             }
         }
 
@@ -1224,7 +1301,7 @@ namespace VerticalPlayer.Dashcam
         {
             if (!UseTimeAlignedRear) return;
 
-            var t = _frontStart!.Value + PlayerFront.Position;
+            var t = _frontStart!.Value + PlayerFront.Position + RearTimeOffsetSpan; // 【今回追加】手動時刻補正を加算
             var clip = FindRearClipAt(t);
             if (clip == null)
             {
@@ -1278,7 +1355,7 @@ namespace VerticalPlayer.Dashcam
 
             if (UseTimeAlignedRear)
             {
-                var t = _frontStart!.Value + frontPos;
+                var t = _frontStart!.Value + frontPos + RearTimeOffsetSpan; // 【今回追加】手動時刻補正を加算
                 var clip = FindRearClipAt(t);
                 if (clip == null)
                 {
@@ -1296,7 +1373,7 @@ namespace VerticalPlayer.Dashcam
             }
 
             if (HasActiveRear())
-                await PlayerRear.StepToVideoOnlyAsync(frontPos, timeoutMs: 2000);
+                await PlayerRear.StepToVideoOnlyAsync(frontPos + RearTimeOffsetSpan, timeoutMs: 2000); // 【今回追加】非時刻整合モードにも補正を適用
         }
 
         // ---- リスト選択の同期補助 ----
@@ -1593,7 +1670,7 @@ namespace VerticalPlayer.Dashcam
             // 現在のFront時刻に対応する位置から始める（開き終わりまでにFrontが進んだ分も含む）
             if (RearLinked && _frontStart != null && _currentRearClipPath != null)
             {
-                var desired = (_frontStart.Value + PlayerFront.Position) - _currentRearClipStart;
+                var desired = (_frontStart.Value + PlayerFront.Position + RearTimeOffsetSpan) - _currentRearClipStart; // 【今回追加】手動時刻補正を加算
                 if (desired > TimeSpan.FromMilliseconds(300))
                 {
                     var target = desired + _rearSeekLead;
@@ -1814,6 +1891,19 @@ namespace VerticalPlayer.Dashcam
             PlayerFront.Volume = e.NewValue; // Rearは常時Volume=0（音声はFrontのみ）
         }
 
+        /// <summary>Front映像の音量（0..1）。永続化対象。ノーマルモードのVolumeSlider/Player.Volumeと
+        /// AppSettings.Volumeを共用する（アプリ全体で音量はひとつという想定）。MainWindow側の
+        /// EnterDashcamMode/ExitDashcamMode/RestoreSettings/Save処理から読み書きされる。</summary>
+        public double FrontVolume
+        {
+            get => PlayerFront.Volume;
+            set
+            {
+                PlayerFront.Volume = value;
+                VolumeSlider.Value = value; // スライダー表示も同期
+            }
+        }
+
         private void ScreenshotButton_Click(object sender, RoutedEventArgs e)
         {
             if (_currentFrontGroup?.FrontVideoPath == null || _isStopped)
@@ -1899,6 +1989,9 @@ namespace VerticalPlayer.Dashcam
             // リア倍率の設定UIは「リア表示スイッチがON」の間だけ出す（リアが今再生可能かは問わない）
             if (RearZoomPanel != null)
                 RearZoomPanel.Visibility = RearVisibleCheck.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+            // 【今回追加】リア時間（Front/Rearの時刻ズレ手動補正）もリア倍率と同じ条件で表示切替
+            if (RearTimeOffsetPanel != null)
+                RearTimeOffsetPanel.Visibility = RearVisibleCheck.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
 
             NotifyPlayingFiles(); // リアの切替/消失/スイッチ変更がタイトルバー表示へ反映される
 
@@ -1997,6 +2090,13 @@ namespace VerticalPlayer.Dashcam
         }
 
         private void RearZoomCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => ApplyRearPipSize();
+
+        /// <summary>【今回追加】リア時間オフセット変更時: 現在のFront位置に対してリアを即座に再同期する。</summary>
+        private void RearTimeOffsetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (PlayerFront == null) return;
+            _ = SeekRearToFrontPositionAsync(PlayerFront.Position);
+        }
 
         private void RearPipBorder_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
@@ -2616,11 +2716,12 @@ namespace VerticalPlayer.Dashcam
                 return;
             }
 
-            // 時刻ベース: リアの目標位置 = (Front開始時刻+Front位置) − リアclip開始時刻。
-            // フォールバック時は従来どおり「同名ペア＝同時開始」としてFront位置に合わせる。
+            // 時刻ベース: リアの目標位置 = (Front開始時刻+Front位置+手動補正) − リアclip開始時刻。
+            // フォールバック時は従来どおり「同名ペア＝同時開始」としてFront位置(+手動補正)に合わせる。
+            // 【今回追加】RearTimeOffsetSpanの加算はFront/Rearの時刻ズレ手動補正機能のため。
             TimeSpan desiredRearPos = timeAligned
-                ? (_frontStart!.Value + PlayerFront.Position) - _currentRearClipStart
-                : PlayerFront.Position;
+                ? (_frontStart!.Value + PlayerFront.Position + RearTimeOffsetSpan) - _currentRearClipStart
+                : PlayerFront.Position + RearTimeOffsetSpan;
             var diff = desiredRearPos - PlayerRear.Position; // 正=リアが遅れている
 
             // 再同期の約1.5秒後に残っている遅れを、シーク所要時間ぶんの遅れとして学習し
@@ -2764,6 +2865,19 @@ namespace VerticalPlayer.Dashcam
             _mapHorizontal = horizontal;
             if (_isFullScreen) { UpdateFullScreenMapOverlay(); return; } // 全画面中は列幅を触らずオーバーレイの幅だけ更新。復帰時に_mapHorizontalから戻す
             RightSidebarColumnDef.Width = new GridLength(horizontal ? 420 : 260);
+
+            // 【今回追加】この列幅変更はNonVideoWidthを増減させるが、以前はここでウィンドウの
+            // 再フィットが一切トリガーされていなかった。RequestWindowFit（延いては動画の縦横比を
+            // 保った黒帯なし表示）はMediaOpened時にしか発火しないため、再生中に地図の縦長/横長を
+            // 切り替えると、ウィンドウサイズは変わらないまま動画エリアだけが160px分縮む/広がる形に
+            // なり、縦横比が崩れて黒帯が出ていた（次ファイルに切り替わるとMediaOpened経由で
+            // 再フィットがかかり直るため、その時だけ直って見えていた）。
+            // UpdateLayout()でColumnDefinitionの変更を即座に反映させてから
+            // （そうしないとRequestWindowFitが変更前の古いNonVideoWidthを使ってしまう）、
+            // 明示的に再フィットをトリガーする。
+            this.UpdateLayout();
+            if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
+                RequestWindowFit?.Invoke(PlayerFront.NaturalVideoWidth * ZoomScale, PlayerFront.NaturalVideoHeight * ZoomScale);
         }
 
         // ---- 次ファイルの先読み（OSファイルキャッシュ温め） ----
