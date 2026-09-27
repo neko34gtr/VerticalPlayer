@@ -664,6 +664,14 @@ namespace VerticalPlayer.Dashcam
 
         private void PairListButton_Click(object sender, RoutedEventArgs e)
         {
+            // ❗【トグル化】既に開いていれば内容更新はせず、そのまま閉じる（再度押したら消える）。
+            // Closedイベント側で_pairListWindow=nullになる。
+            if (_pairListWindow != null)
+            {
+                _pairListWindow.Close();
+                return;
+            }
+
             if (DriveCombo.SelectedItem is not DriveOrFolderOption option || option.IsBrowseOption || option.RootPath == null)
             {
                 AppMessageBox.Show(Window.GetWindow(this), "先にドライブ/フォルダを選択してください。",
@@ -676,16 +684,6 @@ namespace VerticalPlayer.Dashcam
             {
                 AppMessageBox.Show(Window.GetWindow(this), "Front/Rearのファイルが見つかりません。",
                     "ペア一覧", MessageBoxButton.OK, MessageBoxImage.Information, isDarkMode: true);
-                return;
-            }
-
-            // すでに開いていれば、内容を最新にして前面へ出すだけ（複数開かない）
-            if (_pairListWindow != null)
-            {
-                _pairListWindow.UpdateRows(rows, PairListNote);
-                if (_pairListWindow.WindowState == WindowState.Minimized)
-                    _pairListWindow.WindowState = WindowState.Normal;
-                _pairListWindow.Activate();
                 return;
             }
 
@@ -2706,7 +2704,7 @@ namespace VerticalPlayer.Dashcam
 
             // 「情報一覧」ウィンドウの通知情報タブは、開いている間だけこの周期(500ms)で更新する。
             // 毎フレーム(OnFrontFrameDisplayed)から呼ぶとDataGridの再バインドが重くなるため。
-            _pairListWindow?.UpdateDebugSnapshot(_mapInfoProvider.GetDebugSnapshot());
+            _pairListWindow?.UpdateDebugSnapshot(_mapInfoProvider.GetDebugSnapshot(), _mapInfoProvider.LastFetchErrorSummary);
 
             bool timeAligned = UseTimeAlignedRear && _currentRearClipPath != null;
             bool rearReady = timeAligned ? _rearAvailable : HasActiveRear();

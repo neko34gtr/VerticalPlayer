@@ -143,8 +143,16 @@
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
 
-                        <TextBlock Grid.Row="0" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,0,0,10" TextWrapping="Wrap"
-                                   Text="地図情報通知(MapInfoProvider)が内部で保持・計算している生データです。再生中は自動で更新されます（このウィンドウを開いている間だけ）。"/>
+                        <!-- 上部ヘッダー（説明文 ＋ 一括コピーボタン） -->
+                        <Grid Grid.Row="0" Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Foreground="{StaticResource TextMuted}" FontSize="11" TextWrapping="Wrap" VerticalAlignment="Center"
+                                       Text="地図情報通知(MapInfoProvider)が内部で保持・計算している生データです。再生中は自動で更新されます（このウィンドウを開いている間だけ）。"/>
+                            <Button Grid.Column="1" Content="📋 情報を一括コピー" Style="{StaticResource SecondaryBtn}" FontSize="11" Padding="10,4" Margin="12,0,0,0" VerticalAlignment="Center" Click="CopyAllDebugInfo_Click"/>
+                        </Grid>
 
                         <!-- 現在値・フラグ一覧 -->
                         <UniformGrid Grid.Row="1" Columns="4" Margin="0,0,0,10">

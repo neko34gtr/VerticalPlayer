@@ -64,6 +64,11 @@ namespace VerticalPlayer.Dashcam
         // 推定距離が暴走しないための安全キャップ。日本の高速道路の法定速度より十分高い値。
         private const double MaxAssumedTunnelApproachSpeedKmh = 150.0;
 
+        // ── IC/JCTゲート（IsOnExpressway切替のジッター対策）用の定数 ──
+        private const double MotorwayLinkGateRadiusKm = 0.25; // この距離以内をIC/JCTランプ通過とみなす
+        private static readonly TimeSpan MotorwayLinkGateWindow = TimeSpan.FromSeconds(30); // ランプ通過後、切替を許可する猶予時間
+        private const int ExpresswayHysteresisFrameCount = 3; // ランプデータが1件も無い地域向けフォールバック：この回数連続で同じ判定が出るまで切替を保留
+
         private const double TunnelApproachThresholdMeters = 1000.0; // 「接近中」とみなす距離
         private const double TunnelEntryDetectionThresholdKm = 3.0; // GPSロスト時の「トンネル進入」検出に使う広めの閾値 4.0→3.0km 80キロで2分走ると仮定して2.8キロなので3とした
         private const double SaPaApproachThresholdKm = 30.0;         // SA/PA案内を出し始める手前距離 30→5km
@@ -117,6 +122,34 @@ namespace VerticalPlayer.Dashcam
         // ── Experimental方式（推定距離ベース）専用の状態 ──
 
         private bool _isTrackingLossDynamic; // GPSロスト中、起点情報を確保済みかどうか
+
+        // ── IC/JCTゲート（IsOnExpressway切替のジッター対策）用の状態 ──
+        private bool _hasExpresswayBaseline;             // 再生開始直後・シーク直後はfalse（ゲート無しで直接確定させる）
+
+        // ── Overpass取得エラーの可視化用 ──
+        // ❗【今回追加】これまでの取得失敗はSystem.Diagnostics.Debug.WriteLineにしか出力しておらず、
+        // デバッガを繋いでいない通常の実行では一切見えなかった。「直っていないのか、毎回静かに
+        // 例外で落ちているだけなのか」を外部から判別できるようにするため、直近の取得結果を保持する。
+        private string? _mainFetchError;          // 本体クエリ(トンネル/SA-PA本体/道路名等)の直近エラー
+        private string? _motorwayLinkFetchError;  // motorway_link(IC/JCTランプ)取得の直近エラー
+        private string? _namedSaPaFetchError;     // SA/PA名パターン検索の直近エラー
+
+        /// <summary>直近のOverpass取得で発生したエラーのまとめ（無ければnull）。情報一覧デバッグ
+        /// パネル等、UI側から参照して表示する想定の公開プロパティ。</summary>
+        public string? LastFetchErrorSummary
+        {
+            get
+            {
+                var parts = new List<string>();
+                if (_mainFetchError != null) parts.Add($"本体:{_mainFetchError}");
+                if (_motorwayLinkFetchError != null) parts.Add($"ランプ:{_motorwayLinkFetchError}");
+                if (_namedSaPaFetchError != null) parts.Add($"SA/PA名:{_namedSaPaFetchError}");
+                return parts.Count == 0 ? null : string.Join(" / ", parts);
+            }
+        }
+        private DateTime? _lastNearMotorwayLinkAt;        // 直近にIC/JCTランプの近傍を通過した時刻
+        private bool _pendingExpresswayValue;             // ヒステリシス（フォールバック）用の暫定判定値
+        private int _pendingExpresswayStreak;             // 同じ暫定判定が何フレーム連続したか
         private double _lostAtCumKm;         // ロスト直前の実測cumKm（起点）
         private double _lostAtSpeedKmh;      // ロスト直前の実測速度（起点。この速度を一定として距離を推定する）
         private DateTime _lostAtTimestamp;   // ロスト直前の実測フレームの時刻（起点）
@@ -227,6 +260,9 @@ namespace VerticalPlayer.Dashcam
             IsOnExpressway = false;
             ShouldShowOverlay = false;
             _isTrackingLossDynamic = false;
+            _hasExpresswayBaseline = false;
+            _lastNearMotorwayLinkAt = null;
+            _pendingExpresswayStreak = 0;
         }
 
         /// <summary>起動時のレジューム復元専用。前回終了時点の「利用中」道路名・地名を、
@@ -287,12 +323,14 @@ namespace VerticalPlayer.Dashcam
                 {
                     newBundle = await FetchOverpassAsync(minLat, minLng, maxLat, maxLng, ct).ConfigureAwait(false);
                     RouteCache[cacheKey] = newBundle;
+                    _mainFetchError = null;
                 }
                 catch (Exception ex)
                 {
                     // 【要件4】ネットワークエラー・タイムアウト時は例外を投げず、直前のbundleを
                     // そのまま使い続ける（ここでEmptyに差し替えると、通信が一時的に不安定なだけで
                     // 既に取得済みのトンネル/SA-PA情報まで失われてしまう）。
+                    _mainFetchError = $"{ex.GetType().Name}: {ex.Message}";
                     System.Diagnostics.Debug.WriteLine($"[MapInfoProvider] Overpass取得失敗（直前のデータを維持して続行）: {ex.Message}");
                 }
             }
@@ -379,6 +417,16 @@ namespace VerticalPlayer.Dashcam
             // 引き継ぎ判定を行わない。無関係な地点の接近フラグを誤って引き継がないため）。
             bool continuous = _lastFrame != null &&
                 (frame.Timestamp - _lastFrame.Timestamp).Duration() <= FrameContinuityThreshold;
+
+            if (!continuous)
+            {
+                // ❗【追加】シーク直後・再生開始直後は、直近のIC/JCTランプ通過履歴がそもそも無意味
+                // （途中再生の場合、実際にはICを通過済みでも履歴を持ちようがない）。この場合はゲートを
+                // 無効化し、次の1フレームだけ現在地の候補判定をそのまま直接採用して基準値を作り直す。
+                _hasExpresswayBaseline = false;
+                _lastNearMotorwayLinkAt = null;
+                _pendingExpresswayStreak = 0;
+            }
 
             if (!frame.HasGpsFix)
             {
@@ -693,6 +741,13 @@ namespace VerticalPlayer.Dashcam
 
         private void UpdateHighwayName(DashcamSensorFrame frame)
         {
+            // ❗【IC/JCTゲート・前段】現在地がIC/JCTランプ(motorway_link)の近傍かどうかを毎フレーム
+            // チェックし、直近通過時刻を更新しておく。150m以内に候補が無いフレームでもここだけは
+            // 継続して評価する（ランプ自体は無名wayのことが多く、Highways候補には出てこないため独立処理）。
+            bool nearLinkNow = _bundle.MotorwayLinks.Any(l =>
+                HaversineKm(frame.Latitude, frame.Longitude, l.Lat, l.Lng) <= MotorwayLinkGateRadiusKm);
+            if (nearLinkNow) _lastNearMotorwayLinkAt = frame.Timestamp;
+
             // 150m以内にある名称付き道路のうち、motorway(高速道路本線)をtrunk(国道等)より常に
             // 優先する。同格(motorway同士/trunk同士)の場合のみHeadingに最も近い向きのものを選ぶ
             // （並走区間・ジャンクション付近の絞り込み用途）。
@@ -719,9 +774,55 @@ namespace VerticalPlayer.Dashcam
 
             // motorway だけでなく、名称に「高速」や「有料」が含まれる trunk も高速道路扱いにする
             bool anyMotorway = candidates.Any(x => x.Way.IsMotorway || x.Way.Name.Contains("高速") || x.Way.Name.Contains("有料"));
-            IsOnExpressway = anyMotorway;
 
-            var filtered = anyMotorway
+            // ❗【IC/JCTゲート・本体】GPSジッターで高速走行中に一瞬「国道」側の座標が最近傍になっても、
+            // 実際にIC/JCTのランプを通っていない限りIsOnExpresswayを切り替えない。
+            // 切替を許可するのは次のいずれか：
+            //   ①まだ基準値が無い（再生開始直後・シーク直後）→ゲート無しで直接確定させる
+            //   ②直近MotorwayLinkGateWindow(30秒)以内にランプの近傍(250m以内)を通過した
+            // どちらでも無い場合、かつ「そもそもこの範囲にランプ情報が1件も無い」（データ欠損地域）
+            // 場合に限り、フォールバックとして「同じ判定がExpresswayHysteresisFrameCount回連続」
+            // した時だけ切替を許可するヒステリシス方式に切り替える。
+            if (!_hasExpresswayBaseline)
+            {
+                IsOnExpressway = anyMotorway;
+                _hasExpresswayBaseline = true;
+                _pendingExpresswayValue = anyMotorway;
+                _pendingExpresswayStreak = 1;
+            }
+            else if (anyMotorway != IsOnExpressway)
+            {
+                bool gateOpen = _lastNearMotorwayLinkAt != null &&
+                    (frame.Timestamp - _lastNearMotorwayLinkAt.Value).Duration() <= MotorwayLinkGateWindow;
+
+                if (gateOpen)
+                {
+                    // 実際にIC/JCTを通過した形跡がある→正規の切替として即座に反映する
+                    IsOnExpressway = anyMotorway;
+                    _pendingExpresswayValue = anyMotorway;
+                    _pendingExpresswayStreak = 1;
+                }
+                else if (_bundle.MotorwayLinks.Count == 0)
+                {
+                    // ランプ情報が1件も無い地域（データ欠損）向けのフォールバック：ヒステリシス
+                    if (anyMotorway == _pendingExpresswayValue) _pendingExpresswayStreak++;
+                    else { _pendingExpresswayValue = anyMotorway; _pendingExpresswayStreak = 1; }
+
+                    if (_pendingExpresswayStreak >= ExpresswayHysteresisFrameCount)
+                        IsOnExpressway = anyMotorway;
+                    // 届いていない間はIsOnExpresswayを直前値のまま維持（ジッターとみなす）
+                }
+                // else: ランプ情報はあるがゲートが閉じている＝ICを通過していない→ジッターとして無視し、
+                // IsOnExpresswayは直前値を維持する
+            }
+            else
+            {
+                // 判定が変わっていない（=ジッターではなく実際に現状維持）ので、暫定値もリセットしておく
+                _pendingExpresswayValue = anyMotorway;
+                _pendingExpresswayStreak = 1;
+            }
+
+            var filtered = IsOnExpressway
                 ? candidates.Where(x => x.Way.IsMotorway || x.Way.Name.Contains("高速") || x.Way.Name.Contains("有料")).ToList()
                 : candidates;
 
@@ -872,7 +973,7 @@ namespace VerticalPlayer.Dashcam
 
         // ── Overpass ──
 
-        private static async Task<OverpassBundle> FetchOverpassAsync(double minLat, double minLng, double maxLat, double maxLng, CancellationToken ct)
+        private async Task<OverpassBundle> FetchOverpassAsync(double minLat, double minLng, double maxLat, double maxLng, CancellationToken ct)
         {
             string bbox = string.Create(CultureInfo.InvariantCulture, $"{minLat:F5},{minLng:F5},{maxLat:F5},{maxLng:F5}");
             string query =
@@ -900,11 +1001,12 @@ namespace VerticalPlayer.Dashcam
             var saPas = new List<SaPaCandidate>();
             var places = new List<PlaceCandidate>();
             var highways = new List<HighwayCandidate>();
+            var motorwayLinks = new List<MotorwayLinkCandidate>();
             var junctions = new List<(string Name, double Lat, double Lng)>(); // 名前補完用（下記参照）
             var rawSaPas = new List<(string Name, string Type, double Lat, double Lng)>(); // 名前が空でも一旦保持
 
             if (!doc.RootElement.TryGetProperty("elements", out var elements))
-                return new OverpassBundle(tunnels, saPas, places, highways);
+                return new OverpassBundle(tunnels, saPas, places, highways, motorwayLinks);
 
             foreach (var el in elements.EnumerateArray())
             {
@@ -956,11 +1058,15 @@ namespace VerticalPlayer.Dashcam
                         rawSaPas.Add((name, spType, lat.Value, lng.Value));
                     }
                 }
-                // 2.5 SA/PA名の補完用：分岐点(motorway_junction)ノードの名前を収集
-                else if (type == "node" && highway == "motorway_junction")
+                // 2.5 SA/PA名の補完用：分岐点(motorway_junction)ノード、または
+                // SA/PA的な名前パターンを持つノードの名前を収集（タグの種類は問わない）
+                else if (type == "node")
                 {
                     string jName = GetTag("name");
-                    if (!string.IsNullOrEmpty(jName))
+                    bool looksLikeSaPaLabel = !string.IsNullOrEmpty(jName) &&
+                        (jName.Contains("SA") || jName.Contains("PA") || jName.Contains("サービスエリア") ||
+                         jName.Contains("パーキングエリア") || jName.Contains("ハイウェイオアシス") || jName.Contains("スマートIC"));
+                    if (!string.IsNullOrEmpty(jName) && (highway == "motorway_junction" || looksLikeSaPaLabel))
                     {
                         double? jlat = TryGetLat(el), jlng = TryGetLng(el);
                         if (jlat != null && jlng != null)
@@ -996,6 +1102,21 @@ namespace VerticalPlayer.Dashcam
                 }
             }
 
+            // ❗【今回追加】SA/PA名パターンに一致する名前付きノードの広域検索は、bbox内の名前付き
+            // ノードを絞り込み条件無しで総当たりするため重く、motorway_linkと同じ理由でOverpassの
+            // タイムアウトを誘発しやすい。本体クエリに同居させると巻き添えで全滅するため、
+            // motorway_link同様に独立した別リクエストに分離し、失敗してもここだけ諦めて続行する。
+            try
+            {
+                junctions.AddRange(await FetchNamedSaPaNodesAsync(bbox, ct).ConfigureAwait(false));
+                _namedSaPaFetchError = null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _namedSaPaFetchError = $"{ex.GetType().Name}: {ex.Message}";
+                System.Diagnostics.Debug.WriteLine($"[MapInfoProvider] SA/PA名パターン検索失敗（motorway_junction分のみで続行）: {ex.Message}");
+            }
+
             // ── SA/PA名の補完（要素走査ループの外で、全junction収集後にまとめて行う） ──
             // ❗【今回の主修正】現地検証で確認：ひるがの高原SA・飛騨白川PA・川島PAはいずれも
             // highway=services/rest_area の敷地(polygon)自体にはnameタグが付いておらず、
@@ -1024,7 +1145,98 @@ namespace VerticalPlayer.Dashcam
                 saPas.Add(new SaPaCandidate(name, spType, raw.Lat, raw.Lng));
             }
 
-            return new OverpassBundle(tunnels, saPas, places, highways);
+            // ── 敷地(polygon)自体が存在せず、名前付きノード単体でしかSA/PAが表現されていない
+            //    ケースの救済（川島PA等、オアシス一体型施設で実測確認） ──
+            // ❗【今回追加】上のループはrawSaPas（highway=services/rest_area要素）が存在することが
+            // 前提の「名前の補完」処理だが、川島PAのようにそもそも敷地側にhighway=services/rest_area
+            // タグが一切付いていない（amenity=parking等、別タグで表現されている）施設は、
+            // junctions（motorway_junctionノード、またはSA/PA名パターン一致ノード）の中にしか
+            // 情報が存在しない。この場合、宛先(rawSaPas)が無いため上のループでは一生救済されない。
+            // ここではjunctionsのうちSA/PAらしい名前を持つものを、直接候補として採用する
+            // （既にrawSaPas由来で登録済みの近傍(400m以内)候補と重複する場合は追加しない）。
+            foreach (var j in junctions)
+            {
+                bool looksLikeSaPa = j.Name.Contains("SA") || j.Name.Contains("PA") ||
+                    j.Name.Contains("サービスエリア") || j.Name.Contains("パーキングエリア");
+                if (!looksLikeSaPa) continue;
+
+                bool alreadyCovered = saPas.Any(s => HaversineKm(s.Lat, s.Lng, j.Lat, j.Lng) <= 0.4);
+                if (alreadyCovered) continue;
+
+                string spType = j.Name.Contains("SA") ? "SA" : "PA";
+                saPas.Add(new SaPaCandidate(j.Name, spType, j.Lat, j.Lng));
+            }
+
+            // ❗【今回修正】motorway_link(IC/JCTランプ)の取得は、区間によっては件数が膨らみ
+            // Overpassのタイムアウトを誘発しやすいため、本体クエリとは独立した別リクエストに分離した。
+            // これにより、ランプ取得だけが失敗してもトンネル・SA/PA等の本体データは影響を受けない
+            // （失敗時はmotorwayLinksが空のままなので、UpdateHighwayName側は自動的にヒステリシス
+            // 方式へフォールバックする設計になっている）。
+            try
+            {
+                motorwayLinks.AddRange(await FetchMotorwayLinksAsync(bbox, ct).ConfigureAwait(false));
+                _motorwayLinkFetchError = null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _motorwayLinkFetchError = $"{ex.GetType().Name}: {ex.Message}";
+                System.Diagnostics.Debug.WriteLine($"[MapInfoProvider] motorway_link取得失敗（IC/JCTゲート無しで続行）: {ex.Message}");
+            }
+
+            return new OverpassBundle(tunnels, saPas, places, highways, motorwayLinks);
+        }
+
+        /// <summary>IC/JCTランプ(highway=motorway_link)だけを取得する軽量な別リクエスト。
+        /// geom(全ジオメトリ)は不要なので center のみ要求し、サーバー負荷を最小限にする。</summary>
+        private async Task<List<MotorwayLinkCandidate>> FetchMotorwayLinksAsync(string bbox, CancellationToken ct)
+        {
+            string query =
+                "[out:json][timeout:20];" +
+                $"way[\"highway\"=\"motorway_link\"]({bbox});" +
+                "out center;";
+            using var content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("data", query) });
+            using var resp = await Http.PostAsync("https://overpass-api.de/api/interpreter", content, ct).ConfigureAwait(false);
+            resp.EnsureSuccessStatusCode();
+            await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+
+            var result = new List<MotorwayLinkCandidate>();
+            if (!doc.RootElement.TryGetProperty("elements", out var elements)) return result;
+            foreach (var el in elements.EnumerateArray())
+            {
+                double? lat = TryGetLat(el), lng = TryGetLng(el);
+                if (lat != null && lng != null) result.Add(new MotorwayLinkCandidate(lat.Value, lng.Value));
+            }
+            return result;
+        }
+
+        /// <summary>SA/PA名パターン（SA/PA/サービスエリア/パーキングエリア/ハイウェイオアシス/スマートIC）に
+        /// 一致する名前付きノードを広く取得する独立リクエスト。タグ条件が無い総当たり正規表現検索のため
+        /// motorway_linkと同様に重く、タイムアウトしやすい。本体クエリとは切り離し、失敗してもここだけ
+        /// 諦めて続行する（motorway_junction分の名前だけで補完処理は続行できる）。</summary>
+        private async Task<List<(string Name, double Lat, double Lng)>> FetchNamedSaPaNodesAsync(string bbox, CancellationToken ct)
+        {
+            string query =
+                "[out:json][timeout:20];" +
+                $"node[\"name\"~\"(SA|PA|サービスエリア|パーキングエリア|ハイウェイオアシス|スマートIC)\"]({bbox});" +
+                "out center tags;";
+            using var content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("data", query) });
+            using var resp = await Http.PostAsync("https://overpass-api.de/api/interpreter", content, ct).ConfigureAwait(false);
+            resp.EnsureSuccessStatusCode();
+            await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+
+            var result = new List<(string Name, double Lat, double Lng)>();
+            if (!doc.RootElement.TryGetProperty("elements", out var elements)) return result;
+            foreach (var el in elements.EnumerateArray())
+            {
+                var tags = el.TryGetProperty("tags", out var tg) ? tg : default;
+                string name = tags.ValueKind == JsonValueKind.Object && tags.TryGetProperty("name", out var v) ? v.GetString() ?? "" : "";
+                if (string.IsNullOrEmpty(name)) continue;
+                double? lat = TryGetLat(el), lng = TryGetLng(el);
+                if (lat != null && lng != null) result.Add((name, lat.Value, lng.Value));
+            }
+            return result;
         }
 
         private static double? TryGetLat(JsonElement el)
@@ -1072,6 +1284,7 @@ namespace VerticalPlayer.Dashcam
         private sealed record ProjectedTunnel(TunnelCandidate Raw, double EntryCumKm, double ExitCumKm, string RoadName);
 
         private sealed record SaPaCandidate(string Name, string Type, double Lat, double Lng);
+        private sealed record MotorwayLinkCandidate(double Lat, double Lng); // IC/JCTのランプ（ジッター対策ゲート用）
         // ── RoadName を追加 ──
         private sealed record ProjectedSaPa(SaPaCandidate Raw, double CumKm, string RoadName);
         private sealed record PlaceCandidate(string Name, double Lat, double Lng);
@@ -1084,14 +1297,15 @@ namespace VerticalPlayer.Dashcam
             public List<SaPaCandidate> SaPas { get; }
             public List<PlaceCandidate> Places { get; }
             public List<HighwayCandidate> Highways { get; }
+            public List<MotorwayLinkCandidate> MotorwayLinks { get; } // IC/JCTジャンクション判定ゲート用
 
             public OverpassBundle(List<TunnelCandidate> tunnels, List<SaPaCandidate> saPas,
-                List<PlaceCandidate> places, List<HighwayCandidate> highways)
+                List<PlaceCandidate> places, List<HighwayCandidate> highways, List<MotorwayLinkCandidate> motorwayLinks)
             {
-                Tunnels = tunnels; SaPas = saPas; Places = places; Highways = highways;
+                Tunnels = tunnels; SaPas = saPas; Places = places; Highways = highways; MotorwayLinks = motorwayLinks;
             }
 
-            public static OverpassBundle Empty { get; } = new(new(), new(), new(), new());
+            public static OverpassBundle Empty { get; } = new(new(), new(), new(), new(), new());
         }
     }
 }

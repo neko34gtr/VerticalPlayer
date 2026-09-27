@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Windows;
 using System.Windows.Input;
 
@@ -98,8 +99,11 @@ namespace VerticalPlayer.Dashcam
 
         /// <summary>「通知情報」タブの内容を最新のスナップショットへ更新する。
         /// DashcamPlayerView側が、このウィンドウが開いている間だけ定期的に呼ぶ想定
-        /// （閉じている間は呼ばれない＝コストをかけない）。</summary>
-        public void UpdateDebugSnapshot(MapInfoDebugSnapshot s)
+        /// （閉じている間は呼ばれない＝コストをかけない）。
+        /// fetchError: 直近のOverpass取得エラーのまとめ（MapInfoProvider.LastFetchErrorSummary）。
+        /// 無ければnull。デバッガを繋いでいなくても取得失敗が起きているかどうかを画面上で
+        /// 判別できるようにするための表示（❗今回追加）。</summary>
+        public void UpdateDebugSnapshot(MapInfoDebugSnapshot s, string? fetchError = null)
         {
             DebugLatLngText.Text = s.HasLastFrame
                 ? $"{s.CurrentLat:F6}, {s.CurrentLng:F6}  (GPS:{(s.HasGpsFix ? "有効" : "ロスト")})"
@@ -108,7 +112,8 @@ namespace VerticalPlayer.Dashcam
             DebugCountsText.Text = $"route:{s.RoutePointCount}pt  tunnel:{s.TunnelCount}  SA/PA:{s.SaPaCount}  place:{s.PlaceCount}  road:{s.HighwayWayCount}";
             DebugFlagsText.Text =
                 $"RouteReady={s.RouteReady}  IsOnExpressway={s.IsOnExpressway}  IsPassingTunnel={s.IsPassingTunnel}  ShouldShowOverlay={s.ShouldShowOverlay}\n" +
-                $"HighwayName=\"{s.HighwayName}\"  Location=\"{s.CurrentLocationName}\"";
+                $"HighwayName=\"{s.HighwayName}\"  Location=\"{s.CurrentLocationName}\"" +
+                (string.IsNullOrEmpty(fetchError) ? "" : $"\n⚠ 取得エラー: {fetchError}");
 
             TunnelDebugGrid.ItemsSource = s.NearbyTunnels;
             SaPaDebugGrid.ItemsSource = s.NearbySaPas;
@@ -119,5 +124,50 @@ namespace VerticalPlayer.Dashcam
         private void Minimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
 
         private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
+
+        /// <summary>「通知情報」タブの全デバッグ情報を一括でクリップボードにコピーする。</summary>
+        private void CopyAllDebugInfo_Click(object sender, RoutedEventArgs e)
+        {
+            var sb = new StringBuilder();
+
+            sb.AppendLine("=== 通知情報 (MapInfo) スナップショット ===");
+            sb.AppendLine($"【現在座標】 {DebugLatLngText.Text}");
+            sb.AppendLine($"【累積距離 / Heading】 {DebugCumKmText.Text}");
+            sb.AppendLine($"【ルート/データ件数】 {DebugCountsText.Text}");
+            sb.AppendLine("【フラグ】");
+            sb.AppendLine(DebugFlagsText.Text);
+            sb.AppendLine();
+
+            sb.AppendLine("--- 近傍のトンネル候補 ---");
+            if (TunnelDebugGrid.ItemsSource is IEnumerable<dynamic> tunnels && tunnels.Any())
+            {
+                sb.AppendLine("名称\t道路\t高速\t全長m\tこの先km\t通過中");
+                foreach (var t in tunnels)
+                {
+                    sb.AppendLine($"{t.Name}\t{t.RoadName}\t{t.IsMotorwayTunnel}\t{t.LengthMeters}\t{t.DistanceAheadKm:F2}\t{t.IsPassing}");
+                }
+            }
+            else
+            {
+                sb.AppendLine("(該当なし)");
+            }
+            sb.AppendLine();
+
+            sb.AppendLine("--- 近傍のSA/PA候補 ---");
+            if (SaPaDebugGrid.ItemsSource is IEnumerable<dynamic> sapas && sapas.Any())
+            {
+                sb.AppendLine("名称\t種別\t道路\tこの先km");
+                foreach (var s in sapas)
+                {
+                    sb.AppendLine($"{s.Name}\t{s.Type}\t{s.RoadName}\t{s.DistanceAheadKm:F2}");
+                }
+            }
+            else
+            {
+                sb.AppendLine("(該当なし)");
+            }
+
+            Clipboard.SetText(sb.ToString());
+        }
     }
 }
