@@ -112,8 +112,14 @@ namespace VerticalPlayer.Dashcam
             DebugCountsText.Text = $"route:{s.RoutePointCount}pt  tunnel:{s.TunnelCount}  SA/PA:{s.SaPaCount}  place:{s.PlaceCount}  road:{s.HighwayWayCount}";
             DebugFlagsText.Text =
                 $"RouteReady={s.RouteReady}  IsOnExpressway={s.IsOnExpressway}  IsPassingTunnel={s.IsPassingTunnel}  ShouldShowOverlay={s.ShouldShowOverlay}\n" +
-                $"HighwayName=\"{s.HighwayName}\"  Location=\"{s.CurrentLocationName}\"" +
-                (string.IsNullOrEmpty(fetchError) ? "" : $"\n⚠ 取得エラー: {fetchError}");
+                $"HighwayName=\"{s.HighwayName}\"  Location=\"{s.CurrentLocationName}\"";
+
+            // ❗【今回変更】以前はフラグ欄に「⚠ 取得エラー: ...」を追記していたため、エラーが出るたびに
+            // フラグ欄の行数が増え、下のデータグリッドが圧迫されて1行レベルまで潰れていた。
+            // トンネル/SA-PA候補グリッドの下に独立欄を設け、そちらへ出す（無ければ非表示）。
+            bool hasError = !string.IsNullOrEmpty(fetchError);
+            DebugErrorBorder.Visibility = hasError ? Visibility.Visible : Visibility.Collapsed;
+            DebugErrorText.Text = hasError ? $"⚠ 取得エラー: {fetchError}" : "";
 
             TunnelDebugGrid.ItemsSource = s.NearbyTunnels;
             SaPaDebugGrid.ItemsSource = s.NearbySaPas;
@@ -136,6 +142,8 @@ namespace VerticalPlayer.Dashcam
             sb.AppendLine($"【ルート/データ件数】 {DebugCountsText.Text}");
             sb.AppendLine("【フラグ】");
             sb.AppendLine(DebugFlagsText.Text);
+            if (!string.IsNullOrEmpty(DebugErrorText.Text))
+                sb.AppendLine(DebugErrorText.Text);
             sb.AppendLine();
 
             sb.AppendLine("--- 近傍のトンネル候補 ---");

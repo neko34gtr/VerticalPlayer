@@ -53,6 +53,12 @@
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock x:Name="SaPaNameText" Foreground="White" FontSize="16" FontWeight="Bold"/>
                         <TextBlock x:Name="SaPaDistanceText" Foreground="White" FontSize="12" Opacity="0.9"/>
+                        <!-- ここから追加 -->
+                        <Border x:Name="SaPaWarningBorder" Background="#F2FFFFFF" CornerRadius="3" Padding="6,1" Margin="0,4,0,0"
+                                HorizontalAlignment="Left" Visibility="Collapsed">
+                            <TextBlock x:Name="SaPaWarningText" Foreground="#FFD40000" FontSize="13" FontWeight="Bold"/>
+                        </Border>
+                        <!-- ここまで -->
                     </StackPanel>
                 </StackPanel>
             </Border>

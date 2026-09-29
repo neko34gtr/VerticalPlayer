@@ -384,7 +384,8 @@ namespace VerticalPlayer
             HwAccelCheck.IsChecked = s.HwAccel;
             AudioBackendCombo.SelectedIndex = Enum.TryParse<VerticalPlayer.AudioBackendKind>(s.AudioBackend, out var restoredBackend)
                 ? (int)restoredBackend : 0;
-            PrefetchCheck.IsChecked = s.PacketPrefetch;
+            // ❗【今回変更】パケット先読みは常時ON固定にし、設定からは排除した（OFF時の分岐も廃止）。
+            Player.PacketPrefetch = true;
             FpsCounterCheck.IsChecked = s.ShowFpsCounter;
             ActualFpsLabel.Visibility = s.ShowFpsCounter ? Visibility.Visible : Visibility.Collapsed;
 
@@ -568,7 +569,6 @@ namespace VerticalPlayer
                 Rotation = _currentRotation,
                 HwAccel = HwAccelCheck.IsChecked ?? false,
                 AudioBackend = (AudioBackendCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "XAudio2",
-                PacketPrefetch = PrefetchCheck.IsChecked ?? false,
                 ShowFpsCounter = FpsCounterCheck.IsChecked ?? true,
                 TrtCacheBackupDir = string.IsNullOrWhiteSpace(TrtCacheBackupDirBox.Text)
                     ? null : TrtCacheBackupDirBox.Text.Trim(),
@@ -1558,25 +1558,13 @@ namespace VerticalPlayer
 
         // ─────────────────────────────────────────────────────────────────
         // パケット先読み（Stage1: Demux/Decode分離パイプライン）
+        // ❗【今回変更】常時ON固定にした。設定・チェックボックスからは排除し、OFF時の分岐は廃止。
+        // XAML側にまだPrefetchCheck/Prefetch_Changedの記述が残っている場合は、あわせて削除してください
+        // （このメソッド自体は、削除し忘れたXAML側のイベント接続を壊さないよう残してあるだけの空実装）。
         // ─────────────────────────────────────────────────────────────────
         private void Prefetch_Changed(object sender, RoutedEventArgs e)
         {
-            Player.PacketPrefetch = PrefetchCheck.IsChecked ?? false;
-
-            if (Player.Source != null)
-            {
-                var pos = Player.Position;
-                bool wasPlaying = _isPlaying;
-                var src = Player.Source;
-                Trace($"Prefetch_Changed: requested={Player.PacketPrefetch} - 現在のファイルを再オープンして即時反映 pos={pos}");
-                Player.Source = src;
-                Player.Position = pos;
-                if (wasPlaying) { Player.Play(); _isPlaying = true; } else { _isPlaying = false; }
-            }
-            else
-            {
-                Trace($"Prefetch_Changed: requested={Player.PacketPrefetch}（次に開くファイルから適用）");
-            }
+            Player.PacketPrefetch = true;
         }
 
         // コントロールバーの[H/W]/[S/W]ボタン：設定パネルのチェックボックスをトグルするだけで、

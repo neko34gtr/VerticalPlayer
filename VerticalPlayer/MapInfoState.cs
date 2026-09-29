@@ -28,6 +28,12 @@ namespace VerticalPlayer.Dashcam
         /// <summary>次のSA/PAまでの残り距離（km、道なり）。</summary>
         public double NextSaPaDistanceKm { get; set; }
 
+        /// <summary>次のSA/PAが走行中の車道の反対側（対向車線側）にあり、利用できない可能性が高いか。</summary>
+        public bool NextSaPaIsOppositeSide { get; set; }
+
+        /// <summary>反対側の場合に赤字で出す注意文（例: "(下りは利用出来ません!)"）。反対側でなければ空文字。</summary>
+        public string NextSaPaWarningText { get; set; } = string.Empty;
+
         /// <summary>前方に接近中のトンネルがあるか（例: 1km以内）。falseの場合、他のトンネル関連
         /// プロパティは無効値（既定値）。</summary>
         public bool HasUpcomingTunnel { get; set; }

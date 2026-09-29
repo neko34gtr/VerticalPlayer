@@ -1882,6 +1882,64 @@ namespace VerticalPlayer.Dashcam
             _isPlaying = !_isPlaying;
         }
 
+        // ここから追加
+        // ---- コマ送り / コマ戻し ----
+        // 1フレームの長さ。ドラレコ(30fps)前提の固定値。fpsが違う動画では送り量が変わる。
+        private const double FrameStepSeconds = 1.0 / 30.0;
+        private bool _frameStepBusy;
+        private TimeSpan _frameStepPos; // 連続コマ送り時に位置がぶれないよう、送り基準位置を自前で保持する
+        private bool _frameStepPosValid;
+
+        private async void FrameStepBackButton_Click(object sender, RoutedEventArgs e) => await StepFrameAsync(-1);
+        private async void FrameStepForwardButton_Click(object sender, RoutedEventArgs e) => await StepFrameAsync(+1);
+
+        private async Task StepFrameAsync(int direction)
+        {
+            if (_isStopped || _frameStepBusy || _isDragging) return;
+            if (PlayerFront.Source == null || !PlayerFront.NaturalDuration.HasTimeSpan) return;
+
+            _frameStepBusy = true;
+            try
+            {
+                if (_isPlaying)
+                {
+                    PlayerFront.Pause();
+                    PlayerRear.Pause();
+                    _isPlaying = false;
+                    _wantsPlaying = false;
+                    SetPlayPauseIcon(false);
+                }
+
+                var step = TimeSpan.FromSeconds(FrameStepSeconds);
+                var dur = PlayerFront.NaturalDuration.TimeSpan;
+
+                // 再生やシークで位置が大きく動いていたら、現在位置を基準に取り直す
+                var basePos = PlayerFront.Position;
+                if (!_frameStepPosValid || (basePos - _frameStepPos).Duration() > TimeSpan.FromSeconds(0.25))
+                    _frameStepPos = basePos;
+
+                var next = _frameStepPos + TimeSpan.FromTicks(step.Ticks * direction);
+                var last = dur - step;
+                if (last < TimeSpan.Zero) last = TimeSpan.Zero;
+                if (next < TimeSpan.Zero) next = TimeSpan.Zero;
+                if (next > last) next = last;
+
+                _frameStepPos = next;
+                _frameStepPosValid = true;
+
+                // 半フレーム先へ着地させ、丸め誤差で前のフレームに落ちるのを防ぐ
+                var seekTarget = next + TimeSpan.FromTicks(step.Ticks / 2);
+                await PlayerFront.StepToVideoOnlyAsync(seekTarget, timeoutMs: 1000);
+                await SeekRearToFrontPositionAsync(next);
+                AccelChart.SetPlayhead(next);
+            }
+            finally
+            {
+                _frameStepBusy = false;
+            }
+        }
+        // ここまで
+
         private void StopButton_Click(object sender, RoutedEventArgs e) => StopPlayback(keepCurrent: true);
 
         private void VolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -2089,11 +2147,26 @@ namespace VerticalPlayer.Dashcam
 
         private void RearZoomCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => ApplyRearPipSize();
 
-        /// <summary>【今回追加】リア時間オフセット変更時: 現在のFront位置に対してリアを即座に再同期する。</summary>
-        private void RearTimeOffsetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        /// <summary> リア時間オフセット変更時: 現在のFront位置に対してリアを即座に再同期する。</summary>
+        private async void RearTimeOffsetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (PlayerFront == null) return;
-            _ = SeekRearToFrontPositionAsync(PlayerFront.Position);
+            try
+            {
+                await SeekRearToFrontPositionAsync(PlayerFront.Position);
+
+                // 同一clip内の再同期はStepToVideoOnlyAsync（フレーム合わせのみ）で終わり、リアが停止したまま
+                // になっていた（リア表示をOFF→ONするとUpdateRearPipVisibilityがPlayして動き出すのはこのため）。
+                // Front再生中でリアが表示可能なら、ここで再開する。別clipへの切替時はLoadRearClipが
+                // _rearAvailable=falseにするのでここでは再生せず、MediaOpened側が_wantsPlayingを見て再生する。
+                // 再開後の細かなズレは、毎フレームのリア再同期（RearResync）が補正する。
+                if (_wantsPlaying && RearVisibleCheck.IsChecked == true && _rearAvailable)
+                    PlayerRear.Play();
+            }
+            catch (Exception ex)
+            {
+                DashcamPlayErrorLogger.Log($"[RearTimeOffset] 再同期に失敗: {ex.Message}");
+            }
         }
 
         private void RearPipBorder_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)

@@ -141,6 +141,7 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
                         <!-- 上部ヘッダー（説明文 ＋ 一括コピーボタン） -->
@@ -181,7 +182,6 @@
                                 </StackPanel>
                             </Border>
                         </UniformGrid>
-
                         <Grid Grid.Row="2">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
@@ -237,6 +237,14 @@
                                 </DataGrid>
                             </Grid>
                         </Grid>
+
+                        <!-- 取得エラー（あれば）。以前はフラグ欄に追記していたため、行が増えるたびに
+                             データグリッド部分が圧迫されていた。グリッドの下の独立行に分離。
+                             表示/非表示はコード側(UpdateDebugSnapshot)でVisibilityを切り替える。 -->
+                        <Border x:Name="DebugErrorBorder" Grid.Row="3" Margin="0,10,0,0" Padding="8,6" Background="{StaticResource BgCard}"
+                                BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="4" Visibility="Collapsed">
+                            <TextBlock x:Name="DebugErrorText" Foreground="#FF6B6B" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap"/>
+                        </Border>
                     </Grid>
                 </TabItem>
 

@@ -318,6 +318,14 @@
                     <Button x:Name="StopButton" Content="&#xE71A;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="18"
                             Width="44" Height="38" Style="{StaticResource IconBtn}" Click="StopButton_Click" Margin="0,0,10,0"
                             ToolTip="停止（映像を閉じます。再生ボタンで先頭から再生し直します）"/>
+                    <!-- ここから追加 -->
+                    <Button x:Name="FrameStepBackButton" Content="&#xE76B;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16"
+                            Width="36" Height="38" Style="{StaticResource IconBtn}" Click="FrameStepBackButton_Click" Margin="0,0,2,0"
+                            ToolTip="コマ戻し（1フレーム戻る。再生中は一時停止します）"/>
+                    <Button x:Name="FrameStepForwardButton" Content="&#xE76C;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16"
+                            Width="36" Height="38" Style="{StaticResource IconBtn}" Click="FrameStepForwardButton_Click" Margin="0,0,10,0"
+                            ToolTip="コマ送り（1フレーム進む。再生中は一時停止します）"/>
+                    <!-- ここまで -->
                     <Button x:Name="PrevSceneButton" Content="◀◀ 前のシーン" Style="{StaticResource SecondaryBtn}" Click="PrevSceneButton_Click" Margin="0,0,6,0"
                             ToolTip="Frontリストの前のグループへ戻る"/>
                     <Button x:Name="NextSceneButton" Content="次のシーン ▶▶" Style="{StaticResource SecondaryBtn}" Click="NextSceneButton_Click" Margin="0,0,10,0"

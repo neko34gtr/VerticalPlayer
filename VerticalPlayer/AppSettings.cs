@@ -86,7 +86,7 @@ namespace VerticalPlayer
         public double Rotation { get; set; }
         public bool HwAccel { get; set; } = true;
         public string AudioBackend { get; set; } = "XAudio2"; // AudioBackendKindのenum名をそのまま保存
-        public bool PacketPrefetch { get; set; } // 新機能のため既定はOFF（動作確認が済むまでは明示的にONにしてもらう）
+        // ❗【今回削除】PacketPrefetchは常時ON固定になったため設定から排除した。
         public bool ShowFpsCounter { get; set; } = true;
 
         /// <summary>TensorRTキャッシュ(trtcache)の永続バックアップ先。未指定(null/空)の場合は

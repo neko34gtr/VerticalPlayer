@@ -96,6 +96,12 @@ namespace VerticalPlayer.Dashcam
                 SaPaTypeText.Text = state.NextSaPaType;
                 SaPaNameText.Text = state.NextSaPaName;
                 SaPaDistanceText.Text = "この先 " + state.NextSaPaDistanceKm.ToString("F1", CultureInfo.InvariantCulture) + " km";
+
+                // ここから追加：走行車線の反対側のSA/PAは赤字で注意を出す
+                bool warn = state.NextSaPaIsOppositeSide && !string.IsNullOrEmpty(state.NextSaPaWarningText);
+                SaPaWarningBorder.Visibility = warn ? Visibility.Visible : Visibility.Collapsed;
+                if (warn) SaPaWarningText.Text = state.NextSaPaWarningText;
+                // ここまで
             }
 
             TunnelCard.Visibility = state.HasUpcomingTunnel ? Visibility.Visible : Visibility.Collapsed;
