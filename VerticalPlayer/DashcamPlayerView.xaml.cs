@@ -1884,14 +1884,72 @@ namespace VerticalPlayer.Dashcam
 
         // ここから追加
         // ---- コマ送り / コマ戻し ----
-        // 1フレームの長さ。ドラレコ(30fps)前提の固定値。fpsが違う動画では送り量が変わる。
-        private const double FrameStepSeconds = 1.0 / 30.0;
+        // 1フレームの長さ。動画情報(MediaInfoNative)から取れた実fpsを使い、取れない場合は30fpsとみなす。
+        private const double FallbackFrameStepSeconds = 1.0 / 30.0;
+        private double FrameStepSeconds
+        {
+            get
+            {
+                double fps = _mediaInfo is { Success: true } ? _mediaInfo.VideoFrameRate : 0;
+                return fps is > 1 and < 240 ? 1.0 / fps : FallbackFrameStepSeconds;
+            }
+        }
         private bool _frameStepBusy;
         private TimeSpan _frameStepPos; // 連続コマ送り時に位置がぶれないよう、送り基準位置を自前で保持する
         private bool _frameStepPosValid;
 
-        private async void FrameStepBackButton_Click(object sender, RoutedEventArgs e) => await StepFrameAsync(-1);
-        private async void FrameStepForwardButton_Click(object sender, RoutedEventArgs e) => await StepFrameAsync(+1);
+        // 1回に進めるコマ数（30fps換算）。1コマ(約0.03秒)では動きが小さく何度も押す必要があったため選べるようにした。
+        private int _frameStepFrames = 3;
+        private DispatcherTimer? _frameStepRepeatTimer;
+        private int _frameStepRepeatDir;
+
+        /// <summary>コマ送り1回あたりのコマ数（1/3/5/10/30）。永続化対象。AppSettings側でintとして保持する想定。</summary>
+        public int FrameStepFramesSetting
+        {
+            get => _frameStepFrames;
+            set
+            {
+                _frameStepFrames = value is 1 or 3 or 5 or 10 or 30 ? value : 3;
+                foreach (ComboBoxItem item in FrameStepAmountCombo.Items)
+                {
+                    if ((string)item.Tag == _frameStepFrames.ToString()) { FrameStepAmountCombo.SelectedItem = item; break; }
+                }
+            }
+        }
+
+        private void FrameStepAmountCombo_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (FrameStepAmountCombo.SelectedItem is ComboBoxItem item && int.TryParse((string)item.Tag, out var n))
+                _frameStepFrames = n;
+        }
+
+        // ボタンを押した瞬間に1回進め、押し続けている間は一定間隔で繰り返す（0.4秒後から約0.09秒ごと）。
+        // 前の送りが終わっていないときはStepFrameAsync側(_frameStepBusy)で読み飛ばすため、デコードが追いつかなくても溜まらない。
+        private void FrameStepButton_Down(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            if (sender is not Button b || !int.TryParse((string)b.Tag, out int dir)) return;
+            _frameStepRepeatDir = dir;
+            _ = StepFrameAsync(dir);
+
+            if (_frameStepRepeatTimer == null)
+            {
+                _frameStepRepeatTimer = new DispatcherTimer(DispatcherPriority.Input);
+                _frameStepRepeatTimer.Tick += FrameStepRepeatTimer_Tick;
+            }
+            _frameStepRepeatTimer.Interval = TimeSpan.FromMilliseconds(400);
+            _frameStepRepeatTimer.Start();
+        }
+
+        private void FrameStepRepeatTimer_Tick(object? sender, EventArgs e)
+        {
+            if (_frameStepRepeatTimer != null) _frameStepRepeatTimer.Interval = TimeSpan.FromMilliseconds(90);
+            _ = StepFrameAsync(_frameStepRepeatDir);
+        }
+
+        private void FrameStepButton_Up(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            _frameStepRepeatTimer?.Stop();
+        }
 
         private async Task StepFrameAsync(int direction)
         {
@@ -1910,16 +1968,17 @@ namespace VerticalPlayer.Dashcam
                     SetPlayPauseIcon(false);
                 }
 
-                var step = TimeSpan.FromSeconds(FrameStepSeconds);
+                var oneFrame = TimeSpan.FromSeconds(FrameStepSeconds);
+                var step = TimeSpan.FromTicks(oneFrame.Ticks * _frameStepFrames);
                 var dur = PlayerFront.NaturalDuration.TimeSpan;
 
                 // 再生やシークで位置が大きく動いていたら、現在位置を基準に取り直す
                 var basePos = PlayerFront.Position;
-                if (!_frameStepPosValid || (basePos - _frameStepPos).Duration() > TimeSpan.FromSeconds(0.25))
+                if (!_frameStepPosValid || (basePos - _frameStepPos).Duration() > step + TimeSpan.FromSeconds(0.25))
                     _frameStepPos = basePos;
 
                 var next = _frameStepPos + TimeSpan.FromTicks(step.Ticks * direction);
-                var last = dur - step;
+                var last = dur - oneFrame;
                 if (last < TimeSpan.Zero) last = TimeSpan.Zero;
                 if (next < TimeSpan.Zero) next = TimeSpan.Zero;
                 if (next > last) next = last;
@@ -1928,7 +1987,7 @@ namespace VerticalPlayer.Dashcam
                 _frameStepPosValid = true;
 
                 // 半フレーム先へ着地させ、丸め誤差で前のフレームに落ちるのを防ぐ
-                var seekTarget = next + TimeSpan.FromTicks(step.Ticks / 2);
+                var seekTarget = next + TimeSpan.FromTicks(oneFrame.Ticks / 2);
                 await PlayerFront.StepToVideoOnlyAsync(seekTarget, timeoutMs: 1000);
                 await SeekRearToFrontPositionAsync(next);
                 AccelChart.SetPlayhead(next);
@@ -1960,7 +2019,31 @@ namespace VerticalPlayer.Dashcam
             }
         }
 
-        private void ScreenshotButton_Click(object sender, RoutedEventArgs e)
+        private ScreenshotFormat _screenshotFormat = ScreenshotFormat.Jpg;
+
+        /// <summary>スクリーンショットの保存形式。永続化対象。AppSettings側では文字列(enum名)で保持する想定。</summary>
+        public string ScreenshotFormatSetting
+        {
+            get => _screenshotFormat.ToString();
+            set
+            {
+                if (!Enum.TryParse<ScreenshotFormat>(value, out var f)) f = ScreenshotFormat.Jpg;
+                _screenshotFormat = f;
+                foreach (ComboBoxItem item in ScreenshotFormatCombo.Items)
+                {
+                    if ((string)item.Tag == f.ToString()) { ScreenshotFormatCombo.SelectedItem = item; break; }
+                }
+            }
+        }
+
+        private void ScreenshotFormatCombo_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (ScreenshotFormatCombo.SelectedItem is ComboBoxItem item
+                && Enum.TryParse<ScreenshotFormat>((string)item.Tag, out var f))
+                _screenshotFormat = f;
+        }
+
+        private async void ScreenshotButton_Click(object sender, RoutedEventArgs e)
         {
             if (_currentFrontGroup?.FrontVideoPath == null || _isStopped)
             {
@@ -1969,27 +2052,37 @@ namespace VerticalPlayer.Dashcam
                 return;
             }
 
+            ScreenshotButton.IsEnabled = false; // AVIFは数秒かかることがあるため、保存中の二重押しを防ぐ
             try
             {
                 int w = (int)Math.Max(1, PlayerFront.ActualWidth);
                 int h = (int)Math.Max(1, PlayerFront.ActualHeight);
                 var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
                 rtb.Render(PlayerFront);
+                rtb.Freeze(); // 別スレッドでエンコードするため
 
                 string dir = Path.Combine(AppContext.BaseDirectory, "Screenshots");
-                Directory.CreateDirectory(dir);
-                string fileName = $"{_currentFrontGroup.TimestampKey}_{PlayerFront.Position:hh\\-mm\\-ss\\-fff}.png";
-                string path = Path.Combine(dir, fileName);
+                // ファイル名は「撮影した現在日時_VPSC」（同じ秒に複数撮った場合は _2, _3 を付ける）
+                string baseName = $"{DateTime.Now:yyyyMMdd_HHmmss}_VPSC";
+                var format = _screenshotFormat;
 
-                using var fs = new FileStream(path, FileMode.Create);
-                var encoder = new PngBitmapEncoder();
-                encoder.Frames.Add(BitmapFrame.Create(rtb));
-                encoder.Save(fs);
+                string? note = null;
+                await Task.Run(() => ScreenshotEncoder.Save(rtb, dir, baseName, format, out note));
+
+                if (note != null)
+                {
+                    AppMessageBox.Show(Window.GetWindow(this), note,
+                        "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Information, isDarkMode: true);
+                }
             }
             catch (Exception ex)
             {
                 AppMessageBox.Show(Window.GetWindow(this), $"スクリーンショットの保存に失敗しました。\n{ex.Message}",
                     "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Warning, isDarkMode: true);
+            }
+            finally
+            {
+                ScreenshotButton.IsEnabled = true;
             }
         }
 

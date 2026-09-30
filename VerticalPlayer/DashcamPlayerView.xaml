@@ -130,6 +130,28 @@
                           Checked="SpeedOsdCheck_Changed" Unchecked="SpeedOsdCheck_Changed" Margin="0,0,16,0"
                           ToolTip="映像の右上に走行速度を大きく表示"/>
 
+                <!-- スクリーンショットの保存形式とコマ送りの量 -->
+                <TextBlock Text="撮影形式" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox x:Name="ScreenshotFormatCombo" Width="80" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
+                          SelectionChanged="ScreenshotFormatCombo_Changed" SelectedIndex="1"
+                          ToolTip="スクリーンショットの保存形式（ファイル名は 日時_VPSC）。WebP/AVIFは使用中のFFmpegが対応している場合のみ。非対応ならJPGで保存します">
+                    <ComboBoxItem Content="PNG" Tag="Png"/>
+                    <ComboBoxItem Content="JPG" Tag="Jpg"/>
+                    <ComboBoxItem Content="WebP" Tag="WebP"/>
+                    <ComboBoxItem Content="AVIF" Tag="Avif"/>
+                </ComboBox>
+
+                <TextBlock Text="コマ送り量" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox x:Name="FrameStepAmountCombo" Width="90" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
+                          SelectionChanged="FrameStepAmountCombo_Changed" SelectedIndex="1"
+                          ToolTip="コマ送りボタン1回あたりに進むコマ数（動画の実fps基準。30fpsなら30コマ＝約1秒）">
+                    <ComboBoxItem Content="1コマ" Tag="1"/>
+                    <ComboBoxItem Content="3コマ" Tag="3"/>
+                    <ComboBoxItem Content="5コマ" Tag="5"/>
+                    <ComboBoxItem Content="10コマ" Tag="10"/>
+                    <ComboBoxItem Content="30コマ" Tag="30"/>
+                </ComboBox>
+
                 <!-- 地図情報通知（地名・SA/PA・トンネル・利用中の道路名）の表示位置とサイズ -->
                 <TextBlock Text="地図位置" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <ComboBox x:Name="MapInfoCornerCombo" Width="90" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
@@ -320,12 +342,13 @@
                             ToolTip="停止（映像を閉じます。再生ボタンで先頭から再生し直します）"/>
                     <!-- ここから追加 -->
                     <Button x:Name="FrameStepBackButton" Content="&#xE76B;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16"
-                            Width="36" Height="38" Style="{StaticResource IconBtn}" Click="FrameStepBackButton_Click" Margin="0,0,2,0"
-                            ToolTip="コマ戻し（1フレーム戻る。再生中は一時停止します）"/>
+                            Width="36" Height="38" Style="{StaticResource IconBtn}" Margin="0,0,2,0" Tag="-1"
+                            PreviewMouseLeftButtonDown="FrameStepButton_Down" PreviewMouseLeftButtonUp="FrameStepButton_Up" LostMouseCapture="FrameStepButton_Up"
+                            ToolTip="コマ戻し（押しっぱなしで連続。再生中は一時停止します。量は下の「コマ送り量」で変更）"/>
                     <Button x:Name="FrameStepForwardButton" Content="&#xE76C;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16"
-                            Width="36" Height="38" Style="{StaticResource IconBtn}" Click="FrameStepForwardButton_Click" Margin="0,0,10,0"
-                            ToolTip="コマ送り（1フレーム進む。再生中は一時停止します）"/>
-                    <!-- ここまで -->
+                            Width="36" Height="38" Style="{StaticResource IconBtn}" Margin="0,0,10,0" Tag="1"
+                            PreviewMouseLeftButtonDown="FrameStepButton_Down" PreviewMouseLeftButtonUp="FrameStepButton_Up" LostMouseCapture="FrameStepButton_Up"
+                            ToolTip="コマ送り（押しっぱなしで連続。再生中は一時停止します。量は下の「コマ送り量」で変更）"/>
                     <Button x:Name="PrevSceneButton" Content="◀◀ 前のシーン" Style="{StaticResource SecondaryBtn}" Click="PrevSceneButton_Click" Margin="0,0,6,0"
                             ToolTip="Frontリストの前のグループへ戻る"/>
                     <Button x:Name="NextSceneButton" Content="次のシーン ▶▶" Style="{StaticResource SecondaryBtn}" Click="NextSceneButton_Click" Margin="0,0,10,0"

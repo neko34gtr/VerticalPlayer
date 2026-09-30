@@ -42,6 +42,10 @@ namespace VerticalPlayer
         /// <summary>ドラレコモードの車速OSD（映像右上の走行速度表示）のON/OFF。</summary>
         public bool EnableOSD { get; set; } = true;
         public string MapInfoCorner { get; set; } = "BottomLeft"; // Dashcam.MapInfoCornerのenum名をそのまま保存
+        /// <summary>スクリーンショットの保存形式（Media.ScreenshotFormatのenum名: Png/Jpg/WebP/Avif）。</summary>
+        public string ScreenshotFormat { get; set; } = "Jpg";
+        /// <summary>ドラレコのコマ送り1回あたりのコマ数（1/3/5/10/30）。</summary>
+        public int DashcamFrameStepFrames { get; set; } = 3;
         public double MapInfoScale { get; set; } = 1.0;
         /// <summary>再生中、無操作でマウスカーソルを隠すまでの時間(秒)。0以下で無効。</summary>
         public double CursorHideDelaySec { get; set; } = 2.5;

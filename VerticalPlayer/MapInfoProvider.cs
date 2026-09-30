@@ -74,8 +74,9 @@ namespace VerticalPlayer.Dashcam
 
         // ── IC/JCTゲート（IsOnExpressway切替のジッター対策）用の定数 ──
         private const double StaleRouteDistanceKm = 3.0; // 現在地が保持中ルートからこれ以上離れていたら「別地域の旧データ」とみなす
+        private static int _preferredMirror; // 直近で成功したミラーの添字
         private static readonly TimeSpan MainQueryPerMirrorTimeout = TimeSpan.FromSeconds(30); // 本体クエリ用。道路ジオメトリ込みで重く、8秒では毎回打ち切られてしまう（サーバー側timeout:25＋余裕）
-        private static readonly TimeSpan PerMirrorTimeout = TimeSpan.FromSeconds(12); // ミラー1件あたりの見切りタイムアウト（HttpClient.Timeout全体ではなく、これで素早く次へ回す）
+        private static readonly TimeSpan PerMirrorTimeout = TimeSpan.FromSeconds(25); // 補助クエリ用（サーバー側timeout:20＋余裕） // ミラー1件あたりの見切りタイムアウト（HttpClient.Timeout全体ではなく、これで素早く次へ回す）
         private static readonly TimeSpan FetchDebounceDelay = TimeSpan.FromMilliseconds(700); // 手動シーク連打で毎回すぐ通信を始めないための待ち合わせ
         private const double MotorwayLinkGateRadiusKm = 0.25; // この距離以内をIC/JCTランプ通過とみなす
         private static readonly TimeSpan MotorwayLinkGateWindow = TimeSpan.FromSeconds(30); // ランプ通過後、切替を許可する猶予時間
@@ -121,6 +122,7 @@ namespace VerticalPlayer.Dashcam
         private const double MinBearingSampleMeters = 8.0;           // Heading再計算に使う最小移動量
         private const double HeadingLockSpeedKmh = 3.0;              // これ未満の速度ではHeadingをロック
         private const double HighwayCandidateSpacingKm = 0.06;       // 道路候補点の間隔（約60m）
+        private const double GpsLostKeepSeconds = 600.0;            // 高速走行中のGPSロストでも表示を維持する最大秒数
         private const double ZeroCandidatesReleaseSeconds = 20.0;    // 道路候補0件がこの秒数続いたら高速/道路名を解除する
         private const double BboxPaddingDeg = 0.03;                  // 約3km相当の余白（トンネル入口が測位断続範囲の外に出るのを防ぐ）
         // seek判定用。VideoOffsetは連結ルートのローカル座標で、ファイル切替のたびに0起点で
@@ -143,30 +145,63 @@ namespace VerticalPlayer.Dashcam
         private static SocketsHttpHandler CreateHandler() => new()
         {
             AutomaticDecompression = DecompressionMethods.All,
-            ConnectTimeout = TimeSpan.FromSeconds(15),
+            ConnectTimeout = TimeSpan.FromSeconds(20),
             ConnectCallback = async (ctx, ct) =>
             {
                 var addrs = await Dns.GetHostAddressesAsync(ctx.DnsEndPoint.Host, ct).ConfigureAwait(false);
-                var ordered = addrs.OrderBy(a => a.AddressFamily == AddressFamily.InterNetwork ? 0 : 1).ToArray();
-                Exception? last = null;
-                foreach (var addr in ordered)
+                // IPv6とIPv4を交互に並べ、0.3秒ずつずらして並行に接続を試みる。最初に繋がったものを使う。
+                // （片方が到達不能でも待たされない。ブラウザと同じ考え方）
+                var v6 = addrs.Where(a => a.AddressFamily == AddressFamily.InterNetworkV6).ToList();
+                var v4 = addrs.Where(a => a.AddressFamily == AddressFamily.InterNetwork).ToList();
+                var ordered = new List<IPAddress>();
+                for (int i = 0; i < Math.Max(v6.Count, v4.Count); i++)
                 {
+                    if (i < v6.Count) ordered.Add(v6[i]);
+                    if (i < v4.Count) ordered.Add(v4[i]);
+                }
+
+                var winnerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                async Task<Socket> TryConnect(IPAddress addr, int delayMs)
+                {
+                    if (delayMs > 0) await Task.Delay(delayMs, winnerCts.Token).ConfigureAwait(false);
                     var socket = new Socket(addr.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
                     try
                     {
-                        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                        cts.CancelAfter(TimeSpan.FromSeconds(5));
+                        using var cts = CancellationTokenSource.CreateLinkedTokenSource(winnerCts.Token);
+                        cts.CancelAfter(TimeSpan.FromSeconds(10));
                         await socket.ConnectAsync(new IPEndPoint(addr, ctx.DnsEndPoint.Port), cts.Token).ConfigureAwait(false);
+                        return socket;
+                    }
+                    catch
+                    {
+                        socket.Dispose();
+                        throw;
+                    }
+                }
+
+                var pending = new List<Task<Socket>>();
+                for (int i = 0; i < ordered.Count; i++) pending.Add(TryConnect(ordered[i], i * 300));
+
+                Exception? last = null;
+                while (pending.Count > 0)
+                {
+                    var done = await Task.WhenAny(pending).ConfigureAwait(false);
+                    pending.Remove(done);
+                    try
+                    {
+                        var socket = await done.ConfigureAwait(false);
+                        winnerCts.Cancel();
+                        foreach (var p in pending)
+                            _ = p.ContinueWith(x => { if (x.IsCompletedSuccessfully) x.Result.Dispose(); }, TaskScheduler.Default);
                         return new NetworkStream(socket, ownsSocket: true);
                     }
                     catch (Exception ex)
                     {
-                        socket.Dispose();
                         last = ex;
                         ct.ThrowIfCancellationRequested();
                     }
                 }
-                throw new HttpRequestException($"接続失敗: {ctx.DnsEndPoint.Host} (試行アドレス数={ordered.Length})", last);
+                throw new HttpRequestException($"接続失敗: {ctx.DnsEndPoint.Host} (試行アドレス数={ordered.Count})", last);
             },
         };
         // ここまで
@@ -405,6 +440,9 @@ namespace VerticalPlayer.Dashcam
             string cacheKey = string.Create(CultureInfo.InvariantCulture,
                 $"{minLat:F2},{minLng:F2},{maxLat:F2},{maxLng:F2}");
 
+            // ここから変更：取得範囲をbbox全体ではなく「ルート沿いの帯」だけに絞り、1回の軽いリクエストで
+            // 全部（トンネル・SA/PA・道路・ランプ）を取る。以前はbbox全域＋補助2リクエスト＋タイル分割で
+            // 大量のリクエストが並び、Overpass側の待ち行列とレート制限(429)で全部が遅くなっていた。
             OverpassBundle? newBundle = null;
             if (RouteCache.TryGetValue(cacheKey, out var cached))
             {
@@ -415,40 +453,31 @@ namespace VerticalPlayer.Dashcam
             {
                 try
                 {
-                    // ❗【今回追加】手動シークの連打で毎回すぐ通信を始めると、前の試行がキャンセルされる
-                    // だけで、後続の試行も次々にキャンセルされ続け、いつまで経っても1件も完走しない
-                    // 状態になっていた（実機ログで確認）。少し待ち合わせて、その間に後続のLoadRouteAsync
-                    // が来たら（＝呼び出し元がctをキャンセルする）ここで大人しく終了する。位置が落ち着いた
-                    // 最後の1回だけが実際に通信する。
                     await Task.Delay(FetchDebounceDelay, ct).ConfigureAwait(false);
-
-                    newBundle = await FetchOverpassAsync(minLat, minLng, maxLat, maxLng, ct).ConfigureAwait(false);
-                    // 補助クエリ(ランプ/SA-PA名)が504等で欠けた不完全なbundleはキャッシュしない
-                    // （キャッシュすると再起動までずっと欠けたまま使い回してしまい、次のファイル切替で再取得できない）。
-                    if (newBundle.IsComplete) RouteCache[cacheKey] = newBundle;
-                    _mainFetchError = null;
-                    TraceMap($"LoadRouteAsync bbox={cacheKey} 新規取得成功{(newBundle.IsComplete ? "" : "(補助クエリ欠け・キャッシュせず)")} tunnel={newBundle.Tunnels.Count} SAPA={newBundle.SaPas.Count} road={newBundle.Highways.Count} link={newBundle.MotorwayLinks.Count}");
+                    // 取得本体は呼び出し側のキャンセルに巻き込まれず最後まで走る（待つ側だけキャンセルされる）
+                    newBundle = await GetCorridorAsync(cacheKey, newRoute).WaitAsync(ct).ConfigureAwait(false);
+                    if (newBundle != null)
+                    {
+                        _mainFetchError = null;
+                        TraceMap($"LoadRouteAsync bbox={cacheKey} 取得成功 tunnel={newBundle.Tunnels.Count} SAPA={newBundle.SaPas.Count} road={newBundle.Highways.Count} link={newBundle.MotorwayLinks.Count}");
+                    }
+                    else
+                    {
+                        TraceMap($"LoadRouteAsync bbox={cacheKey} 取得できず（直前のbundleを維持し、裏で再試行）");
+                    }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    // ❗【今回修正】ファイル切替等で後続のLoadRouteAsyncに置き換えられた（=呼び出し元がCancelした）
-                    // 古い読み込みは「取得失敗」ではない。以前はここも下のcatch(Exception)に落ちて、
-                    // そのまま古いroute(newRoute)で_routeを上書きしてしまい、後から始まった新しい読み込みの
-                    // routeを潰す競合が起きていた（情報一覧に「本体:TaskCanceledException: A task was
-                    // canceled.」が出ていたもの）。状態は一切変更せず、そのままキャンセルとして終了する。
-                    TraceMap($"LoadRouteAsync bbox={cacheKey} キャンセル（後続の読み込みに置換）→状態を変更せず終了");
+                    TraceMap($"LoadRouteAsync bbox={cacheKey} 待機をキャンセル（後続の読み込みに置換。取得は継続）→状態を変更せず終了");
                     throw;
                 }
                 catch (Exception ex)
                 {
-                    // 【要件4】ネットワークエラー・タイムアウト時は例外を投げず、直前のbundleを
-                    // そのまま使い続ける（ここでEmptyに差し替えると、通信が一時的に不安定なだけで
-                    // 既に取得済みのトンネル/SA-PA情報まで失われてしまう）。
                     _mainFetchError = $"{ex.GetType().Name}: {ex.Message}";
-                    TraceMap($"LoadRouteAsync bbox={cacheKey} 取得失敗: {_mainFetchError}（直前のbundleを維持: tunnel={_bundle.Tunnels.Count} SAPA={_bundle.SaPas.Count} road={_bundle.Highways.Count}）");
-                    System.Diagnostics.Debug.WriteLine($"[MapInfoProvider] Overpass取得失敗（直前のデータを維持して続行）: {ex.Message}");
+                    TraceMap($"LoadRouteAsync bbox={cacheKey} 取得失敗: {_mainFetchError}（直前のbundleを維持）");
                 }
             }
+            // ここまで
 
             ct.ThrowIfCancellationRequested();
 
@@ -469,9 +498,13 @@ namespace VerticalPlayer.Dashcam
                 // （HighwayName/IsOnExpressway）だけが残り続けていた。旧bundleが今のルート付近を
                 // 覆っていない場合は、旧データ由来の表示状態を破棄して空のbundleに戻す。
                 double centerLat = (minLat + maxLat) / 2.0, centerLng = (minLng + maxLng) / 2.0;
+                // ここから変更：窓が前へ進むたびに中心は旧bbox外へ出る。同じ道を走り続けているだけなのに
+                // 毎回「別地域」と誤判定して状態を消していたため、30km(0.3°)以上離れた時だけ別地域とみなす。
+                const double SameRegionMarginDeg = 0.3;
                 bool oldBundleCoversRoute = _bundleBbox is { } b &&
-                    centerLat >= b.MinLat && centerLat <= b.MaxLat &&
-                    centerLng >= b.MinLng && centerLng <= b.MaxLng;
+                    centerLat >= b.MinLat - SameRegionMarginDeg && centerLat <= b.MaxLat + SameRegionMarginDeg &&
+                    centerLng >= b.MinLng - SameRegionMarginDeg && centerLng <= b.MaxLng + SameRegionMarginDeg;
+                // ここまで
                 if (!oldBundleCoversRoute)
                 {
                     TraceMap($"LoadRouteAsync: 取得失敗かつ旧bundleは別地域のため破棄（旧HighwayName=\"{State.HighwayName}\"）");
@@ -487,7 +520,7 @@ namespace VerticalPlayer.Dashcam
             // （ランプ・SA/PA名）が欠けたままの場合は、ファイルを切り替えなくても自動で再取得を試みる。
             // 次のLoadRouteAsyncが始まれば呼び出し元がctをキャンセルするので、そこで自動的に打ち切られる。
             if (newBundle == null || !newBundle.IsComplete)
-                _ = RetryFetchLaterAsync(newRoute, minLat, minLng, maxLat, maxLng, cacheKey, ct);
+                _ = RetryFetchLaterAsync(newRoute, cacheKey, ct);
         }
 
         /// <summary>_bundle（生の地理座標）から、現在のルート折れ線上の累積距離(km)を都度計算し直す。
@@ -552,12 +585,15 @@ namespace VerticalPlayer.Dashcam
         /// <summary>毎フレーム呼ぶ。ネットワーク通信は行わない（地名のNominatimフォールバックのみ、
         /// 見つからなかった場合に限り1回だけ非同期で裏側から発火する。呼び出し元をブロックしない）。
         /// frameがnull（再生停止・ファイル未選択）の場合はオーバーレイを非表示にする。</summary>
-        // 取得失敗時のバックグラウンド再試行の間隔（1回目15秒後、2回目45秒後、3回目120秒後）
+        // 取得失敗時のバックグラウンド再試行の間隔。短い間隔で叩き続けると、公開サーバー側の
+        // レート制限・接続遮断（IP単位）を招き、かえって取れなくなるため、間隔を徐々に空ける。
         private static readonly TimeSpan[] FetchRetryDelays =
-            { TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(120) };
+            { TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(90), TimeSpan.FromMinutes(4), TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(15) };
 
-        private async Task RetryFetchLaterAsync(List<RoutePoint> route, double minLat, double minLng,
-            double maxLat, double maxLng, string cacheKey, CancellationToken ct)
+        private static DateTime _backoffUntilUtc = DateTime.MinValue; // この時刻までネットワーク取得を休止する
+        private static int _consecutiveFullFailures;                  // 全ミラー失敗の連続回数
+
+        private async Task RetryFetchLaterAsync(List<RoutePoint> route, string cacheKey, CancellationToken ct)
         {
             try
             {
@@ -567,40 +603,234 @@ namespace VerticalPlayer.Dashcam
                     // 別のルート（別ファイル/別窓）に置き換わっていたら、このルート向けの再試行は無意味
                     if (!ReferenceEquals(_route, route)) return;
 
-                    OverpassBundle bundle;
-                    if (RouteCache.TryGetValue(cacheKey, out var cached))
-                    {
-                        bundle = cached;
-                    }
-                    else
-                    {
-                        try
-                        {
-                            bundle = await FetchOverpassAsync(minLat, minLng, maxLat, maxLng, ct).ConfigureAwait(false);
-                        }
-                        catch (Exception ex) when (ex is not OperationCanceledException)
-                        {
-                            _mainFetchError = $"{ex.GetType().Name}: {ex.Message}";
-                            TraceMap($"再試行{i + 1}/{FetchRetryDelays.Length} 失敗: {_mainFetchError}");
-                            continue;
-                        }
-                        if (bundle.IsComplete) RouteCache[cacheKey] = bundle;
-                    }
-
-                    ct.ThrowIfCancellationRequested();
+                    var backoffWait = _backoffUntilUtc - DateTime.UtcNow;
+                    if (backoffWait > TimeSpan.Zero) await Task.Delay(backoffWait, ct).ConfigureAwait(false);
                     if (!ReferenceEquals(_route, route)) return;
 
+                    var bundle = await GetCorridorAsync(cacheKey, route).WaitAsync(ct).ConfigureAwait(false);
+                    ct.ThrowIfCancellationRequested();
+                    if (!ReferenceEquals(_route, route)) return;
+                    if (bundle == null)
+                    {
+                        TraceMap($"再試行{i + 1}/{FetchRetryDelays.Length} 失敗");
+                        continue;
+                    }
+
                     _bundle = bundle;
-                    _bundleBbox = (minLat, minLng, maxLat, maxLng);
-                    _mainFetchError = null;
+                    _mainFetchError = bundle.IsComplete ? null : "一部区間が未取得（再試行中）";
                     ProjectBundleOntoRoute();
-                    TraceMap($"再試行{i + 1}/{FetchRetryDelays.Length} 成功{(bundle.IsComplete ? "" : "(補助クエリ欠け)")} tunnel={bundle.Tunnels.Count} SAPA={bundle.SaPas.Count} road={bundle.Highways.Count} link={bundle.MotorwayLinks.Count}");
-                    if (bundle.IsComplete) return; // 補助クエリ欠けなら、次の間隔でもう一度取り直す
+                    TraceMap($"再試行{i + 1}/{FetchRetryDelays.Length} {(bundle.IsComplete ? "成功" : "一部成功")} tunnel={bundle.Tunnels.Count} SAPA={bundle.SaPas.Count} road={bundle.Highways.Count} link={bundle.MotorwayLinks.Count}");
+                    if (bundle.IsComplete) return;
                 }
             }
             catch (OperationCanceledException)
             {
                 // 後続の読み込みに置き換えられた。正常な終了。
+            }
+        }
+
+        private const double RouteChunkKm = 12.0; // 1回のOverpass取得で扱うルート長
+
+        private static List<List<RoutePoint>> SplitRoute(List<RoutePoint> route, double chunkKm)
+        {
+            var result = new List<List<RoutePoint>>();
+            var cur = new List<RoutePoint>();
+            double startCum = route[0].CumKm;
+            foreach (var p in route)
+            {
+                cur.Add(p);
+                if (p.CumKm - startCum >= chunkKm && cur.Count >= 2)
+                {
+                    result.Add(cur);
+                    cur = new List<RoutePoint> { p }; // 区間の境目は共有して隙間を作らない
+                    startCum = p.CumKm;
+                }
+            }
+            if (cur.Count >= 2 || result.Count == 0) result.Add(cur);
+            return result;
+        }
+
+        // ── 通信診断（取得が全滅したときに1回だけ、原因の切り分け用にログへ残す） ──
+
+        private static int _diagRan;
+        private static readonly HttpClient DiagHttp = CreateDiagClient();
+        private static HttpClient CreateDiagClient()
+        {
+            // 独自の接続処理(ConnectCallback)を使わない標準の接続。Httpとの差を見るための比較用。
+            var c = new HttpClient(new SocketsHttpHandler
+            {
+                AutomaticDecompression = DecompressionMethods.All,
+                ConnectTimeout = TimeSpan.FromSeconds(15),
+            })
+            { Timeout = TimeSpan.FromSeconds(25) };
+            c.DefaultRequestHeaders.UserAgent.ParseAdd("VerticalPlayer-Dashcam/1.0 (personal dashcam review tool)");
+            return c;
+        }
+
+        private static async Task RunNetworkDiagnosticAsync()
+        {
+            if (Interlocked.Exchange(ref _diagRan, 1) == 1) return;
+            try
+            {
+                TraceMap("【通信診断】開始（各ミラー: DNS → TCP接続 → 軽量クエリ[標準接続/独自接続]）");
+                const string tiny = "[out:json][timeout:10];node(35.3,136.8,35.3005,136.8005);out count;";
+                foreach (var endpoint in OverpassEndpoints)
+                {
+                    string host = new Uri(endpoint).Host;
+                    var sw = Stopwatch.StartNew();
+                    IPAddress[] addrs;
+                    try
+                    {
+                        addrs = await Dns.GetHostAddressesAsync(host).ConfigureAwait(false);
+                        TraceMap($"【診断】{host} DNS {sw.ElapsedMilliseconds}ms: {string.Join(", ", addrs.Select(a => a.ToString()))}");
+                    }
+                    catch (Exception ex)
+                    {
+                        TraceMap($"【診断】{host} DNS失敗 {sw.ElapsedMilliseconds}ms: {ex.Message}");
+                        continue;
+                    }
+
+                    foreach (var a in addrs)
+                    {
+                        sw.Restart();
+                        using var sock = new Socket(a.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+                        try
+                        {
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+                            await sock.ConnectAsync(new IPEndPoint(a, 443), cts.Token).ConfigureAwait(false);
+                            TraceMap($"【診断】{host} TCP {a} 接続OK {sw.ElapsedMilliseconds}ms");
+                        }
+                        catch (Exception ex)
+                        {
+                            TraceMap($"【診断】{host} TCP {a} 接続NG {sw.ElapsedMilliseconds}ms: {ex.GetType().Name}");
+                        }
+                    }
+
+                    foreach (var (label, client) in new[] { ("標準接続", DiagHttp), ("独自接続", Http) })
+                    {
+                        sw.Restart();
+                        try
+                        {
+                            using var content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("data", tiny) });
+                            using var resp = await client.PostAsync(endpoint, content).ConfigureAwait(false);
+                            string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                            TraceMap($"【診断】{host} 軽量クエリ[{label}] HTTP {(int)resp.StatusCode} {sw.ElapsedMilliseconds}ms 応答{body.Length}B");
+                        }
+                        catch (Exception ex)
+                        {
+                            string inner = ex.InnerException != null ? $" / {ex.InnerException.GetType().Name}: {ex.InnerException.Message}" : "";
+                            TraceMap($"【診断】{host} 軽量クエリ[{label}] 失敗 {sw.ElapsedMilliseconds}ms: {ex.GetType().Name}: {ex.Message}{inner}");
+                        }
+                    }
+                }
+                TraceMap("【通信診断】終了");
+            }
+            catch (Exception ex)
+            {
+                TraceMap($"【通信診断】中断: {ex.Message}");
+            }
+        }
+
+        // ── ルート沿いの取得（1リクエスト・直列・最新優先） ──
+
+        private static readonly SemaphoreSlim FetchGate = new(1);            // Overpassへの同時リクエストは常に1つ
+        private static readonly ConcurrentDictionary<string, Task<OverpassBundle?>> InflightFetches = new();
+        private static readonly object FetchLock = new();
+        private static int _fetchSeq;                                        // 新しい要求ほど大きい。未着手の古い要求は捨てる
+
+        /// <summary>ルート沿いのデータを取得する。同じキーの取得が進行中なら相乗りする。呼び出し側の
+        /// キャンセルに関係なく最後まで走り、失敗・破棄時はnullを返す（例外は投げない）。</summary>
+        private Task<OverpassBundle?> GetCorridorAsync(string cacheKey, List<RoutePoint> route)
+        {
+            lock (FetchLock)
+            {
+                if (RouteCache.TryGetValue(cacheKey, out var cached)) return Task.FromResult<OverpassBundle?>(cached);
+                if (InflightFetches.TryGetValue(cacheKey, out var running)) return running;
+
+                int myId = Interlocked.Increment(ref _fetchSeq);
+                var task = Task.Run<OverpassBundle?>(async () =>
+                {
+                    await FetchGate.WaitAsync().ConfigureAwait(false);
+                    try
+                    {
+                        if (myId != Volatile.Read(ref _fetchSeq))
+                        {
+                            TraceMap($"取得 {cacheKey}: 後続の要求があるため未着手の取得を破棄");
+                            return null;
+                        }
+                        // ここから変更：45kmのような長いルートを1回で取ると、範囲が広すぎてミラーが30秒以内に
+                        // 返せない。約12kmごとに分割して直列に取得し、取得済み区間はキャッシュして使い回す
+                        // （失敗した区間だけを再試行で取り直せる）。最初の区間が失敗したら回線側の問題と
+                        // みなし、残りは試さず打ち切る。
+                        var chunks = SplitRoute(route, RouteChunkKm);
+                        var parts = new List<OverpassBundle>();
+                        bool allOk = true;
+                        for (int ci = 0; ci < chunks.Count; ci++)
+                        {
+                            var chunk = chunks[ci];
+                            string chunkKey = string.Create(CultureInfo.InvariantCulture,
+                                $"chunk:{chunk.Min(p => p.Lat):F2},{chunk.Min(p => p.Lng):F2},{chunk.Max(p => p.Lat):F2},{chunk.Max(p => p.Lng):F2}");
+                            if (!RouteCache.TryGetValue(chunkKey, out var pb))
+                            {
+                                if (DateTime.UtcNow < _backoffUntilUtc && !HasDiskCacheFor(chunk))
+                                {
+                                    TraceMap($"取得 区間{ci + 1}/{chunks.Count} 休止中（あと{(_backoffUntilUtc - DateTime.UtcNow).TotalSeconds:F0}秒。サーバー保護のため連打しない）");
+                                    allOk = false;
+                                    break;
+                                }
+                                var sw = Stopwatch.StartNew();
+                                try
+                                {
+                                    pb = await FetchOverpassAsync(chunk, CancellationToken.None).ConfigureAwait(false);
+                                    RouteCache[chunkKey] = pb;
+                                    _consecutiveFullFailures = 0;
+                                    _backoffUntilUtc = DateTime.MinValue;
+                                    TraceMap($"取得 区間{ci + 1}/{chunks.Count} 成功 {sw.ElapsedMilliseconds}ms tunnel={pb.Tunnels.Count} SAPA={pb.SaPas.Count} road={pb.Highways.Count} link={pb.MotorwayLinks.Count}");
+                                }
+                                catch (Exception ex)
+                                {
+                                    _mainFetchError = $"{ex.GetType().Name}: {ex.Message}";
+                                    TraceMap($"取得 区間{ci + 1}/{chunks.Count} 失敗 {sw.ElapsedMilliseconds}ms: {ex.Message}");
+                                    allOk = false;
+                                    int n = Interlocked.Increment(ref _consecutiveFullFailures);
+                                    var pause = TimeSpan.FromSeconds(Math.Min(900, 60 * Math.Pow(2, Math.Min(n - 1, 4)))); // 60s,120s,240s,480s,900s
+                                    _backoffUntilUtc = DateTime.UtcNow + pause;
+                                    TraceMap($"全ミラー失敗が{n}回連続 → {pause.TotalSeconds:F0}秒はネットワーク取得を休止");
+                                    break;
+                                }
+                            }
+                            parts.Add(pb);
+                        }
+                        if (parts.Count == 0)
+                        {
+                            _ = RunNetworkDiagnosticAsync(); // 原因切り分けのため、1回だけ通信診断をログに残す
+                            return null;
+                        }
+                        var merged = new OverpassBundle(
+                            parts.SelectMany(p => p.Tunnels).Distinct().ToList(),
+                            parts.SelectMany(p => p.SaPas).Distinct().ToList(),
+                            parts.SelectMany(p => p.Places).Distinct().ToList(),
+                            parts.SelectMany(p => p.Highways).Distinct().ToList(),
+                            parts.SelectMany(p => p.MotorwayLinks).Distinct().ToList())
+                        { IsComplete = allOk };
+                        if (allOk) RouteCache[cacheKey] = merged;
+                        return merged;
+                        // ここまで
+                    }
+                    catch (Exception ex)
+                    {
+                        _mainFetchError = $"{ex.GetType().Name}: {ex.Message}";
+                        TraceMap($"取得 {cacheKey} 失敗: {ex.Message}");
+                        return null;
+                    }
+                    finally
+                    {
+                        FetchGate.Release();
+                        lock (FetchLock) { InflightFetches.TryRemove(cacheKey, out _); }
+                    }
+                });
+                InflightFetches[cacheKey] = task;
+                return task;
             }
         }
 
@@ -825,9 +1055,18 @@ namespace VerticalPlayer.Dashcam
                     State.HighwayName = _passingTunnel.RoadName;
                 ShouldShowOverlay = true;
             }
+            else if (IsOnExpressway && !string.IsNullOrEmpty(State.HighwayName) && elapsedSeconds <= GpsLostKeepSeconds)
+            {
+                // ここから追加：高速走行中にGPSが落ちた（トンネル内・山間部）場合、トンネルデータが
+                // 取れていなくても、路線名とSA/PA案内（推定位置で更新）は表示し続ける。
+                // 以前はここで非表示になり、GPS復帰後も表示状態が戻らなかった。
+                UpdateSaPaState(estimatedCumKm);
+                ShouldShowOverlay = true;
+                // ここまで
+            }
             else
             {
-                // 推定位置でもどのトンネルの範囲にも入らない＝地下駐車場等の無関係なロストとみなし非表示
+                // 高速走行中でもなく、どのトンネルの範囲にも入らない＝地下駐車場等の無関係なロストとみなし非表示
                 ShouldShowOverlay = false;
             }
         }
@@ -1070,7 +1309,13 @@ namespace VerticalPlayer.Dashcam
                 // 凍結を続けると旧道路名（例:東海北陸自動車道）が残り続けるため解除する。
                 // 短い欠落（トンネル入口のカーブ等）では解除されない。
                 _zeroCandidatesSince ??= frame.Timestamp;
-                if ((frame.Timestamp - _zeroCandidatesSince.Value).TotalSeconds >= ZeroCandidatesReleaseSeconds &&
+                // 道路データが空、または現在地が取得済み範囲の外（＝データ未取得）の場合は解除しない。
+                // 単にデータが無いだけで「高速を降りた」と誤判定し、表示状態を消してしまうため。
+                bool dataCoversHere = _bundle.Highways.Count > 0 && _bundleBbox is { } cov &&
+                    frame.Latitude >= cov.MinLat && frame.Latitude <= cov.MaxLat &&
+                    frame.Longitude >= cov.MinLng && frame.Longitude <= cov.MaxLng;
+                if (dataCoversHere &&
+                    (frame.Timestamp - _zeroCandidatesSince.Value).TotalSeconds >= ZeroCandidatesReleaseSeconds &&
                     (IsOnExpressway || !string.IsNullOrEmpty(State.HighwayName)))
                 {
                     TraceMap($"候補0件が{ZeroCandidatesReleaseSeconds:F0}秒継続→凍結解除（\"{State.HighwayName}\"/{IsOnExpressway} → 空/False）");
@@ -1301,7 +1546,25 @@ namespace VerticalPlayer.Dashcam
             // 外積>0：進行方向の左、<0：右。右側への横方向距離(km)を求める。
             double cross = dirX * offY - dirY * offX;
             double rightOffsetKm = -cross / dirLen;
-            return rightOffsetKm >= OppositeSideMinOffsetKm;
+            if (rightOffsetKm >= OppositeSideMinOffsetKm) return true;
+
+            // ここから追加：上下線が近接している区間（川島PAなど）や、SA/PAの位置がランプ分岐点ノード
+            // （＝道路上の点）の場合、横方向オフセットだけでは対向側を判別できない。
+            // そこで、施設に最も近い高速道路(motorway)の進行方位を、自車の進行方位と比較する。
+            // 上下線は別々の一方通行wayなので、反対向き（約180°差）なら対向車線側の施設。
+            double routeBearing = BearingDeg(_route[a].Lat, _route[a].Lng, _route[b].Lat, _route[b].Lng);
+            HighwayCandidate? nearest = null;
+            double nearestKm = 0.15; // 施設から150m以内の高速道路のみ対象
+            foreach (var h in _bundle.Highways)
+            {
+                if (!h.IsMotorway) continue;
+                double d = HaversineKm(lat, lng, h.NearLat, h.NearLng);
+                if (d < nearestKm) { nearestKm = d; nearest = h; }
+            }
+            if (nearest != null && AngleDiffDeg(routeBearing, nearest.BearingDeg) > 110.0) return true;
+            // ここまで
+
+            return false;
         }
 
         /// <summary>対向側SA/PAの注意文を作る。名前に「上り」「下り」があれば、その反対＝走行中の方向を
@@ -1365,33 +1628,32 @@ namespace VerticalPlayer.Dashcam
 
         // ── Overpass ──
 
-        private async Task<OverpassBundle> FetchOverpassAsync(double minLat, double minLng, double maxLat, double maxLng, CancellationToken ct)
-        {
-            string bbox = string.Create(CultureInfo.InvariantCulture, $"{minLat:F5},{minLng:F5},{maxLat:F5},{maxLng:F5}");
-            string query =
-                "[out:json][timeout:25];" +
+        private static string BuildMainQuery(string bbox) =>
+            "[out:json][timeout:25];" +
                 "(" +
-                // ここから変更：全トンネルwayを取ると都市部の地下道・歩道橋下などで件数が膨れ、geom付きで
-                // Overpassが25秒以内に返せない。採用条件（名前に「トンネル」を含む）を先にクエリ側で絞る。
                 $"way[\"tunnel\"=\"yes\"][\"highway\"][\"name\"~\"トンネル\"]({bbox});" +
                 $"way[\"tunnel\"=\"yes\"][\"highway\"][\"tunnel:name\"~\"トンネル\"]({bbox});" +
-                // ここまで
                 $"nwr[\"highway\"~\"^(services|rest_area)$\"]({bbox});" +
-                // ❗【追加】JA:Tag:highway=rest_areaの慣例により、SA/PAの敷地(polygon/ノード)自体には
-                // name タグが付かず、代わりに分岐点の highway=motorway_junction ノード側に付与されて
-                // いることが非常に多い（ひるがの高原SA・飛騨白川PA・川島PA等、実測で確認済み）。
-                // 敷地側の名前が空の場合の救済用に、名前付きjunctionノードも別途取得しておく。
                 $"node[\"highway\"=\"motorway_junction\"][\"name\"]({bbox});" +
-                // ここから変更：地名はnode(点)のみ。nwrだと市区町村境界のrelationが全ジオメトリ付きで
-                // 返ってきて極端に重くなる。地名は座標があればよいのでnodeで十分。
-                $"node[\"place\"~\"^(city|town|village|suburb|neighbourhood)$\"]({bbox});" +
-                // ここまで
                 $"way[\"highway\"~\"^(motorway|trunk)$\"][\"name\"]({bbox});" +
+                $"way[\"highway\"=\"motorway_link\"]({bbox});" +
                 ");" +
                 "out center geom tags;";
 
-            // ミラー切替・リトライ付き（本体は重要なので2巡まで粘る。補助クエリは1巡）
-            using var doc = await PostOverpassAsync(query, ct, rounds: 2, MainQueryPerMirrorTimeout).ConfigureAwait(false);
+        private async Task<OverpassBundle> FetchOverpassAsync(List<RoutePoint> route, CancellationToken ct)
+        {
+            // ルートのbbox（＋余白）で取得する。around指定のルート沿い方式は、サーバー側の計算が重く
+            // 全ミラーで30秒以内に返らなかったため廃止した（実機ログ確認）。bbox方式は以前から取得できていた。
+            double minLat = route.Min(p => p.Lat) - BboxPaddingDeg, maxLat = route.Max(p => p.Lat) + BboxPaddingDeg;
+            double minLng = route.Min(p => p.Lng) - BboxPaddingDeg, maxLng = route.Max(p => p.Lng) + BboxPaddingDeg;
+            // 外側へ0.05°(約5km)のグリッドに揃える。同じ地域なら別のファイル・別の窓でも同じクエリ＝同じ
+            // ディスクキャッシュを使い回せる。
+            (minLat, minLng, maxLat, maxLng) = SnapBbox(minLat, minLng, maxLat, maxLng);
+            string bbox = string.Create(CultureInfo.InvariantCulture, $"{minLat:F5},{minLng:F5},{maxLat:F5},{maxLng:F5}");
+            string query = BuildMainQuery(bbox);
+
+            // ミラーは並行して（少しずらして）投げ、最初に成功したものを使う
+            using var doc = await PostOverpassCachedAsync(query, ct, rounds: 1, MainQueryPerMirrorTimeout).ConfigureAwait(false);
 
             var tunnels = new List<TunnelCandidate>();
             var saPas = new List<SaPaCandidate>();
@@ -1457,7 +1719,7 @@ namespace VerticalPlayer.Dashcam
                 }
                 // 2.5 SA/PA名の補完用：分岐点(motorway_junction)ノード、または
                 // SA/PA的な名前パターンを持つノードの名前を収集（タグの種類は問わない）
-                else if (type == "node")
+                else if (type == "node" && string.IsNullOrEmpty(GetTag("place"))) // placeノードは下の地名判定へ回す
                 {
                     string jName = GetTag("name");
                     bool looksLikeSaPaLabel = !string.IsNullOrEmpty(jName) &&
@@ -1481,6 +1743,13 @@ namespace VerticalPlayer.Dashcam
                             places.Add(new PlaceCandidate(name, lat.Value, lng.Value));
                         }
                     }
+                }
+
+                // 3.5 IC/JCTランプ（本体クエリに統合。centerの座標だけ使う）
+                if (highway == "motorway_link")
+                {
+                    double? llat = TryGetLat(el), llng = TryGetLng(el);
+                    if (llat != null && llng != null) motorwayLinks.Add(new MotorwayLinkCandidate(llat.Value, llng.Value));
                 }
 
                 // 4. 道路名の判定 (トンネルとして処理されたWayも、道路名判定のために別途ここで重複して処理させる)
@@ -1517,20 +1786,19 @@ namespace VerticalPlayer.Dashcam
                 }
             }
 
-            // ❗【今回追加】SA/PA名パターンに一致する名前付きノードの広域検索は、bbox内の名前付き
-            // ノードを絞り込み条件無しで総当たりするため重く、motorway_linkと同じ理由でOverpassの
-            // タイムアウトを誘発しやすい。本体クエリに同居させると巻き添えで全滅するため、
-            // motorway_link同様に独立した別リクエストに分離し、失敗してもここだけ諦めて続行する。
+            // SA/PA名パターンのノードは総当たり正規表現で重いため、本体の後に1回だけ試し、
+            // 失敗してもここだけ諦めて続行する（motorway_junctionの名前だけでも補完は動く）。
+            _motorwayLinkFetchError = null;
             try
             {
                 junctions.AddRange(await FetchNamedSaPaNodesAsync(bbox, ct).ConfigureAwait(false));
                 _namedSaPaFetchError = null;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex)
             {
-                _namedSaPaFetchError = $"{ex.GetType().Name}: {ex.Message}";
-                auxOk = false;
-                System.Diagnostics.Debug.WriteLine($"[MapInfoProvider] SA/PA名パターン検索失敗（motorway_junction分のみで続行）: {ex.Message}");
+                _namedSaPaFetchError = $"SA/PA名:{ex.GetType().Name}: {ex.Message}";
+                TraceMap($"SA/PA名ノードの取得に失敗（無視して続行）: {ex.Message}");
             }
 
             // ── SA/PA名の補完（要素走査ループの外で、全junction収集後にまとめて行う） ──
@@ -1578,23 +1846,6 @@ namespace VerticalPlayer.Dashcam
                 saPas.Add(new SaPaCandidate(j.Name, InferSaPaType(j.Name, "PA"), j.Lat, j.Lng));
             }
 
-            // ❗【今回修正】motorway_link(IC/JCTランプ)の取得は、区間によっては件数が膨らみ
-            // Overpassのタイムアウトを誘発しやすいため、本体クエリとは独立した別リクエストに分離した。
-            // これにより、ランプ取得だけが失敗してもトンネル・SA/PA等の本体データは影響を受けない
-            // （失敗時はmotorwayLinksが空のままなので、UpdateHighwayName側は自動的にヒステリシス
-            // 方式へフォールバックする設計になっている）。
-            try
-            {
-                motorwayLinks.AddRange(await FetchMotorwayLinksAsync(bbox, ct).ConfigureAwait(false));
-                _motorwayLinkFetchError = null;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _motorwayLinkFetchError = $"{ex.GetType().Name}: {ex.Message}";
-                auxOk = false;
-                System.Diagnostics.Debug.WriteLine($"[MapInfoProvider] motorway_link取得失敗（IC/JCTゲート無しで続行）: {ex.Message}");
-            }
-
             return new OverpassBundle(tunnels, saPas, places, highways, motorwayLinks) { IsComplete = auxOk };
         }
 
@@ -1630,73 +1881,194 @@ namespace VerticalPlayer.Dashcam
         {
             "https://overpass-api.de/api/interpreter",
             "https://overpass.private.coffee/api/interpreter",
-            "https://overpass.osm.jp/api/interpreter",
-            "https://overpass.kumi.systems/api/interpreter",
+            // kumi.systemsはDNSがprivate.coffeeと同じIPを返す（実機診断で確認）ため外し、別系統を追加
+            "https://overpass.openstreetmap.fr/api/interpreter",
+            "https://overpass.openstreetmap.ru/api/interpreter",
         };
 
         /// <summary>Overpassへクエリを送り、成功したJsonDocumentを返す（呼び出し側がDisposeする）。
         /// 失敗（HTTPエラー・タイムアウト・HTTP200でもremarkにruntime errorが入る部分結果）の場合は
         /// 次のミラーへ切り替え、全ミラーを rounds 巡しても取れなければ例外を投げる
         /// （例外メッセージには全試行の結果を並べるので、情報一覧の取得エラー欄でそのまま原因を追える）。</summary>
+        // ── ディスクキャッシュ（Overpassの生応答を保存し、次回以降は通信なしで使う） ──
+        // 公開Overpassサーバーは時間帯や混雑で取得できなくなる。一度取れた地域は端末に保存して、
+        // 再生し直しや別ファイルでも通信せずに使えるようにする。
+
+        private static readonly TimeSpan DiskCacheMaxAge = TimeSpan.FromDays(60);
+
+        private static string DiskCacheDir =>
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VerticalPlayer", "overpass-cache");
+
+        private static string DiskCachePath(string query)
+        {
+            var hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(query));
+            return Path.Combine(DiskCacheDir, Convert.ToHexString(hash, 0, 12) + ".json.gz");
+        }
+
+        private static (double MinLat, double MinLng, double MaxLat, double MaxLng) SnapBbox(double minLat, double minLng, double maxLat, double maxLng)
+        {
+            const double g = 0.05;
+            return (Math.Floor(minLat / g) * g, Math.Floor(minLng / g) * g, Math.Ceiling(maxLat / g) * g, Math.Ceiling(maxLng / g) * g);
+        }
+
+        /// <summary>この区間の本体クエリ結果がディスクにあるか（休止中でも通信なしで使えるかの判定用）。</summary>
+        private bool HasDiskCacheFor(List<RoutePoint> chunk)
+        {
+            try
+            {
+                var (mnLat, mnLng, mxLat, mxLng) = SnapBbox(
+                    chunk.Min(p => p.Lat) - BboxPaddingDeg, chunk.Min(p => p.Lng) - BboxPaddingDeg,
+                    chunk.Max(p => p.Lat) + BboxPaddingDeg, chunk.Max(p => p.Lng) + BboxPaddingDeg);
+                string bbox = string.Create(CultureInfo.InvariantCulture, $"{mnLat:F5},{mnLng:F5},{mxLat:F5},{mxLng:F5}");
+                return File.Exists(DiskCachePath(BuildMainQuery(bbox)));
+            }
+            catch { return false; }
+        }
+
+        private static async Task<JsonDocument> PostOverpassCachedAsync(string query, CancellationToken ct, int rounds, TimeSpan? perMirrorTimeout = null)
+        {
+            string path = DiskCachePath(query);
+            try
+            {
+                if (File.Exists(path) && DateTime.UtcNow - File.GetLastWriteTimeUtc(path) < DiskCacheMaxAge)
+                {
+                    await using var fs = File.OpenRead(path);
+                    await using var gz = new System.IO.Compression.GZipStream(fs, System.IO.Compression.CompressionMode.Decompress);
+                    var cachedDoc = await JsonDocument.ParseAsync(gz, cancellationToken: ct).ConfigureAwait(false);
+                    TraceMap($"ディスクキャッシュ命中 {Path.GetFileName(path)}");
+                    return cachedDoc;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException or InvalidDataException)
+            {
+                TraceMap($"ディスクキャッシュ読込失敗（無視して通信）: {ex.Message}");
+            }
+
+            var doc = await PostOverpassAsync(query, ct, rounds, perMirrorTimeout).ConfigureAwait(false);
+            try
+            {
+                // 要素が0件のときは失敗か異常応答の可能性があるので保存しない
+                if (doc.RootElement.TryGetProperty("elements", out var els) && els.GetArrayLength() > 0)
+                {
+                    Directory.CreateDirectory(DiskCacheDir);
+                    string tmp = path + ".tmp";
+                    await using (var fs = File.Create(tmp))
+                    await using (var gz = new System.IO.Compression.GZipStream(fs, System.IO.Compression.CompressionLevel.Fastest))
+                    await using (var w = new Utf8JsonWriter(gz))
+                    {
+                        doc.RootElement.WriteTo(w);
+                    }
+                    File.Move(tmp, path, overwrite: true);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                TraceMap($"ディスクキャッシュ保存失敗（無視）: {ex.Message}");
+            }
+            return doc;
+        }
+
+        private const int HedgeDelayMs = 2500; // 次のミラーへ並行して投げ始めるまでの間隔
+
         private static async Task<JsonDocument> PostOverpassAsync(string query, CancellationToken ct, int rounds, TimeSpan? perMirrorTimeout = null)
         {
-            var attempts = new List<string>();
+            var timeout = perMirrorTimeout ?? PerMirrorTimeout;
+            var attempts = new ConcurrentQueue<string>();
             for (int round = 0; round < rounds; round++)
             {
-                foreach (var endpoint in OverpassEndpoints)
+                ct.ThrowIfCancellationRequested();
+                // ここから変更：ミラーを順番に待つと、1台ごとに最大30秒×3台で最悪90秒以上かかっていた。
+                // 前回成功したミラーから順に2.5秒ずつずらして並行に投げ、最初に成功した結果を採用する。
+                using var raceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var pending = new List<Task<(JsonDocument? Doc, int Index)>>();
+                for (int mi = 0; mi < OverpassEndpoints.Length; mi++)
                 {
-                    ct.ThrowIfCancellationRequested();
-                    string host = new Uri(endpoint).Host;
-                    // ❗【今回追加】HttpClient.Timeout(35秒)まるまる待つと、手動シークで次々に新しい
-                    // LoadRouteAsyncが発行されてもキャンセルされるまで前のミラー試行が居座り続け、
-                    // 「キャンセルの連鎖でいつまで経っても1件も完走しない」状態になっていた（実機ログで確認）。
-                    // ミラー1件あたりは短いタイムアウト(PerMirrorTimeout)で見切りを付け、次へ回す。
-                    using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                    attemptCts.CancelAfter(perMirrorTimeout ?? PerMirrorTimeout);
-                    var sw = Stopwatch.StartNew();
-                    try
-                    {
-                        using var content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("data", query) });
-                        using var resp = await Http.PostAsync(endpoint, content, attemptCts.Token).ConfigureAwait(false);
-                        if (!resp.IsSuccessStatusCode)
-                        {
-                            attempts.Add($"{host}:{(int)resp.StatusCode}");
-                            TraceMap($"Overpass {host} → HTTP {(int)resp.StatusCode}、次のミラーへ");
-                            continue;
-                        }
+                    int epIndex = (mi + _preferredMirror) % OverpassEndpoints.Length;
+                    pending.Add(PostToMirrorAsync(query, epIndex, mi * HedgeDelayMs, timeout, raceCts.Token, attempts));
+                }
 
-                        await using var stream = await resp.Content.ReadAsStreamAsync(attemptCts.Token).ConfigureAwait(false);
-                        var doc = await JsonDocument.ParseAsync(stream, cancellationToken: attemptCts.Token).ConfigureAwait(false);
-
-                        // HTTP 200でも、サーバー側タイムアウト時は "remark" に runtime error が入り、
-                        // 要素が欠けたまま返ってくることがある（取れたり取れなかったりの一因）。失敗扱いにして次へ。
-                        if (doc.RootElement.TryGetProperty("remark", out var remark) &&
-                            remark.ValueKind == JsonValueKind.String &&
-                            (remark.GetString() ?? "").Contains("runtime error", StringComparison.OrdinalIgnoreCase))
-                        {
-                            attempts.Add($"{host}:remark");
-                            TraceMap($"Overpass {host} → 200だがremark異常（{remark.GetString()}）、次のミラーへ");
-                            doc.Dispose();
-                            continue;
-                        }
-                        return doc;
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                    catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException or IOException)
+                JsonDocument? winner = null;
+                while (pending.Count > 0)
+                {
+                    var done = await Task.WhenAny(pending).ConfigureAwait(false);
+                    pending.Remove(done);
+                    var r = await done.ConfigureAwait(false);
+                    if (r.Doc != null)
                     {
-                        // ct由来でない場合は、attemptCts(ミラー単位の短いタイムアウト)によるもの
-                        string kind = ex is OperationCanceledException ? "timeout" : ex.GetType().Name;
-                        attempts.Add($"{host}:{kind}");
-                        // ここから変更：所要時間と内側の例外(DNS失敗/接続拒否/SSLなど)もログに出す
-                        string inner = ex.InnerException != null ? $" / {ex.InnerException.GetType().Name}: {ex.InnerException.Message}" : "";
-                        string detail = ex is OperationCanceledException ? "" : $" ({ex.Message}{inner})";
-                        TraceMap($"Overpass {host} → {kind} {sw.ElapsedMilliseconds}ms{detail}、次のミラーへ");
-                        // ここまで
+                        winner = r.Doc;
+                        _preferredMirror = r.Index;
+                        raceCts.Cancel(); // 残りは打ち切る
+                        break;
                     }
                 }
+                // 勝者以外がたまたま成功していたら後始末する
+                foreach (var p in pending)
+                    _ = p.ContinueWith(x => { if (x.IsCompletedSuccessfully) x.Result.Doc?.Dispose(); }, TaskScheduler.Default);
+                if (winner != null) return winner;
+                // ここまで
+
+                ct.ThrowIfCancellationRequested();
                 if (round < rounds - 1) await Task.Delay(1500, ct).ConfigureAwait(false);
             }
             throw new HttpRequestException("全ミラー失敗 [" + string.Join(", ", attempts) + "]");
+        }
+
+        /// <summary>1つのミラーへ問い合わせる。delayMs待ってから開始し、失敗・タイムアウト時は例外を投げずに
+        /// (null, index)を返す（結果はattemptsとログに残す）。競争に負けて打ち切られた場合は何も記録しない。</summary>
+        private static async Task<(JsonDocument? Doc, int Index)> PostToMirrorAsync(
+            string query, int epIndex, int delayMs, TimeSpan timeout, CancellationToken raceToken, ConcurrentQueue<string> attempts)
+        {
+            string endpoint = OverpassEndpoints[epIndex];
+            string host = new Uri(endpoint).Host;
+            try
+            {
+                if (delayMs > 0) await Task.Delay(delayMs, raceToken).ConfigureAwait(false);
+                using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(raceToken);
+                attemptCts.CancelAfter(timeout);
+                var sw = Stopwatch.StartNew();
+                try
+                {
+                    using var content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("data", query) });
+                    using var resp = await Http.PostAsync(endpoint, content, attemptCts.Token).ConfigureAwait(false);
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        attempts.Enqueue($"{host}:{(int)resp.StatusCode}");
+                        TraceMap($"Overpass {host} → HTTP {(int)resp.StatusCode} {sw.ElapsedMilliseconds}ms");
+                        return (null, epIndex);
+                    }
+
+                    await using var stream = await resp.Content.ReadAsStreamAsync(attemptCts.Token).ConfigureAwait(false);
+                    var doc = await JsonDocument.ParseAsync(stream, cancellationToken: attemptCts.Token).ConfigureAwait(false);
+
+                    // HTTP 200でも、サーバー側タイムアウト時は "remark" に runtime error が入り、
+                    // 要素が欠けたまま返ってくることがある。失敗扱いにする。
+                    if (doc.RootElement.TryGetProperty("remark", out var remark) &&
+                        remark.ValueKind == JsonValueKind.String &&
+                        (remark.GetString() ?? "").Contains("runtime error", StringComparison.OrdinalIgnoreCase))
+                    {
+                        attempts.Enqueue($"{host}:remark");
+                        TraceMap($"Overpass {host} → 200だがremark異常（{remark.GetString()}）");
+                        doc.Dispose();
+                        return (null, epIndex);
+                    }
+                    TraceMap($"Overpass {host} → 成功 {sw.ElapsedMilliseconds}ms");
+                    return (doc, epIndex);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException or IOException)
+                {
+                    if (raceToken.IsCancellationRequested) return (null, epIndex); // 競争に負けた/呼び出し側キャンセル
+                    string kind = ex is OperationCanceledException ? "timeout" : ex.GetType().Name;
+                    attempts.Enqueue($"{host}:{kind}");
+                    string inner = ex.InnerException != null ? $" / {ex.InnerException.GetType().Name}: {ex.InnerException.Message}" : "";
+                    string detail = ex is OperationCanceledException ? "" : $" ({ex.Message}{inner})";
+                    TraceMap($"Overpass {host} → {kind} {sw.ElapsedMilliseconds}ms{detail}");
+                    return (null, epIndex);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return (null, epIndex); // 開始前に競争が決着した
+            }
         }
 
         /// <summary>IC/JCTランプ(highway=motorway_link)だけを取得する軽量な別リクエスト。
@@ -1707,7 +2079,7 @@ namespace VerticalPlayer.Dashcam
                 "[out:json][timeout:20];" +
                 $"way[\"highway\"=\"motorway_link\"]({bbox});" +
                 "out center;";
-            using var doc = await PostOverpassAsync(query, ct, rounds: 1).ConfigureAwait(false);
+            using var doc = await PostOverpassCachedAsync(query, ct, rounds: 1).ConfigureAwait(false);
 
             var result = new List<MotorwayLinkCandidate>();
             if (!doc.RootElement.TryGetProperty("elements", out var elements)) return result;
@@ -1729,7 +2101,7 @@ namespace VerticalPlayer.Dashcam
                 "[out:json][timeout:20];" +
                 $"node[\"name\"~\"(SA|PA|サービスエリア|パーキングエリア|ハイウェイオアシス|スマートIC)\"]({bbox});" +
                 "out center tags;";
-            using var doc = await PostOverpassAsync(query, ct, rounds: 1).ConfigureAwait(false);
+            using var doc = await PostOverpassCachedAsync(query, ct, rounds: 1).ConfigureAwait(false);
 
             var result = new List<(string Name, double Lat, double Lng)>();
             if (!doc.RootElement.TryGetProperty("elements", out var elements)) return result;

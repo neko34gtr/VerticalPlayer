@@ -451,6 +451,8 @@ namespace VerticalPlayer
             DashcamView.MapInfoCornerSetting = Enum.TryParse<VerticalPlayer.Dashcam.MapInfoCorner>(s.MapInfoCorner, out var restoredCorner)
                 ? restoredCorner : VerticalPlayer.Dashcam.MapInfoCorner.BottomLeft;
             DashcamView.MapInfoScaleSetting = s.MapInfoScale;
+            DashcamView.ScreenshotFormatSetting = s.ScreenshotFormat;
+            DashcamView.FrameStepFramesSetting = s.DashcamFrameStepFrames;
             DashcamView.TunnelEntryDetectionModeSetting =
                 Enum.TryParse<VerticalPlayer.Dashcam.MapInfoProvider.TunnelEntryDetectionMode>(s.DashcamTunnelEntryDetectionMode, out var restoredTunnelMode)
                     ? restoredTunnelMode : VerticalPlayer.Dashcam.MapInfoProvider.TunnelEntryDetectionMode.Legacy;
@@ -540,6 +542,8 @@ namespace VerticalPlayer
                 EnableOSD = DashcamView.SpeedOsdEnabled,
                 MapInfoCorner = DashcamView.MapInfoCornerSetting.ToString(),
                 MapInfoScale = DashcamView.MapInfoScaleSetting,
+                ScreenshotFormat = DashcamView.ScreenshotFormatSetting,
+                DashcamFrameStepFrames = DashcamView.FrameStepFramesSetting,
                 DashcamTunnelEntryDetectionMode = DashcamView.TunnelEntryDetectionModeSetting.ToString(),
                 CursorHideDelaySec = _cursorHideDelaySec,
                 EnableSleepPrevention = _enableSleepPrevention,
