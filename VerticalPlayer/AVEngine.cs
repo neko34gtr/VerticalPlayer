@@ -748,7 +748,9 @@ namespace VerticalPlayer.Media
                     interruptFlagPtr = interruptFlagHandle.AddrOfPinnedObject();
                 }
 
+                var swOpenTiming = Stopwatch.StartNew();
                 OpenStreamsWithHw(path, wantHw, interruptFlagPtr, out fmt, out vctx, out videoIdx, out hwActive, out hwDeviceCtx);
+                Trace($"OpenTiming(gen={myGen}): ファイルを開く+ストリーム解析+デコーダー初期化 {swOpenTiming.ElapsedMilliseconds}ms");
 
                 int w = vctx->width, h = vctx->height;
                 double durSec = fmt->duration > 0 ? fmt->duration / (double)ffmpeg.AV_TIME_BASE : 0;
@@ -864,6 +866,7 @@ namespace VerticalPlayer.Media
                 {
                     Trace($"Audio(gen={myGen}): wantAudio=falseのためスキップ（音声無しで続行）");
                 }
+                Trace($"OpenTiming(gen={myGen}): 音声の初期化まで含めて {swOpenTiming.ElapsedMilliseconds}ms");
 
 
                 pkt = ffmpeg.av_packet_alloc();
@@ -1717,8 +1720,7 @@ namespace VerticalPlayer.Media
             int diagPacketsProcessed = 0;
             long diagSubmitTicksSum = 0;
             bool needOffsetCapture = true; // 今回追加: (再)開始後、最初のフレームの実ptsを捕捉する
-            bool forceOffsetRecapture = false; // 今回追加: ボイス再作成時、seekのターゲット固定とは
-                                               // 別に「本当に実ptsで取り直す」ことを明示するフラグ
+
             try
             {
                 while (myGen == _generation)
@@ -1791,7 +1793,6 @@ namespace VerticalPlayer.Media
                                 // このptsは必ずtarget以上＝以前のMath.Maxクランプは以降不要だが、
                                 // 万一framePtsがNaNだった場合の保険として値を維持する形は残す）。
                                 _audioContentOffsetSeconds = double.IsNaN(framePts) ? _audioContentOffsetSeconds : framePts;
-                                forceOffsetRecapture = false;
                                 needOffsetCapture = false;
                             }
                             // withAudio:false（コマ送り/シークバードラッグ中のプレビュー）中は
@@ -1829,7 +1830,6 @@ namespace VerticalPlayer.Media
                                         if (audioOutput.ConsumeRecreated())
                                         {
                                             needOffsetCapture = true;
-                                            forceOffsetRecapture = true; // seekのターゲット固定を上書きしてでも実ptsで取り直す
                                         }
                                         diagSubmitTicksSum += Stopwatch.GetTimestamp() - t0;
                                     }
@@ -2046,18 +2046,19 @@ namespace VerticalPlayer.Media
 
                     if (hwPixFmt != AVPixelFormat.AV_PIX_FMT_NONE)
                     {
-                        AVBufferRef* devCtx = null;
-                        int devRet = ffmpeg.av_hwdevice_ctx_create(&devCtx, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, null, null, 0);
-                        if (devRet == 0)
+                        // ここから変更：ファイルを開くたびにD3D11デバイスを作り直すと、次ファイルへの切替で
+                        // 毎回その初期化時間が加わる。参照カウント付きの共有デバイスを使い回す。
+                        AVBufferRef* devCtx = AcquireSharedD3D11Device(out int devRet);
+                        if (devCtx != null)
                         {
                             _negotiatedHwPixFmt = hwPixFmt;
                             vc->get_format = _getHwFormatDelegate;
-                            vc->hw_device_ctx = ffmpeg.av_buffer_ref(devCtx);
-                            ffmpeg.av_buffer_unref(&devCtx);
+                            vc->hw_device_ctx = devCtx; // AcquireSharedD3D11Deviceが返した新しい参照を、デコーダーが所有する
                             hwDeviceCtx = vc->hw_device_ctx;
                             hwActive = true;
-                            Trace("OpenStreamsWithHw: av_hwdevice_ctx_create(D3D11VA) 成功、hw_device_ctx設定完了");
+                            Trace("OpenStreamsWithHw: D3D11VA共有デバイスを取得、hw_device_ctx設定完了");
                         }
+                        // ここまで
                         else
                         {
                             Trace($"OpenStreamsWithHw: av_hwdevice_ctx_create(D3D11VA) 失敗 code={devRet} - SWにフォールバック");
@@ -2081,6 +2082,7 @@ namespace VerticalPlayer.Media
                 if (hwActive)
                 {
                     Trace($"OpenStreamsWithHw: HWデコーダのopenに失敗 code={openRet} - SWで再試行");
+                    InvalidateSharedD3D11Device(); // デバイスが壊れている可能性があるので、次回は作り直す
                     hwActive = false;
                     vc->get_format = null;
                     if (vc->hw_device_ctx != null) { var h2 = vc->hw_device_ctx; ffmpeg.av_buffer_unref(&h2); vc->hw_device_ctx = null; }
@@ -2094,6 +2096,62 @@ namespace VerticalPlayer.Media
             }
             Trace($"OpenStreamsWithHw: avcodec_open2完了 hwActive={hwActive} vc->pix_fmt(SW側の想定値)={vc->pix_fmt}");
             vctx = vc;
+        }
+
+        // ── D3D11VAデバイスの共有（ファイル切替の高速化） ──
+        private static readonly object _sharedHwDeviceLock = new();
+        private static AVBufferRef* _sharedD3D11Device;
+
+        /// <summary>trueでD3D11VAデバイスをファイル間・Front/Rear間で共有する。falseは従来どおり毎回新規作成。
+        /// 次ファイルへの切替が遅くなった原因の切り分けのため、既定はfalse（従来動作）にしている。</summary>
+        private static readonly bool UseSharedHwDevice = false;
+
+        /// <summary>共有D3D11VAデバイスへの新しい参照を返す（呼び出し側が所有・解放する）。無ければ作成する。
+        /// 作成に失敗したらnullを返し、codeに作成結果を入れる。</summary>
+        private static AVBufferRef* AcquireSharedD3D11Device(out int code)
+        {
+            if (!UseSharedHwDevice)
+            {
+                // 従来動作：呼び出しごとに新しいデバイスを作り、その参照をそのまま返す
+                AVBufferRef* own = null;
+                code = ffmpeg.av_hwdevice_ctx_create(&own, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, null, null, 0);
+                if (code != 0 || own == null)
+                {
+                    Trace($"OpenStreamsWithHw: av_hwdevice_ctx_create(D3D11VA) 失敗 code={code} - SWにフォールバック");
+                    return null;
+                }
+                return own;
+            }
+
+            lock (_sharedHwDeviceLock)
+            {
+                if (_sharedD3D11Device == null)
+                {
+                    AVBufferRef* created = null;
+                    code = ffmpeg.av_hwdevice_ctx_create(&created, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, null, null, 0);
+                    if (code != 0 || created == null)
+                    {
+                        Trace($"OpenStreamsWithHw: av_hwdevice_ctx_create(D3D11VA) 失敗 code={code} - SWにフォールバック");
+                        return null;
+                    }
+                    _sharedD3D11Device = created;
+                    Trace("OpenStreamsWithHw: D3D11VA共有デバイスを新規作成");
+                }
+                code = 0;
+                return ffmpeg.av_buffer_ref(_sharedD3D11Device);
+            }
+        }
+
+        /// <summary>共有デバイスを破棄する（デバイスロスト等の疑い時）。使用中のデコーダーは自分の参照を持つので影響しない。</summary>
+        private static void InvalidateSharedD3D11Device()
+        {
+            lock (_sharedHwDeviceLock)
+            {
+                if (_sharedD3D11Device == null) return;
+                var d = _sharedD3D11Device;
+                ffmpeg.av_buffer_unref(&d);
+                _sharedD3D11Device = null;
+            }
         }
 
         private static unsafe string ByteToString(byte* ptr)

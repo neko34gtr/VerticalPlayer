@@ -67,7 +67,6 @@ namespace VerticalPlayer
         private SampleFormat _sampleFormat = SampleFormat.Float32;
 
         private long _totalFramesWritten; // Open/Flush以降、ReleaseBufferで実際に書き込んだ総フレーム数
-        private bool _started;
         private bool _recreatedSinceLastCheck;
         private double _speedRatio = 1.0;
         private double _volume = 1.0;
@@ -178,7 +177,6 @@ namespace VerticalPlayer
             // グリッチを避ける。「音を止める」は呼び出し側がSubmitSamplesを呼ばないことで実現する。
             hr = _audioClient.Start();
             ComUtil.ThrowIfFailed(hr, "IAudioClient.Start");
-            _started = true;
         }
 
         private WaveFormatChoice BuildSharedFormat(int sampleRate, int channels)
@@ -595,7 +593,6 @@ namespace VerticalPlayer
                     if (_audioClient != null) { try { Marshal.ReleaseComObject(_audioClient); } catch { } _audioClient = null; }
                     if (_device != null) { try { Marshal.ReleaseComObject(_device); } catch { } _device = null; }
                     if (_enumerator != null) { try { Marshal.ReleaseComObject(_enumerator); } catch { } _enumerator = null; }
-                    _started = false;
                     IsActive = false;
 
                     if (_sampleRate <= 0)
@@ -765,7 +762,6 @@ namespace VerticalPlayer
             if (_device != null) { Marshal.ReleaseComObject(_device); _device = null; }
             if (_enumerator != null) { Marshal.ReleaseComObject(_enumerator); _enumerator = null; }
 
-            _started = false;
             IsActive = false;
         }
 

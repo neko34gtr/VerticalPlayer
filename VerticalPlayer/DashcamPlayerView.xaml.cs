@@ -1493,8 +1493,18 @@ namespace VerticalPlayer.Dashcam
             PlayRearGroup(group);
         }
 
+        /// <summary>同期処理の所要時間を測り、150ms以上かかったらログに残す（UIフリーズ箇所の特定用）。</summary>
+        private static void TimedStep(string name, Action action)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            action();
+            if (sw.ElapsedMilliseconds >= 150)
+                DashcamPlayErrorLogger.Log($"[Slow] {name} {sw.ElapsedMilliseconds}ms");
+        }
+
         private void PlayFrontGroup(DashcamMediaGroup group)
         {
+            StartUiStallProbe(); // 切替の前後約10秒間、UIスレッドの応答遅れを監視する
             _currentFrontGroup = group;
             _isStopped = false;
             // 直前のFrontの次(約2分後)に続くファイルへの切替（連続再生・次のシーン）では、リアの
@@ -1519,8 +1529,11 @@ namespace VerticalPlayer.Dashcam
 
             if (group.FrontVideoPath != null)
             {
-                PlayerFront.Stop(); // 前回のOpen失敗等で内部状態が残っていても確実にリセットしてから開く
-                PlayerFront.Source = new Uri(group.FrontVideoPath);
+                // 切替時に一度だけ起きたUIスレッドの長時間フリーズ（約3.5秒）の原因箇所を特定するため、
+                // 各同期処理の所要時間を測り、150ms以上かかったものを[Slow]として記録する。
+                string frontPath = group.FrontVideoPath;
+                TimedStep("PlayerFront.Stop()", () => PlayerFront.Stop()); // 前回のOpen失敗等で内部状態が残っていても確実にリセットしてから開く
+                TimedStep("PlayerFront.Source設定", () => PlayerFront.Source = new Uri(frontPath));
             }
 
             // リア連動の診断ログ（「次のシーンでフロントだけ切り替わりリアが付いて来ない」調査用）
@@ -1529,7 +1542,7 @@ namespace VerticalPlayer.Dashcam
 
             if (UseTimeAlignedRear)
             {
-                ReconcileRear(); // 絶対時刻でリアclipを選ぶ（現clipが引き続きTを含むなら再読込しない）
+                TimedStep("ReconcileRear()", () => ReconcileRear()); // 絶対時刻でリアclipを選ぶ（現clipが引き続きTを含むなら再読込しない）
             }
             else if (RearLinked)
             {
@@ -1580,11 +1593,20 @@ namespace VerticalPlayer.Dashcam
         private async void PlayerFront_MediaOpened(object sender, RoutedEventArgs e)
         {
             _consecutiveFrontFailures = 0;
+            var swOpened = System.Diagnostics.Stopwatch.StartNew();
+            int openToken = ++_frontOpenToken; // 解析の待機中に別ファイルへ切り替わった場合、古い処理を捨てるための番号
             PlayerFront.ResetDnnEngineForNewFile();
+            if (_gapPending)
+                DashcamPlayErrorLogger.Log($"[Gap] MediaEnded → 次ファイルのOpen完了まで {GapMs(_gapMediaEndedTs)}ms");
 
-            // 動画詳細情報の取得と表示（MainWindow.Player_MediaOpenedと同じ仕組み）
-            if (PlayerFront.Source?.LocalPath != null)
-                AnalyzeAndShowMediaInfo(PlayerFront.Source.LocalPath);
+            // ここから変更：動画情報(MediaInfo)の解析とNMEAの読み込み・解析を、UIスレッドではなく別スレッドで行う。
+            // 以前はUIスレッドで同期処理していたため、SDカード(I:)からまだ読まれていないファイルへ飛んだときに
+            // 約0.7秒、UIが止まっていた。再生開始(Play)の順序は従来どおり「解析が終わった後」のままなので、
+            // 連続再生の切替時間は変わらない（解析は通常10ms台）。待機中はUIが固まらない。
+            string? mediaInfoPath = PlayerFront.Source?.LocalPath;
+            Task<MediaInfoNative?>? mediaInfoTask = mediaInfoPath != null
+                ? Task.Run(() => ProbeMediaInfo(mediaInfoPath))
+                : null;
 
             var duration = PlayerFront.NaturalDuration.HasTimeSpan
                 ? PlayerFront.NaturalDuration.TimeSpan
@@ -1593,8 +1615,9 @@ namespace VerticalPlayer.Dashcam
             var sensorGroup = _currentFrontGroup;
             string? nmeaPath = sensorGroup?.FrontNmeaPath ?? sensorGroup?.RearNmeaPath;
             var sensorFrames = nmeaPath != null
-                ? NmeaSensorParser.Parse(nmeaPath, sensorGroup?.Timestamp, duration)
+                ? await Task.Run(() => NmeaSensorParser.Parse(nmeaPath, sensorGroup?.Timestamp, duration))
                 : new List<DashcamSensorFrame>();
+            if (openToken != _frontOpenToken) { DiscardMediaInfo(mediaInfoTask); return; } // 待機中に別ファイルへ切り替わった
 
             // ファイルの先頭/末尾が測位ロスト(トンネル等)なら、前後のファイルの測位速度を取り込んで
             // ロスト区間の推定速度を補間し直す（ファイルをまたぐ長いトンネルにも対応）
@@ -1604,11 +1627,27 @@ namespace VerticalPlayer.Dashcam
                 bool needBefore = !sensorFrames[0].HasGpsFix;
                 bool needAfter = !sensorFrames[^1].HasGpsFix;
                 var gapContext = await Task.Run(() => BuildSpeedGapContext(sensorGroup, needBefore, needAfter));
-                if (!ReferenceEquals(_currentFrontGroup, sensorGroup)) return; // 待機中に別ファイルへ切り替わった
+                if (openToken != _frontOpenToken || !ReferenceEquals(_currentFrontGroup, sensorGroup))
+                {
+                    DiscardMediaInfo(mediaInfoTask);
+                    return; // 待機中に別ファイルへ切り替わった
+                }
                 if (gapContext != null)
-                    sensorFrames = NmeaSensorParser.Parse(nmeaPath, sensorGroup.Timestamp, duration, gapContext);
+                    sensorFrames = await Task.Run(() => NmeaSensorParser.Parse(nmeaPath, sensorGroup.Timestamp, duration, gapContext));
+                if (openToken != _frontOpenToken) { DiscardMediaInfo(mediaInfoTask); return; }
             }
+
+            if (mediaInfoTask != null)
+            {
+                var mi = await mediaInfoTask;
+                if (openToken != _frontOpenToken) { mi?.Dispose(); return; }
+                ApplyMediaInfo(mi); // コーデック表示の更新はUIスレッドで行う
+            }
+
             _sensorFrames = sensorFrames;
+            if (_gapPending)
+                DashcamPlayErrorLogger.Log($"[Gap] MediaOpened内: 動画情報・センサー(NMEA)の解析完了まで {swOpened.ElapsedMilliseconds}ms（{sensorFrames.Count}件）");
+            // ここまで
             // グラフはファイル全体分をここで一度だけ計算して描画する（毎フレーム全点を再計算して
             // いた従来方式はスレッド負荷が無駄に高かったため）。再生中はSetPlayhead()で現在位置を
             // 反映するだけにする。チャート自体がシークUIも兼ねるため、Maximum等の設定は不要
@@ -1637,9 +1676,13 @@ namespace VerticalPlayer.Dashcam
 
             if (_wantsPlaying)
             {
+                if (_gapPending)
+                    DashcamPlayErrorLogger.Log($"[Gap] MediaOpened内: グラフ描画まで終え、Play()直前 {swOpened.ElapsedMilliseconds}ms（MediaEndedから{GapMs(_gapMediaEndedTs)}ms）");
                 PlayerFront.Play();
                 _isPlaying = true;
                 SetPlayPauseIcon(true);
+                if (_gapPending)
+                    DashcamPlayErrorLogger.Log($"[Gap] MediaEnded → Play()呼び出し完了まで {GapMs(_gapMediaEndedTs)}ms");
             }
 
             if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
@@ -1654,30 +1697,39 @@ namespace VerticalPlayer.Dashcam
             SchedulePrefetchIfNeeded();
         }
 
-        // MediaInfoNative で詳細解析。MainWindow.AnalyzeAndShowMediaInfoと同じ仕組み。
-        // 音声はFrontのみのため、Front基準でのみ解析する。
-        private void AnalyzeAndShowMediaInfo(string path)
+        private int _frontOpenToken; // PlayerFront_MediaOpenedの世代番号（解析待機中の切替を検出する）
+
+        // 別スレッドで動画情報を解析する（UI要素には触れない）。失敗時はnull。
+        private static MediaInfoNative? ProbeMediaInfo(string path)
         {
             try
             {
                 var mi = new MediaInfoNative(path);
-                if (!mi.Success)
-                {
-                    DashcamPlayErrorLogger.Log($"[MediaInfo] failed for {path}");
-                    _mediaInfo?.Dispose();
-                    _mediaInfo = null;
-                    UpdateCodecStatusBar();
-                    return;
-                }
-
-                _mediaInfo?.Dispose();
-                _mediaInfo = mi;
-                UpdateCodecStatusBar();
+                if (mi.Success) return mi;
+                DashcamPlayErrorLogger.Log($"[MediaInfo] failed for {path}");
+                mi.Dispose();
+                return null;
             }
             catch (Exception ex)
             {
                 DashcamPlayErrorLogger.Log($"[MediaInfo] EXCEPTION: {ex.Message}");
+                return null;
             }
+        }
+
+        // 解析結果を反映する（UIスレッドで呼ぶ）。
+        private void ApplyMediaInfo(MediaInfoNative? mi)
+        {
+            _mediaInfo?.Dispose();
+            _mediaInfo = mi;
+            UpdateCodecStatusBar();
+        }
+
+        // 解析の完了前に別ファイルへ切り替わった場合、その結果を破棄する。
+        private static void DiscardMediaInfo(Task<MediaInfoNative?>? task)
+        {
+            if (task == null) return;
+            _ = task.ContinueWith(t => { if (t.IsCompletedSuccessfully) t.Result?.Dispose(); }, TaskScheduler.Default);
         }
 
         // コントロールバーにMainWindow本体と同じコーデック略称を表示する。
@@ -1761,9 +1813,47 @@ namespace VerticalPlayer.Dashcam
             UpdateRearPipVisibility();
         }
 
+        // ファイル切替の継ぎ目の長さを測る（MediaEnded → 次ファイルのOpen完了 → 最初のフレーム表示）
+        private long _gapMediaEndedTs;
+        private bool _gapPending;
+
+
+        // 切替後の約10秒間、UIスレッドが固まっていないかを監視して[UIStall]として記録する
+        private System.Windows.Threading.DispatcherTimer? _uiStallTimer;
+        private long _uiStallLastTick;
+        private long _uiStallUntilTs;
+
+        private void StartUiStallProbe()
+        {
+            _uiStallLastTick = System.Diagnostics.Stopwatch.GetTimestamp();
+            _uiStallUntilTs = _uiStallLastTick + 10 * System.Diagnostics.Stopwatch.Frequency;
+            if (_uiStallTimer == null)
+            {
+                _uiStallTimer = new System.Windows.Threading.DispatcherTimer(System.Windows.Threading.DispatcherPriority.Normal)
+                {
+                    Interval = TimeSpan.FromMilliseconds(50)
+                };
+                _uiStallTimer.Tick += (_, _) =>
+                {
+                    long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                    long lateMs = (long)((now - _uiStallLastTick) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+                    _uiStallLastTick = now;
+                    if (lateMs > 300)
+                        DashcamPlayErrorLogger.Log($"[UIStall] UIスレッドが約{lateMs}ms応答しませんでした");
+                    if (now > _uiStallUntilTs) _uiStallTimer!.Stop();
+                };
+            }
+            _uiStallTimer.Start();
+        }
+
+        private static long GapMs(long fromTs) => (long)((System.Diagnostics.Stopwatch.GetTimestamp() - fromTs) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+
         private void PlayerFront_MediaEnded(object sender, RoutedEventArgs e)
         {
             DashcamPlayErrorLogger.Log($"[MediaEnded] Front={_currentFrontGroup?.TimestampKey ?? "(null)"}");
+            _gapMediaEndedTs = System.Diagnostics.Stopwatch.GetTimestamp();
+            _gapPending = true;
+            StartUiStallProbe();
             AdvanceToNextFrontScene();
         }
 
@@ -2919,6 +3009,11 @@ namespace VerticalPlayer.Dashcam
         {
             _fpsFrameCount++;
             _lastDisplayedPts = ptsSeconds;
+            if (_gapPending)
+            {
+                _gapPending = false;
+                DashcamPlayErrorLogger.Log($"[Gap] MediaEnded → 次ファイルの最初のフレーム表示まで {GapMs(_gapMediaEndedTs)}ms");
+            }
 
             var pos = TimeSpan.FromSeconds(ptsSeconds);
             var frame = DashcamSensorLookup.FindNearest(_sensorFrames, pos);
