@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using Microsoft.Data.Sqlite;
 
@@ -46,6 +47,53 @@ namespace VerticalPlayer.Dashcam
             return conn;
         }
 
+        /// <summary>
+        /// 多数ファイルの更新日時(UTC Ticks)をまとめて取得する。戻り値は入力と同じ並び（取得できなければ-1）。
+        /// ファイルごとに File.GetLastWriteTimeUtc を呼ぶと、FATのSDカード＋カードリーダーでは
+        /// 1件ごとにディレクトリ内を名前で線形探索する問い合わせになり、件数が多いほど極端に遅くなる
+        /// （ドライブによって表示までの時間が大きく違う原因の候補）。ここではフォルダごとに1回だけ
+        /// 一覧(EnumerateFiles)を読み、そこに含まれる更新日時を使う（ファイル単位の追加I/Oなし）。
+        /// </summary>
+        private static long[] GetLastWriteTicksMany(IReadOnlyList<string> paths)
+        {
+            var ticks = new long[paths.Count];
+            Array.Fill(ticks, -1L);
+
+            var byDir = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < paths.Count; i++)
+            {
+                string? dir = Path.GetDirectoryName(paths[i]);
+                if (string.IsNullOrEmpty(dir)) continue;
+                if (!byDir.TryGetValue(dir, out var list)) byDir[dir] = list = new List<int>();
+                list.Add(i);
+            }
+
+            foreach (var (dir, indexes) in byDir)
+            {
+                var map = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    foreach (var fi in new DirectoryInfo(dir).EnumerateFiles())
+                        map[fi.Name] = fi.LastWriteTimeUtc.Ticks;
+                }
+                catch
+                {
+                    // 列挙できなければ下の個別取得へフォールバックする
+                }
+
+                foreach (int i in indexes)
+                {
+                    if (map.TryGetValue(Path.GetFileName(paths[i]), out long t)) ticks[i] = t;
+                    else
+                    {
+                        try { ticks[i] = File.GetLastWriteTimeUtc(paths[i]).Ticks; }
+                        catch { ticks[i] = -1; }
+                    }
+                }
+            }
+            return ticks;
+        }
+
         /// <summary>キャッシュ済みのPNGバイト列を取得する。無ければnull。</summary>
         public static byte[]? TryGet(string videoPath)
         {
@@ -80,14 +128,11 @@ namespace VerticalPlayer.Dashcam
             var result = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
             try
             {
+                var sw = Stopwatch.StartNew();
                 EnsureInitialized();
 
-                var ticks = new long[videoPaths.Count];
-                System.Threading.Tasks.Parallel.For(0, videoPaths.Count, i =>
-                {
-                    try { ticks[i] = File.GetLastWriteTimeUtc(videoPaths[i]).Ticks; }
-                    catch { ticks[i] = -1; }
-                });
+                var ticks = GetLastWriteTicksMany(videoPaths);
+                long statMs = sw.ElapsedMilliseconds;
 
                 using var conn = OpenConnection();
                 using var cmd = conn.CreateCommand();
@@ -104,10 +149,12 @@ namespace VerticalPlayer.Dashcam
                     if (reader.Read())
                         result[videoPaths[i]] = (byte[])reader["ImageData"];
                 }
+                DashcamPlayErrorLogger.Log($"[Thumb] キャッシュ照会 {videoPaths.Count}件: 更新日時取得{statMs}ms + DB照会{sw.ElapsedMilliseconds - statMs}ms（命中{result.Count}件）");
             }
-            catch
+            catch (Exception ex)
             {
-                // 途中まで取れた分だけ返す（残りは生成し直すだけなので致命的にしない）
+                // 途中まで取れた分だけ返す（残りは生成し直すだけなので致命的にしない）。原因調査のためログには残す。
+                DashcamPlayErrorLogger.Log($"[Thumb] キャッシュ照会で例外（{result.Count}件まで取得）: {ex.GetType().Name}: {ex.Message}");
             }
             return result;
         }
@@ -141,9 +188,12 @@ namespace VerticalPlayer.Dashcam
                 var insT = ins.Parameters.Add("$t", SqliteType.Integer);
                 var insD = ins.Parameters.Add("$d", SqliteType.Blob);
 
-                foreach (var (path, data) in items)
+                var list = new List<(string path, byte[] data)>(items);
+                var ticksAll = GetLastWriteTicksMany(list.ConvertAll(x => x.path));
+                for (int k = 0; k < list.Count; k++)
                 {
-                    long ticks = File.GetLastWriteTimeUtc(path).Ticks;
+                    var (path, data) = list[k];
+                    long ticks = ticksAll[k] >= 0 ? ticksAll[k] : File.GetLastWriteTimeUtc(path).Ticks;
                     delP.Value = path;
                     del.ExecuteNonQuery();
                     insP.Value = path;
@@ -153,9 +203,11 @@ namespace VerticalPlayer.Dashcam
                 }
                 tx.Commit();
             }
-            catch
+            catch (Exception ex)
             {
-                // 保存に失敗しても再生自体には影響しない（次回また生成し直すだけ）
+                // 保存に失敗しても再生自体には影響しない（次回また生成し直すだけ）。ただし毎回未命中になる
+                // 原因になり得るため、失敗はログに残す。
+                DashcamPlayErrorLogger.Log($"[Thumb] DB保存(SaveBatch)で例外: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -180,9 +232,10 @@ namespace VerticalPlayer.Dashcam
                 ins.Parameters.AddWithValue("$d", pngBytes);
                 ins.ExecuteNonQuery();
             }
-            catch
+            catch (Exception ex)
             {
-                // 保存に失敗しても再生自体には影響しないので握りつぶす（次回また生成し直すだけ）
+                // 保存に失敗しても再生自体には影響しない（次回また生成し直すだけ）。失敗はログに残す。
+                DashcamPlayErrorLogger.Log($"[Thumb] DB保存(Save)で例外: {ex.GetType().Name}: {ex.Message}");
             }
         }
     }

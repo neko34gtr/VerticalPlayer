@@ -1025,17 +1025,32 @@ namespace VerticalPlayer.Dashcam
 
                     var ct = _thumbCts.Token;
 
+                    // ここから追加：ドライブごとの表示速度差(I:は一瞬、J:は黒いまま遅い)の原因切り分け用ログ
+                    // （play_error.txtに[Thumb]として出力）
+                    var swBatch = System.Diagnostics.Stopwatch.StartNew();
+                    string driveLabel = Path.GetPathRoot(batch[0].path) ?? "?";
+                    // ここまで
+
                     // 1) DBキャッシュを全件まとめて引き、命中分は並列にデコードして一斉に表示する（一瞬で出る）
-                    var cachedMap = await Task.Run(() => DashcamThumbnailCache.TryGetMany(batch.Select(b => b.path).ToList()));
+                    var cachedMap = await Task.Run(() =>
+                    {
+                        try { return DashcamThumbnailCache.TryGetMany(batch.Select(b => b.path).ToList()); }
+                        catch (Exception ex)
+                        {
+                            DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} キャッシュ照会に失敗: {ex.GetType().Name}: {ex.Message}");
+                            return null;
+                        }
+                    });
                     if (ct.IsCancellationRequested) continue;
 
                     var hits = new List<(DashcamMediaGroup group, byte[] data)>();
                     var missing = new List<(DashcamMediaGroup group, string path)>();
                     foreach (var item in batch)
                     {
-                        if (cachedMap.TryGetValue(item.path, out var data)) hits.Add((item.group, data));
+                        if (cachedMap != null && cachedMap.TryGetValue(item.path, out var data)) hits.Add((item.group, data));
                         else missing.Add(item);
                     }
+                    DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} 対象{batch.Count}件 キャッシュ命中{hits.Count} 未命中{missing.Count} DB照会{swBatch.ElapsedMilliseconds}ms");
 
                     if (hits.Count > 0)
                     {
@@ -1050,7 +1065,11 @@ namespace VerticalPlayer.Dashcam
                             }));
                     }
 
+                    if (hits.Count > 0)
+                        DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} 命中{hits.Count}件の表示指示完了 {swBatch.ElapsedMilliseconds}ms");
+
                     // 2) 無かった分だけFFmpegで直接生成する
+                    int[] extractOk = { 0 }, extractFail = { 0 }, firstLogged = { 0 };
                     var fallback = new System.Collections.Concurrent.ConcurrentQueue<(DashcamMediaGroup group, string path)>();
                     var toSave = new System.Collections.Concurrent.ConcurrentQueue<(string path, byte[] jpeg)>();
                     int degree = Math.Clamp(Environment.ProcessorCount / 2, 2, 4); // ディスクI/Oが主体のため控えめ
@@ -1064,9 +1083,13 @@ namespace VerticalPlayer.Dashcam
                                 var (group, path) = item;
                                 ImageSource? source = null;
 
+                                var swOne = System.Diagnostics.Stopwatch.StartNew();
                                 byte[]? bgra = FastThumbnailExtractor.ExtractBgra(path, ThumbWidth, ThumbHeight);
                                 if (bgra != null && bgra.Length >= ThumbWidth * ThumbHeight * 4)
                                 {
+                                    Interlocked.Increment(ref extractOk[0]);
+                                    if (Interlocked.Exchange(ref firstLogged[0], 1) == 0)
+                                        DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} 最初の新規サムネイル完成 バッチ開始から{swBatch.ElapsedMilliseconds}ms（1件の抽出{swOne.ElapsedMilliseconds}ms）");
                                     var bmp = BitmapSource.Create(ThumbWidth, ThumbHeight, 96, 96,
                                         PixelFormats.Bgr32, null, bgra, ThumbWidth * 4);
                                     bmp.Freeze();
@@ -1087,6 +1110,8 @@ namespace VerticalPlayer.Dashcam
                                 }
                                 else
                                 {
+                                    Interlocked.Increment(ref extractFail[0]);
+                                    DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} 高速抽出に失敗→プレイヤー経由へ: {Path.GetFileName(path)}（{swOne.ElapsedMilliseconds}ms）");
                                     fallback.Enqueue(item);
                                 }
                                 return ValueTask.CompletedTask;
@@ -1097,20 +1122,42 @@ namespace VerticalPlayer.Dashcam
                         continue; // 再スキャンで中断された。次のループで新しいキューを処理する
                     }
 
+                    if (missing.Count > 0)
+                        DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} 新規抽出 成功{extractOk[0]} 失敗{extractFail[0]} 所要{swBatch.ElapsedMilliseconds}ms");
+
                     // 新規生成分のDB保存（1本のバックグラウンドタスクで逐次）
                     if (!toSave.IsEmpty)
                     {
                         var saves = toSave.ToArray();
-                        _ = Task.Run(() => DashcamThumbnailCache.SaveBatch(saves.Select(s => (s.path, s.jpeg))));
+                        _ = Task.Run(() =>
+                        {
+                            // 以前は例外が握りつぶされ、保存に失敗しても気付けなかった（毎回キャッシュ未命中になる原因候補）
+                            var swSave = System.Diagnostics.Stopwatch.StartNew();
+                            try
+                            {
+                                DashcamThumbnailCache.SaveBatch(saves.Select(s => (s.path, s.jpeg)));
+                                DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} DB保存 {saves.Length}件 {swSave.ElapsedMilliseconds}ms");
+                            }
+                            catch (Exception ex)
+                            {
+                                DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} DB保存に失敗（{saves.Length}件）: {ex.GetType().Name}: {ex.Message}");
+                            }
+                        });
                     }
 
                     // FFmpeg直接抽出に失敗したファイルだけ、従来のプレイヤー経由(UIスレッド・逐次)で生成する
                     foreach (var (group, path) in fallback)
                     {
                         if (ct.IsCancellationRequested) break;
+                        var swFb = System.Diagnostics.Stopwatch.StartNew();
                         byte[]? png = await GenerateThumbnailAsync(path, fast: false);
+                        DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} プレイヤー経由 {Path.GetFileName(path)} {(png == null ? "失敗" : "成功")} {swFb.ElapsedMilliseconds}ms");
                         if (png == null) continue; // 壊れたファイル等はスキップ
-                        await Task.Run(() => DashcamThumbnailCache.Save(path, png));
+                        await Task.Run(() =>
+                        {
+                            try { DashcamThumbnailCache.Save(path, png); }
+                            catch (Exception ex) { DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} DB保存に失敗（プレイヤー経由分）: {ex.Message}"); }
+                        });
                         var imageSource = BytesToImageSource(png);
                         Dispatcher.Invoke(() => group.Thumbnail = imageSource);
                     }
@@ -1903,13 +1950,13 @@ namespace VerticalPlayer.Dashcam
         private DispatcherTimer? _frameStepRepeatTimer;
         private int _frameStepRepeatDir;
 
-        /// <summary>コマ送り1回あたりのコマ数（1/3/5/10/30）。永続化対象。AppSettings側でintとして保持する想定。</summary>
+        /// <summary>コマ送り1回あたりのコマ数（1/3/5/8/10/15/30）。永続化対象。AppSettings側でintとして保持する想定。</summary>
         public int FrameStepFramesSetting
         {
             get => _frameStepFrames;
             set
             {
-                _frameStepFrames = value is 1 or 3 or 5 or 10 or 30 ? value : 3;
+                _frameStepFrames = value is 1 or 3 or 5 or 8 or 10 or 15 or 30 ? value : 3;
                 foreach (ComboBoxItem item in FrameStepAmountCombo.Items)
                 {
                     if ((string)item.Tag == _frameStepFrames.ToString()) { FrameStepAmountCombo.SelectedItem = item; break; }
@@ -1972,8 +2019,16 @@ namespace VerticalPlayer.Dashcam
                 var step = TimeSpan.FromTicks(oneFrame.Ticks * _frameStepFrames);
                 var dur = PlayerFront.NaturalDuration.TimeSpan;
 
-                // 再生やシークで位置が大きく動いていたら、現在位置を基準に取り直す
+                // 基準は「いま画面に出ているフレームの時刻」。再生中に止めた直後などは、時計(Position)が
+                // 表示中のフレームより手前/先へずれていることがあり、それを基準にすると最初の1回が
+                // 表示中の映像より過去へ戻って（逆行して）から進む動きになっていた。
                 var basePos = PlayerFront.Position;
+                if (_lastDisplayedPts >= 0)
+                {
+                    var shown = TimeSpan.FromSeconds(_lastDisplayedPts);
+                    if ((shown - basePos).Duration() < TimeSpan.FromSeconds(2)) basePos = shown; // 前のファイルの古い値は使わない
+                }
+                // 再生やシークで位置が大きく動いていたら、基準を取り直す
                 if (!_frameStepPosValid || (basePos - _frameStepPos).Duration() > step + TimeSpan.FromSeconds(0.25))
                     _frameStepPos = basePos;
 
@@ -2020,6 +2075,29 @@ namespace VerticalPlayer.Dashcam
         }
 
         private ScreenshotFormat _screenshotFormat = ScreenshotFormat.Jpg;
+        private bool _screenshotComposite; // false=フロントのみ / true=全て合成
+
+        /// <summary>スクリーンショットの撮影範囲。"FrontOnly"（メイン映像のみ）／"Composite"（映像エリアの全表示を合成）。
+        /// 永続化対象。AppSettings側では文字列で保持する想定。</summary>
+        public string ScreenshotComposeSetting
+        {
+            get => _screenshotComposite ? "Composite" : "FrontOnly";
+            set
+            {
+                _screenshotComposite = string.Equals(value, "Composite", StringComparison.OrdinalIgnoreCase);
+                string tag = _screenshotComposite ? "Composite" : "FrontOnly";
+                foreach (ComboBoxItem item in ScreenshotComposeCombo.Items)
+                {
+                    if ((string)item.Tag == tag) { ScreenshotComposeCombo.SelectedItem = item; break; }
+                }
+            }
+        }
+
+        private void ScreenshotComposeCombo_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (ScreenshotComposeCombo.SelectedItem is ComboBoxItem item)
+                _screenshotComposite = (string)item.Tag == "Composite";
+        }
 
         /// <summary>スクリーンショットの保存形式。永続化対象。AppSettings側では文字列(enum名)で保持する想定。</summary>
         public string ScreenshotFormatSetting
@@ -2055,10 +2133,22 @@ namespace VerticalPlayer.Dashcam
             ScreenshotButton.IsEnabled = false; // AVIFは数秒かかることがあるため、保存中の二重押しを防ぐ
             try
             {
-                int w = (int)Math.Max(1, PlayerFront.ActualWidth);
-                int h = (int)Math.Max(1, PlayerFront.ActualHeight);
+                // 「全て合成」は映像エリア(VideoArea)ごと描画する。フロント映像の上に重なっているリア(PiP)・
+                // 車速OSD・地図情報通知がそのまま入る。「フロントのみ」は従来どおりメイン映像だけ。
+                FrameworkElement target = _screenshotComposite ? VideoArea : PlayerFront;
+                int w = (int)Math.Max(1, target.ActualWidth);
+                int h = (int)Math.Max(1, target.ActualHeight);
                 var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
-                rtb.Render(PlayerFront);
+
+                // リアPiP右下のリサイズ用グリップは操作用の部品なので、写り込まないよう一時的に隠す
+                var gripVisibility = RearPipResizeGrip.Visibility;
+                if (_screenshotComposite)
+                {
+                    RearPipResizeGrip.Visibility = Visibility.Hidden;
+                    VideoArea.UpdateLayout();
+                }
+                try { rtb.Render(target); }
+                finally { RearPipResizeGrip.Visibility = gripVisibility; }
                 rtb.Freeze(); // 別スレッドでエンコードするため
 
                 string dir = Path.Combine(AppContext.BaseDirectory, "Screenshots");
@@ -2823,9 +2913,12 @@ namespace VerticalPlayer.Dashcam
 
         // ---- HUD更新（Frontの実フレーム表示に同期。FrameDisplayedはAction<double>で秒単位pts） ----
 
+        private double _lastDisplayedPts = -1; // 直近に実際に画面へ出たフレームの時刻(秒)。コマ送りの基準位置に使う
+
         private void OnFrontFrameDisplayed(double ptsSeconds)
         {
             _fpsFrameCount++;
+            _lastDisplayedPts = ptsSeconds;
 
             var pos = TimeSpan.FromSeconds(ptsSeconds);
             var frame = DashcamSensorLookup.FindNearest(_sensorFrames, pos);

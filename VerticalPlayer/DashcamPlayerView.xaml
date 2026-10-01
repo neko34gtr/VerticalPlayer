@@ -141,6 +141,14 @@
                     <ComboBoxItem Content="AVIF" Tag="Avif"/>
                 </ComboBox>
 
+                <TextBlock Text="撮影範囲" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox x:Name="ScreenshotComposeCombo" Width="110" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
+                          SelectionChanged="ScreenshotComposeCombo_Changed" SelectedIndex="0"
+                          ToolTip="スクリーンショットに写す範囲。フロントのみ＝メイン映像だけ／全て合成＝映像エリアに表示中のリア(PiP)・車速OSD・地図情報通知もそのまま含める">
+                    <ComboBoxItem Content="フロントのみ" Tag="FrontOnly"/>
+                    <ComboBoxItem Content="全て合成" Tag="Composite"/>
+                </ComboBox>
+
                 <TextBlock Text="コマ送り量" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <ComboBox x:Name="FrameStepAmountCombo" Width="90" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
                           SelectionChanged="FrameStepAmountCombo_Changed" SelectedIndex="1"
@@ -148,7 +156,9 @@
                     <ComboBoxItem Content="1コマ" Tag="1"/>
                     <ComboBoxItem Content="3コマ" Tag="3"/>
                     <ComboBoxItem Content="5コマ" Tag="5"/>
+                    <ComboBoxItem Content="8コマ" Tag="8"/>
                     <ComboBoxItem Content="10コマ" Tag="10"/>
+                    <ComboBoxItem Content="15コマ" Tag="15"/>
                     <ComboBoxItem Content="30コマ" Tag="30"/>
                 </ComboBox>
 
@@ -355,7 +365,7 @@
                             ToolTip="Frontリストの次のグループへ進む"/>
                     <Button x:Name="ScreenshotButton" Content="&#xE722;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="20"
                             Width="44" Height="38" Style="{StaticResource IconBtn}" Click="ScreenshotButton_Click" Margin="0,0,10,0"
-                            ToolTip="現在のフロント映像を静止画で保存（カメラ）"/>
+                            ToolTip="現在の映像を静止画で保存（カメラ）。範囲は設定行の「撮影範囲」で、形式は「撮影形式」で選択"/>
                     <CheckBox x:Name="RearVisibleCheck" Content="リア表示" Style="{StaticResource ModernCheck}"
                               Foreground="{StaticResource TextPrimary}"
                               Checked="RearVisibleCheck_Changed" Unchecked="RearVisibleCheck_Changed"

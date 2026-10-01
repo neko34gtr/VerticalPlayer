@@ -44,6 +44,8 @@ namespace VerticalPlayer
         public string MapInfoCorner { get; set; } = "BottomLeft"; // Dashcam.MapInfoCornerのenum名をそのまま保存
         /// <summary>スクリーンショットの保存形式（Media.ScreenshotFormatのenum名: Png/Jpg/WebP/Avif）。</summary>
         public string ScreenshotFormat { get; set; } = "Jpg";
+        /// <summary>スクリーンショットの撮影範囲（"FrontOnly"=メイン映像のみ / "Composite"=OSD・地図情報・リアを含めて合成）。</summary>
+        public string ScreenshotCompose { get; set; } = "FrontOnly";
         /// <summary>ドラレコのコマ送り1回あたりのコマ数（1/3/5/10/30）。</summary>
         public int DashcamFrameStepFrames { get; set; } = 3;
         public double MapInfoScale { get; set; } = 1.0;
