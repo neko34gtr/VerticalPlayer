@@ -10,6 +10,43 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="DashcamTheme.xaml"/>
             </ResourceDictionary.MergedDictionaries>
+            <!-- ===== 設定メニュー（ポップオーバー）・ステータスバッジ共通スタイル ===== -->
+            <Style x:Key="PopoverLabel" TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{StaticResource TextAccentCyan}"/>
+                <Setter Property="VerticalAlignment" Value="Center"/>
+                <Setter Property="Width" Value="96"/>
+            </Style>
+            <Style x:Key="PopoverTitle" TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+                <Setter Property="Margin" Value="0,0,0,10"/>
+            </Style>
+            <Style x:Key="PopoverPanel" TargetType="Border">
+                <Setter Property="Background" Value="{StaticResource BgSurface}"/>
+                <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="CornerRadius" Value="8"/>
+                <Setter Property="Padding" Value="14,12,14,6"/>
+                <Setter Property="Margin" Value="8"/>
+                <Setter Property="Effect">
+                    <Setter.Value>
+                        <DropShadowEffect Color="Black" BlurRadius="12" ShadowDepth="2" Opacity="0.6"/>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+            <Style x:Key="BadgeBorder" TargetType="Border">
+                <Setter Property="Background" Value="{StaticResource BgDeep}"/>
+                <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="CornerRadius" Value="10"/>
+                <Setter Property="Padding" Value="8,2"/>
+                <Setter Property="Margin" Value="6,0,0,0"/>
+            </Style>
+            <Style x:Key="BadgeText" TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+                <Setter Property="FontSize" Value="11"/>
+                <Setter Property="VerticalAlignment" Value="Center"/>
+            </Style>
         </ResourceDictionary>
     </UserControl.Resources>
     <!-- 配色・ボタンスタイル(IconBtn/SecondaryBtn/PrimaryBtn/ModernSlider/ModernCheck/ModernCombo/ModernList)は
@@ -31,173 +68,232 @@
         <!-- 「読み込む」ボタンは廃止。イベント種別/ドライブいずれかの選択が変わったら自動で
              読み込み直す（選択のたびに毎回ボタンを押す導線が無駄との指摘のため）。 -->
         <Border x:Name="ToolbarBar" Grid.Row="0" Background="{StaticResource BgSurface}" BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
-            <StackPanel Orientation="Horizontal" Margin="8,6">
-                <TextBlock Text="フォルダ" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="4,0,6,0"/>
-                <ComboBox x:Name="EventFolderCombo" Width="100" Margin="0,0,4,0" Style="{StaticResource ModernCombo}"
+            <Grid Margin="8,6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- 左: フォルダ / ドライブ / 情報一覧 ｜ 設定メニュー（ポップオーバー3つ） -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                    <TextBlock Text="フォルダ" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="4,0,6,0"/>
+                    <ComboBox x:Name="EventFolderCombo" Width="100" Margin="0,0,4,0" Style="{StaticResource ModernCombo}"
                           SelectionChanged="EventFolderCombo_SelectionChanged">
-                    <ComboBoxItem Content="NORMAL" Tag="Normal" IsSelected="True"/>
-                    <ComboBoxItem Content="MANUAL" Tag="Manual"/>
-                    <ComboBoxItem Content="EVENT" Tag="Event"/>
-                    <ComboBoxItem Content="PARKING" Tag="Parking"/>
-                </ComboBox>
-
-                <TextBlock Text="ドライブ" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="12,0,6,0"/>
-                <ComboBox x:Name="DriveCombo" Width="200" Margin="0,0,4,0" Style="{StaticResource ModernCombo}"
-                          DisplayMemberPath="DisplayName" SelectionChanged="DriveCombo_SelectionChanged"/>
-                <Button x:Name="RefreshDrivesButton" Content="⟳" Width="28" Style="{StaticResource IconBtn}"
-                        Click="RefreshDrivesButton_Click" ToolTip="ドライブ一覧を更新" Margin="0,0,16,0"/>
-                <Button x:Name="PairListButton" Content="情報一覧" Style="{StaticResource SecondaryBtn}"
-                        Click="PairListButton_Click" ToolTip="Front/Rear組み合わせの確認・地図情報通知の内部データ確認" Margin="0,0,16,0"/>
-
-                <CheckBox x:Name="RearLinkedCheck" Content="リア追従" IsChecked="True" Style="{StaticResource ModernCheck}"
-                          Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
-                          Checked="RearLinkedCheck_Changed" Unchecked="RearLinkedCheck_Changed" Margin="0,0,16,0"/>
-
-                <TextBlock Text="フロント倍率" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <ComboBox x:Name="ZoomCombo" Width="90" SelectionChanged="ZoomCombo_SelectionChanged" Margin="0,0,16,0"
-                          Style="{StaticResource ModernCombo}">
-                    <ComboBoxItem Content="0.25x" Tag="0.25"/>
-                    <ComboBoxItem Content="0.5x" Tag="0.5"/>
-                    <ComboBoxItem Content="オリジナル" Tag="1"/>
-                    <ComboBoxItem Content="1.5x" Tag="1.5"/>
-                    <ComboBoxItem Content="2x" Tag="2" IsSelected="True"/>
-                    <ComboBoxItem Content="3x" Tag="3"/>
-                    <ComboBoxItem Content="4x" Tag="4"/>
-                </ComboBox>
-
-                <!-- リア倍率: リア表示スイッチがONの間だけ表示（コードビハインドのUpdateRearPipVisibilityで切替）。
-                     Tagはリア映像の等倍(オリジナル)を1.0とした縮小倍率。最大=オリジナル(映像エリアに収まる範囲)、
-                     最小0.115=従来のPiP既定サイズ(220x124)。中間値は暫定 -->
-                <StackPanel x:Name="RearZoomPanel" Orientation="Horizontal" Visibility="Collapsed">
-                    <TextBlock Text="リア倍率" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                    <ComboBox x:Name="RearZoomCombo" Width="90" SelectionChanged="RearZoomCombo_SelectionChanged" Margin="0,0,16,0"
-                              Style="{StaticResource ModernCombo}">
-                        <ComboBoxItem Content="0.11x" Tag="0.115" IsSelected="True"/>
-                        <ComboBoxItem Content="0.25x" Tag="0.25"/>
-                        <ComboBoxItem Content="0.5x" Tag="0.5"/>
-                        <ComboBoxItem Content="オリジナル" Tag="1"/>
+                        <ComboBoxItem Content="NORMAL" Tag="Normal" IsSelected="True"/>
+                        <ComboBoxItem Content="MANUAL" Tag="Manual"/>
+                        <ComboBoxItem Content="EVENT" Tag="Event"/>
+                        <ComboBoxItem Content="PARKING" Tag="Parking"/>
                     </ComboBox>
-                </StackPanel>
 
-                <!-- 【今回追加】リア時間: Front/Rearの録画時刻のズレ（別クロック起因）を手動補正する。
-                     単位は秒。正の値=リア側の時計が進んでいるとみなし、リアの参照時刻を早める方向に補正、
-                     負の値=リア側の時計が遅れているとみなし、リアの参照時刻を遅らせる方向に補正する。
-                     AUTO(既定)=ファイル名時刻同士をそのまま使う（従来通りの動作、手動補正なし）。
-                     リア倍率と同じくリア表示スイッチがONの間だけ表示。 -->
-                <StackPanel x:Name="RearTimeOffsetPanel" Orientation="Horizontal" Visibility="Collapsed">
-                    <TextBlock Text="リア時間" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                    <ComboBox x:Name="RearTimeOffsetCombo" Width="90" SelectionChanged="RearTimeOffsetCombo_SelectionChanged" Margin="0,0,16,0"
+                    <TextBlock Text="ドライブ" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="12,0,6,0"/>
+                    <ComboBox x:Name="DriveCombo" Width="200" Margin="0,0,4,0" Style="{StaticResource ModernCombo}"
+                          DisplayMemberPath="DisplayName" SelectionChanged="DriveCombo_SelectionChanged"/>
+                    <Button x:Name="RefreshDrivesButton" Content="⟳" Width="28" Style="{StaticResource IconBtn}"
+                        Click="RefreshDrivesButton_Click" ToolTip="ドライブ一覧を更新" Margin="0,0,8,0"/>
+                    <Button x:Name="PairListButton" Content="情報一覧" Style="{StaticResource SecondaryBtn}"
+                        Click="PairListButton_Click" ToolTip="Front/Rear組み合わせの確認・地図情報通知の内部データ確認" Margin="0,0,8,0"/>
+
+                    <Border Width="1" Height="20" Background="{StaticResource Border}" Margin="0,0,12,0" VerticalAlignment="Center"/>
+
+                    <!-- 設定メニュー: ボタンで該当ポップオーバーを開閉する（排他。外側クリック/Escで閉じる。制御はコードビハインドのPopoverButton_Click）。
+                     中の各コントロールは従来のx:Name・イベントのまま移しただけなので、設定の保存/復元の仕組みは変わらない。 -->
+                    <Button x:Name="DisplayMenuButton" Content="⚙ 表示・解析設定" Tag="DisplayPopover" Style="{StaticResource SecondaryBtn}"
+                        Click="PopoverButton_Click" Margin="0,0,6,0" ToolTip="フロント/リア倍率・車速OSD・トンネル検出・AI超解像"/>
+                    <Popup x:Name="DisplayPopover" PlacementTarget="{Binding ElementName=DisplayMenuButton}" Placement="Bottom" VerticalOffset="2"
+                       StaysOpen="True" AllowsTransparency="True" PopupAnimation="Fade">
+                        <Border Style="{StaticResource PopoverPanel}">
+                            <StackPanel MinWidth="250">
+                                <TextBlock Text="表示・解析設定" Style="{StaticResource PopoverTitle}"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="フロント倍率" Style="{StaticResource PopoverLabel}"/>
+                                    <ComboBox x:Name="ZoomCombo" Width="90" SelectionChanged="ZoomCombo_SelectionChanged"
+                          Style="{StaticResource ModernCombo}">
+                                        <ComboBoxItem Content="0.25x" Tag="0.25"/>
+                                        <ComboBoxItem Content="0.5x" Tag="0.5"/>
+                                        <ComboBoxItem Content="オリジナル" Tag="1"/>
+                                        <ComboBoxItem Content="1.5x" Tag="1.5"/>
+                                        <ComboBoxItem Content="2x" Tag="2" IsSelected="True"/>
+                                        <ComboBoxItem Content="3x" Tag="3"/>
+                                        <ComboBoxItem Content="4x" Tag="4"/>
+                                    </ComboBox>
+                                </StackPanel>
+                                <StackPanel x:Name="RearZoomPanel" Orientation="Horizontal" Visibility="Collapsed" Margin="0,0,0,8">
+                                    <TextBlock Text="リア倍率" Style="{StaticResource PopoverLabel}"/>
+                                    <ComboBox x:Name="RearZoomCombo" Width="90" SelectionChanged="RearZoomCombo_SelectionChanged"
+                              Style="{StaticResource ModernCombo}">
+                                        <ComboBoxItem Content="0.11x" Tag="0.115" IsSelected="True"/>
+                                        <ComboBoxItem Content="0.25x" Tag="0.25"/>
+                                        <ComboBoxItem Content="0.5x" Tag="0.5"/>
+                                        <ComboBoxItem Content="オリジナル" Tag="1"/>
+                                    </ComboBox>
+                                </StackPanel>
+                                <StackPanel x:Name="RearTimeOffsetPanel" Orientation="Horizontal" Visibility="Collapsed" Margin="0,0,0,8">
+                                    <TextBlock Text="リア時間" Style="{StaticResource PopoverLabel}"/>
+                                    <ComboBox x:Name="RearTimeOffsetCombo" Width="90" SelectionChanged="RearTimeOffsetCombo_SelectionChanged"
                               Style="{StaticResource ModernCombo}"
                               ToolTip="Front/Rearの録画時刻のズレを手動補正します（秒）。AUTOはファイル名時刻をそのまま使用。">
-                        <ComboBoxItem Content="AUTO" Tag="auto" IsSelected="True"/>
-                        <ComboBoxItem Content="-15s" Tag="-15"/>
-                        <ComboBoxItem Content="-14s" Tag="-14"/>
-                        <ComboBoxItem Content="-13s" Tag="-13"/>
-                        <ComboBoxItem Content="-12s" Tag="-12"/>
-                        <ComboBoxItem Content="-11s" Tag="-11"/>
-                        <ComboBoxItem Content="-10s" Tag="-10"/>
-                        <ComboBoxItem Content="-9s" Tag="-9"/>
-                        <ComboBoxItem Content="-8s" Tag="-8"/>
-                        <ComboBoxItem Content="-7s" Tag="-7"/>
-                        <ComboBoxItem Content="-6s" Tag="-6"/>
-                        <ComboBoxItem Content="-5s" Tag="-5"/>
-                        <ComboBoxItem Content="-4s" Tag="-4"/>
-                        <ComboBoxItem Content="-3s" Tag="-3"/>
-                        <ComboBoxItem Content="-2s" Tag="-2"/>
-                        <ComboBoxItem Content="-1s" Tag="-1"/>
-                        <ComboBoxItem Content="0s" Tag="0"/>
-                        <ComboBoxItem Content="+1s" Tag="1"/>
-                        <ComboBoxItem Content="+2s" Tag="2"/>
-                        <ComboBoxItem Content="+3s" Tag="3"/>
-                        <ComboBoxItem Content="+4s" Tag="4"/>
-                        <ComboBoxItem Content="+5s" Tag="5"/>
-                        <ComboBoxItem Content="+6s" Tag="6"/>
-                        <ComboBoxItem Content="+7s" Tag="7"/>
-                        <ComboBoxItem Content="+8s" Tag="8"/>
-                        <ComboBoxItem Content="+9s" Tag="9"/>
-                        <ComboBoxItem Content="+10s" Tag="10"/>
-                        <ComboBoxItem Content="+11s" Tag="11"/>
-                        <ComboBoxItem Content="+12s" Tag="12"/>
-                        <ComboBoxItem Content="+13s" Tag="13"/>
-                        <ComboBoxItem Content="+14s" Tag="14"/>
-                        <ComboBoxItem Content="+15s" Tag="15"/>
-                    </ComboBox>
-                </StackPanel>
-
-                <!-- 車速OSD（映像右上に走行速度を大きく表示）。AppSettings.EnableOSDで永続化 -->
-                <CheckBox x:Name="SpeedOsdCheck" Content="車速OSD" IsChecked="True" Style="{StaticResource ModernCheck}"
+                                        <ComboBoxItem Content="AUTO" Tag="auto" IsSelected="True"/>
+                                        <ComboBoxItem Content="-15s" Tag="-15"/>
+                                        <ComboBoxItem Content="-14s" Tag="-14"/>
+                                        <ComboBoxItem Content="-13s" Tag="-13"/>
+                                        <ComboBoxItem Content="-12s" Tag="-12"/>
+                                        <ComboBoxItem Content="-11s" Tag="-11"/>
+                                        <ComboBoxItem Content="-10s" Tag="-10"/>
+                                        <ComboBoxItem Content="-9s" Tag="-9"/>
+                                        <ComboBoxItem Content="-8s" Tag="-8"/>
+                                        <ComboBoxItem Content="-7s" Tag="-7"/>
+                                        <ComboBoxItem Content="-6s" Tag="-6"/>
+                                        <ComboBoxItem Content="-5s" Tag="-5"/>
+                                        <ComboBoxItem Content="-4s" Tag="-4"/>
+                                        <ComboBoxItem Content="-3s" Tag="-3"/>
+                                        <ComboBoxItem Content="-2s" Tag="-2"/>
+                                        <ComboBoxItem Content="-1s" Tag="-1"/>
+                                        <ComboBoxItem Content="0s" Tag="0"/>
+                                        <ComboBoxItem Content="+1s" Tag="1"/>
+                                        <ComboBoxItem Content="+2s" Tag="2"/>
+                                        <ComboBoxItem Content="+3s" Tag="3"/>
+                                        <ComboBoxItem Content="+4s" Tag="4"/>
+                                        <ComboBoxItem Content="+5s" Tag="5"/>
+                                        <ComboBoxItem Content="+6s" Tag="6"/>
+                                        <ComboBoxItem Content="+7s" Tag="7"/>
+                                        <ComboBoxItem Content="+8s" Tag="8"/>
+                                        <ComboBoxItem Content="+9s" Tag="9"/>
+                                        <ComboBoxItem Content="+10s" Tag="10"/>
+                                        <ComboBoxItem Content="+11s" Tag="11"/>
+                                        <ComboBoxItem Content="+12s" Tag="12"/>
+                                        <ComboBoxItem Content="+13s" Tag="13"/>
+                                        <ComboBoxItem Content="+14s" Tag="14"/>
+                                        <ComboBoxItem Content="+15s" Tag="15"/>
+                                    </ComboBox>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="車速OSD" Style="{StaticResource PopoverLabel}"/>
+                                    <CheckBox x:Name="SpeedOsdCheck" Content="有効" IsChecked="True" Style="{StaticResource ModernCheck}"
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
-                          Checked="SpeedOsdCheck_Changed" Unchecked="SpeedOsdCheck_Changed" Margin="0,0,16,0"
+                          Checked="SpeedOsdCheck_Changed" Unchecked="SpeedOsdCheck_Changed"
                           ToolTip="映像の右上に走行速度を大きく表示"/>
-
-                <!-- スクリーンショットの保存形式とコマ送りの量 -->
-                <TextBlock Text="撮影形式" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <ComboBox x:Name="ScreenshotFormatCombo" Width="80" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
-                          SelectionChanged="ScreenshotFormatCombo_Changed" SelectedIndex="1"
-                          ToolTip="スクリーンショットの保存形式（ファイル名は 日時_VPSC）。WebP/AVIFは使用中のFFmpegが対応している場合のみ。非対応ならJPGで保存します">
-                    <ComboBoxItem Content="PNG" Tag="Png"/>
-                    <ComboBoxItem Content="JPG" Tag="Jpg"/>
-                    <ComboBoxItem Content="WebP" Tag="WebP"/>
-                    <ComboBoxItem Content="AVIF" Tag="Avif"/>
-                </ComboBox>
-
-                <TextBlock Text="撮影範囲" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <ComboBox x:Name="ScreenshotComposeCombo" Width="110" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
-                          SelectionChanged="ScreenshotComposeCombo_Changed" SelectedIndex="0"
-                          ToolTip="スクリーンショットに写す範囲。フロントのみ＝メイン映像だけ／全て合成＝映像エリアに表示中のリア(PiP)・車速OSD・地図情報通知もそのまま含める">
-                    <ComboBoxItem Content="フロントのみ" Tag="FrontOnly"/>
-                    <ComboBoxItem Content="全て合成" Tag="Composite"/>
-                </ComboBox>
-
-                <TextBlock Text="コマ送り量" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <ComboBox x:Name="FrameStepAmountCombo" Width="90" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
-                          SelectionChanged="FrameStepAmountCombo_Changed" SelectedIndex="1"
-                          ToolTip="コマ送りボタン1回あたりに進むコマ数（動画の実fps基準。30fpsなら30コマ＝約1秒）">
-                    <ComboBoxItem Content="1コマ" Tag="1"/>
-                    <ComboBoxItem Content="3コマ" Tag="3"/>
-                    <ComboBoxItem Content="5コマ" Tag="5"/>
-                    <ComboBoxItem Content="8コマ" Tag="8"/>
-                    <ComboBoxItem Content="10コマ" Tag="10"/>
-                    <ComboBoxItem Content="15コマ" Tag="15"/>
-                    <ComboBoxItem Content="30コマ" Tag="30"/>
-                </ComboBox>
-
-                <!-- 地図情報通知（地名・SA/PA・トンネル・利用中の道路名）の表示位置とサイズ -->
-                <TextBlock Text="地図位置" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <ComboBox x:Name="MapInfoCornerCombo" Width="90" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
-                          SelectionChanged="MapInfoCornerCombo_Changed" SelectedIndex="2"
-                          ToolTip="地図情報通知オーバーレイの表示位置">
-                    <ComboBoxItem Content="左上" Tag="TopLeft"/>
-                    <ComboBoxItem Content="右上" Tag="TopRight"/>
-                    <ComboBoxItem Content="左下" Tag="BottomLeft"/>
-                    <ComboBoxItem Content="右下" Tag="BottomRight"/>
-                </ComboBox>
-
-                <TextBlock Text="地図倍率" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <ComboBox x:Name="MapInfoScaleCombo" Width="90" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
-                          SelectionChanged="MapInfoScaleCombo_Changed" SelectedIndex="1"
-                          ToolTip="地図情報通知オーバーレイの拡大率">
-                    <ComboBoxItem Content="0.75x" Tag="0.75"/>
-                    <ComboBoxItem Content="1.0x" Tag="1.00"/>
-                    <ComboBoxItem Content="1.25x" Tag="1.25"/>
-                    <ComboBoxItem Content="1.5x" Tag="1.50"/>
-                </ComboBox>
-
-                <!-- トンネル進入検出方式（実験的機能）。従来方式(Legacy)は実績あり・既定。
-                     実験的方式(Experimental)はロスト直前の速度×経過時間で推定した累積距離を使い、
-                     入口の数km手前からGPSが落ちる長い山岳トンネルでの検出漏れ対策として追加。 -->
-                <TextBlock Text="トンネル検出" Foreground="{StaticResource TextAccentCyan}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <ComboBox x:Name="TunnelEntryDetectionModeCombo" Width="110" Margin="0,0,16,0" Style="{StaticResource ModernCombo}"
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="トンネル検出" Style="{StaticResource PopoverLabel}"/>
+                                    <ComboBox x:Name="TunnelEntryDetectionModeCombo" Width="110" Style="{StaticResource ModernCombo}"
                           SelectionChanged="TunnelEntryDetectionModeCombo_Changed" SelectedIndex="0"
                           ToolTip="トンネル進入検出方式。「実験的」はGPSロスト中も速度×経過時間で推定位置を計算し続け、長い山岳トンネルでの検出漏れに対応（推定のため誤差はあり得ます）">
-                    <ComboBoxItem Content="従来" Tag="Legacy"/>
-                    <ComboBoxItem Content="動的" Tag="Experimental"/>
-                </ComboBox>
-
-                <CheckBox x:Name="DnnEnabledCheck" Content="AI推論(超解像)" Style="{StaticResource ModernCheck}"
+                                        <ComboBoxItem Content="従来" Tag="Legacy"/>
+                                        <ComboBoxItem Content="動的" Tag="Experimental"/>
+                                    </ComboBox>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="AI（超解像）" Style="{StaticResource PopoverLabel}"/>
+                                    <CheckBox x:Name="DnnEnabledCheck" Content="有効" Style="{StaticResource ModernCheck}"
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
                           Checked="DnnEnabledCheck_Changed" Unchecked="DnnEnabledCheck_Changed"/>
-            </StackPanel>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </Popup>
+
+                    <Button x:Name="CaptureMenuButton" Content="📸 キャプチャ設定" Tag="CapturePopover" Style="{StaticResource SecondaryBtn}"
+                        Click="PopoverButton_Click" Margin="0,0,6,0" ToolTip="スクリーンショットの形式・範囲、コマ送り量"/>
+                    <Popup x:Name="CapturePopover" PlacementTarget="{Binding ElementName=CaptureMenuButton}" Placement="Bottom" VerticalOffset="2"
+                       StaysOpen="True" AllowsTransparency="True" PopupAnimation="Fade">
+                        <Border Style="{StaticResource PopoverPanel}">
+                            <StackPanel MinWidth="250">
+                                <TextBlock Text="キャプチャ設定" Style="{StaticResource PopoverTitle}"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="撮影形式" Style="{StaticResource PopoverLabel}"/>
+                                    <ComboBox x:Name="ScreenshotFormatCombo" Width="80" Style="{StaticResource ModernCombo}"
+                          SelectionChanged="ScreenshotFormatCombo_Changed" SelectedIndex="1"
+                          ToolTip="スクリーンショットの保存形式（ファイル名は 日時_VPSC）。WebP/AVIFは使用中のFFmpegが対応している場合のみ。非対応ならJPGで保存します">
+                                        <ComboBoxItem Content="PNG" Tag="Png"/>
+                                        <ComboBoxItem Content="JPG" Tag="Jpg"/>
+                                        <ComboBoxItem Content="WebP" Tag="WebP"/>
+                                        <ComboBoxItem Content="AVIF" Tag="Avif"/>
+                                    </ComboBox>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="撮影範囲" Style="{StaticResource PopoverLabel}"/>
+                                    <ComboBox x:Name="ScreenshotComposeCombo" Width="110" Style="{StaticResource ModernCombo}"
+                          SelectionChanged="ScreenshotComposeCombo_Changed" SelectedIndex="1"
+                          ToolTip="スクリーンショットに写す範囲。全て合成＝映像エリアに表示中のリア(PiP)・車速OSD・地図情報通知も含める／フロントのみ＝メイン映像だけ／リアのみ＝リア映像だけ（リア表示ON時のみ。現在の表示サイズで保存）">
+                                        <ComboBoxItem Content="全て合成" Tag="Composite"/>
+                                        <ComboBoxItem Content="フロントのみ" Tag="FrontOnly"/>
+                                        <ComboBoxItem Content="リアのみ" Tag="RearOnly"/>
+                                    </ComboBox>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="コマ送り量" Style="{StaticResource PopoverLabel}"/>
+                                    <ComboBox x:Name="FrameStepAmountCombo" Width="90" Style="{StaticResource ModernCombo}"
+                          SelectionChanged="FrameStepAmountCombo_Changed" SelectedIndex="1"
+                          ToolTip="コマ送りボタン1回あたりに進むコマ数（動画の実fps基準。30fpsなら30コマ＝約1秒）">
+                                        <ComboBoxItem Content="1コマ" Tag="1"/>
+                                        <ComboBoxItem Content="3コマ" Tag="3"/>
+                                        <ComboBoxItem Content="5コマ" Tag="5"/>
+                                        <ComboBoxItem Content="8コマ" Tag="8"/>
+                                        <ComboBoxItem Content="10コマ" Tag="10"/>
+                                        <ComboBoxItem Content="15コマ" Tag="15"/>
+                                        <ComboBoxItem Content="30コマ" Tag="30"/>
+                                    </ComboBox>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </Popup>
+
+                    <Button x:Name="LayoutMenuButton" Content="🗺 配置・レイアウト設定" Tag="LayoutPopover" Style="{StaticResource SecondaryBtn}"
+                        Click="PopoverButton_Click" Margin="0,0,0,0" ToolTip="リア追従・地図情報通知の位置と倍率"/>
+                    <Popup x:Name="LayoutPopover" PlacementTarget="{Binding ElementName=LayoutMenuButton}" Placement="Bottom" VerticalOffset="2"
+                       StaysOpen="True" AllowsTransparency="True" PopupAnimation="Fade">
+                        <Border Style="{StaticResource PopoverPanel}">
+                            <StackPanel MinWidth="250">
+                                <TextBlock Text="配置・レイアウト設定" Style="{StaticResource PopoverTitle}"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="リア追従" Style="{StaticResource PopoverLabel}"/>
+                                    <CheckBox x:Name="RearLinkedCheck" Content="有効" IsChecked="True" Style="{StaticResource ModernCheck}"
+                          Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
+                          Checked="RearLinkedCheck_Changed" Unchecked="RearLinkedCheck_Changed"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="地図位置" Style="{StaticResource PopoverLabel}"/>
+                                    <ComboBox x:Name="MapInfoCornerCombo" Width="90" Style="{StaticResource ModernCombo}"
+                          SelectionChanged="MapInfoCornerCombo_Changed" SelectedIndex="2"
+                          ToolTip="地図情報通知オーバーレイの表示位置">
+                                        <ComboBoxItem Content="左上" Tag="TopLeft"/>
+                                        <ComboBoxItem Content="右上" Tag="TopRight"/>
+                                        <ComboBoxItem Content="左下" Tag="BottomLeft"/>
+                                        <ComboBoxItem Content="右下" Tag="BottomRight"/>
+                                    </ComboBox>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="地図倍率" Style="{StaticResource PopoverLabel}"/>
+                                    <ComboBox x:Name="MapInfoScaleCombo" Width="90" Style="{StaticResource ModernCombo}"
+                          SelectionChanged="MapInfoScaleCombo_Changed" SelectedIndex="1"
+                          ToolTip="地図情報通知オーバーレイの拡大率">
+                                        <ComboBoxItem Content="0.75x" Tag="0.75"/>
+                                        <ComboBoxItem Content="1.0x" Tag="1.00"/>
+                                        <ComboBoxItem Content="1.25x" Tag="1.25"/>
+                                        <ComboBoxItem Content="1.5x" Tag="1.50"/>
+                                    </ComboBox>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </Popup>
+                </StackPanel>
+
+                <!-- 右: 現在の主要設定をひと目で確認できるステータスバッジ（設定変更で即時更新。更新はコードビハインドのUpdateStatusBadges） -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                    <Border x:Name="BadgeAi" Style="{StaticResource BadgeBorder}">
+                        <TextBlock x:Name="BadgeAiText" Style="{StaticResource BadgeText}" Text="AI: OFF"/>
+                    </Border>
+                    <Border Style="{StaticResource BadgeBorder}">
+                        <TextBlock x:Name="BadgeZoomText" Style="{StaticResource BadgeText}" Text="倍率: 2x"/>
+                    </Border>
+                    <Border Style="{StaticResource BadgeBorder}">
+                        <TextBlock x:Name="BadgeCaptureText" Style="{StaticResource BadgeText}" Text="JPG/フロント"/>
+                    </Border>
+                    <Border Style="{StaticResource BadgeBorder}">
+                        <TextBlock x:Name="BadgeRearText" Style="{StaticResource BadgeText}" Text="リア追従"/>
+                    </Border>
+                </StackPanel>
+            </Grid>
         </Border>
 
         <!-- ========== リスト(ホバー展開) + 映像 + 日時/緯度経度 + 走行軌跡マップ ========== -->
@@ -434,5 +530,12 @@
             <media:FfmpegMediaElement x:Name="ThumbCapturePlayer" Canvas.Left="-2000" Canvas.Top="-2000"
                                       Width="320" Height="180" UseGpuPresenter="False"/>
         </Canvas>
+        <!-- ========== 設定変更のトースト通知（約2秒でフェードイン/アウト。表示はコードビハインドのShowToast） ========== -->
+        <Border x:Name="ToastHost" Grid.Row="0" Grid.RowSpan="4" HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                Margin="0,0,0,120" Padding="16,8" CornerRadius="8" Background="#E6202428"
+                BorderBrush="{StaticResource Border}" BorderThickness="1"
+                IsHitTestVisible="False" Visibility="Collapsed" Opacity="0" Panel.ZIndex="1000">
+            <TextBlock x:Name="ToastText" Foreground="White" FontSize="13"/>
+        </Border>
     </Grid>
 </UserControl>

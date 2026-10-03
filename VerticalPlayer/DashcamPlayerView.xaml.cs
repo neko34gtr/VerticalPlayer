@@ -9,6 +9,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using Popup = System.Windows.Controls.Primitives.Popup;
 using Microsoft.Win32;
 using VerticalPlayer.Media;
 // AppMessageBox は親名前空間 VerticalPlayer 側にあるため using が必要
@@ -551,6 +552,7 @@ namespace VerticalPlayer.Dashcam
         {
             InitializeComponent();
             IsVisibleChanged += DashcamPlayerView_IsVisibleChanged;
+            InitializeMenuUi(); // 設定メニュー(ポップオーバー)・ステータスバッジ・トースト通知の配線
 
             // 折りたたみ中はサイドバー内容(ScrollBar/コーナー等)を不可視にする（XAML側の指定に依存しない）
             SidebarContent.Opacity = 0;
@@ -611,6 +613,9 @@ namespace VerticalPlayer.Dashcam
 
         private void DashcamPlayerView_Loaded(object sender, RoutedEventArgs e)
         {
+            HookMenuWindowEvents();
+            UpdateStatusBadges();
+
             // 初回Loaded時点ではRestoreSettings側のレジューム(TryResumeAsync)/起動引数の
             // フォルダ直接読み込みがまだ完了していない場合がある。この状態でRefreshDriveList()が
             // 先頭ドライブ（C:等、通常は録画データが無い）を自動選択してスキャンしてしまうと、
@@ -1697,6 +1702,210 @@ namespace VerticalPlayer.Dashcam
             SchedulePrefetchIfNeeded();
         }
 
+        // =====================================================================
+        // 設定メニュー（ポップオーバー）・ステータスバッジ・トースト通知
+        // =====================================================================
+        // ツールバーの設定項目は3つのポップオーバー(表示・解析 / キャプチャ / 配置・レイアウト)にまとめた。
+        // 中のコントロールは従来のx:Name・イベントのまま移しただけなので、設定の保存/復元は従来と同じ。
+        // ポップオーバーはStaysOpen=Trueにして、開閉（排他・外側クリック・Esc・ウィンドウ移動等）を
+        // ここで制御する（ComboBoxのドロップダウンが外側クリック扱いで閉じてしまうのを避けるため）。
+
+        private bool _menuWindowHooked;
+
+        private Popup[] AllPopovers => new[] { DisplayPopover, CapturePopover, LayoutPopover };
+
+        private ComboBox[] MenuCombos => new[]
+        {
+            ZoomCombo, RearZoomCombo, RearTimeOffsetCombo, TunnelEntryDetectionModeCombo,
+            ScreenshotFormatCombo, ScreenshotComposeCombo, FrameStepAmountCombo,
+            MapInfoCornerCombo, MapInfoScaleCombo,
+        };
+
+        private static string MenuLabel(string controlName) => controlName switch
+        {
+            nameof(ZoomCombo) => "フロント倍率",
+            nameof(RearZoomCombo) => "リア倍率",
+            nameof(RearTimeOffsetCombo) => "リア時間",
+            nameof(TunnelEntryDetectionModeCombo) => "トンネル検出",
+            nameof(ScreenshotFormatCombo) => "撮影形式",
+            nameof(ScreenshotComposeCombo) => "撮影範囲",
+            nameof(FrameStepAmountCombo) => "コマ送り量",
+            nameof(MapInfoCornerCombo) => "地図位置",
+            nameof(MapInfoScaleCombo) => "地図倍率",
+            nameof(SpeedOsdCheck) => "車速OSD",
+            nameof(DnnEnabledCheck) => "AI（超解像）",
+            nameof(RearLinkedCheck) => "リア追従",
+            _ => controlName,
+        };
+
+        private void InitializeMenuUi()
+        {
+            foreach (var cb in MenuCombos) cb.SelectionChanged += MenuCombo_SelectionChanged;
+            foreach (var ck in new[] { SpeedOsdCheck, DnnEnabledCheck, RearLinkedCheck })
+            {
+                ck.Checked += MenuCheck_Changed;
+                ck.Unchecked += MenuCheck_Changed;
+            }
+
+            // 外側クリックで閉じる（Previewなのでコントロールが処理済みのクリックも拾う）。Escでも閉じる。
+            AddHandler(PreviewMouseDownEvent, new System.Windows.Input.MouseButtonEventHandler(Menu_PreviewMouseDown), true);
+            AddHandler(PreviewKeyDownEvent, new System.Windows.Input.KeyEventHandler(Menu_PreviewKeyDown), true);
+            Unloaded += (_, _) => CloseAllPopovers();
+
+            UpdateStatusBadges();
+        }
+
+        // ウィンドウの非アクティブ化・移動・サイズ変更でもポップオーバーを閉じる（Popupは自動では追従しないため）
+        private void HookMenuWindowEvents()
+        {
+            if (_menuWindowHooked) return;
+            if (Window.GetWindow(this) is not Window w) return;
+            w.Deactivated += (_, _) => CloseAllPopovers();
+            w.LocationChanged += (_, _) => CloseAllPopovers();
+            w.SizeChanged += (_, _) => CloseAllPopovers();
+            w.StateChanged += (_, _) => CloseAllPopovers();
+            _menuWindowHooked = true;
+        }
+
+        private void PopoverButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.Tag is not string name || FindName(name) is not Popup popup) return;
+            bool wasOpen = popup.IsOpen;
+            CloseAllPopovers(); // 排他: 他のポップオーバーが開いていれば閉じてから切り替える
+            if (!wasOpen)
+            {
+                popup.IsOpen = true;
+                UpdatePopoverButtonStates();
+            }
+        }
+
+        private void CloseAllPopovers()
+        {
+            foreach (var p in AllPopovers) p.IsOpen = false;
+            UpdatePopoverButtonStates();
+        }
+
+        // 開いているポップオーバーのボタンを強調表示する
+        private void UpdatePopoverButtonStates()
+        {
+            SetMenuButtonActive(DisplayMenuButton, DisplayPopover.IsOpen);
+            SetMenuButtonActive(CaptureMenuButton, CapturePopover.IsOpen);
+            SetMenuButtonActive(LayoutMenuButton, LayoutPopover.IsOpen);
+        }
+
+        private void SetMenuButtonActive(Button button, bool active)
+        {
+            if (active) button.Foreground = (Brush)FindResource("TextAccentCyan");
+            else button.ClearValue(Control.ForegroundProperty);
+        }
+
+        private void Menu_PreviewMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            if (!AllPopovers.Any(p => p.IsOpen)) return;
+            if (e.OriginalSource is not DependencyObject src) { CloseAllPopovers(); return; }
+
+            // メニューボタン自体のクリックは、各ボタンのClick(PopoverButton_Click)で開閉する
+            if (IsInside(src, DisplayMenuButton) || IsInside(src, CaptureMenuButton) || IsInside(src, LayoutMenuButton)) return;
+            // ポップオーバーの中（ComboBoxのドロップダウン含む）のクリックでは閉じない
+            foreach (var p in AllPopovers)
+                if (p.IsOpen && IsInside(src, p)) return;
+
+            CloseAllPopovers();
+        }
+
+        private void Menu_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            if (e.Key != System.Windows.Input.Key.Escape) return;
+            if (!AllPopovers.Any(p => p.IsOpen)) return;
+            // ComboBoxのドロップダウンが開いている間のEscは、まずドロップダウンを閉じる（ComboBox側に任せる）
+            if (MenuCombos.Any(cb => cb.IsDropDownOpen)) return;
+            CloseAllPopovers();
+            e.Handled = true;
+        }
+
+        // nodeがcontainer（Popupの場合はその子コンテンツ）の内側にあるか。Popup/ComboBoxのドロップダウンは
+        // 別のビジュアルツリーなので、ビジュアル親が途切れたら論理親(Popup)へ乗り換えながら辿る。
+        private static bool IsInside(DependencyObject? node, FrameworkElement container)
+        {
+            var popup = container as Popup;
+            for (int guard = 0; node != null && guard < 400; guard++)
+            {
+                if (ReferenceEquals(node, container) || (popup != null && ReferenceEquals(node, popup.Child))) return true;
+                if (node is FrameworkElement fe && fe.Parent is Popup owner) { node = owner; continue; }
+                DependencyObject? next = null;
+                if (node is Visual || node is System.Windows.Media.Media3D.Visual3D) next = VisualTreeHelper.GetParent(node);
+                next ??= LogicalTreeHelper.GetParent(node);
+                node = next;
+            }
+            return false;
+        }
+
+        // ---- 設定変更の検知（ステータスバッジの即時更新 + トースト通知） ----
+
+        private void MenuCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            UpdateStatusBadges();
+            // 初期選択やRestoreSettings等のコード側の変更では通知しない。ユーザーがドロップダウン/キーボードで
+            // 変更したとき（ドロップダウンが開いている、またはフォーカスがあるとき）だけ通知する。
+            if (e.RemovedItems.Count == 0) return;
+            if (sender is ComboBox cb && (cb.IsDropDownOpen || cb.IsKeyboardFocusWithin) && cb.SelectedItem is ComboBoxItem item)
+                ShowToast($"{MenuLabel(cb.Name)}を{item.Content}に変更しました");
+        }
+
+        private void MenuCheck_Changed(object sender, RoutedEventArgs e)
+        {
+            UpdateStatusBadges();
+            if (sender is CheckBox ck && (ck.IsMouseOver || ck.IsKeyboardFocusWithin))
+                ShowToast($"{MenuLabel(ck.Name)}を{(ck.IsChecked == true ? "ON" : "OFF")}に変更しました");
+        }
+
+        private static string SelectedLabel(ComboBox cb) =>
+            (cb.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? string.Empty;
+
+        // メインツールバー右端のバッジ（現在の主要設定）を更新する
+        private void UpdateStatusBadges()
+        {
+            if (BadgeAiText == null || BadgeZoomText == null || BadgeCaptureText == null || BadgeRearText == null) return;
+
+            bool ai = DnnEnabledCheck.IsChecked == true;
+            BadgeAiText.Text = ai ? "AI: ON" : "AI: OFF";
+            BadgeAiText.Foreground = ai ? (Brush)FindResource("TextAccentCyan") : (Brush)FindResource("TextMuted");
+
+            BadgeZoomText.Text = $"倍率: {SelectedLabel(ZoomCombo)}";
+
+            string scope = _screenshotScope switch
+            {
+                ScreenshotScope.Composite => "全合成",
+                ScreenshotScope.RearOnly => "リア",
+                _ => "フロント",
+            };
+            BadgeCaptureText.Text = $"{SelectedLabel(ScreenshotFormatCombo)}/{scope}";
+
+            BadgeRearText.Text = RearLinkedCheck.IsChecked == true ? "リア追従" : "追従OFF";
+        }
+
+        private int _toastToken;
+
+        /// <summary>画面下部に簡易通知を約2秒（フェードイン0.2秒・表示1.6秒・フェードアウト0.4秒）表示する。</summary>
+        private void ShowToast(string message)
+        {
+            ToastText.Text = message;
+            ToastHost.Visibility = Visibility.Visible;
+            int token = ++_toastToken;
+
+            var anim = new System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames();
+            anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(0, TimeSpan.Zero));
+            anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(1, TimeSpan.FromMilliseconds(200)));
+            anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(1, TimeSpan.FromMilliseconds(1800)));
+            anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(0, TimeSpan.FromMilliseconds(2200)));
+            anim.Completed += (_, _) =>
+            {
+                // 連続して通知した場合、古いアニメーションの完了で新しい通知を消さないようにする
+                if (token == _toastToken) ToastHost.Visibility = Visibility.Collapsed;
+            };
+            ToastHost.BeginAnimation(OpacityProperty, anim);
+        }
+
         private int _frontOpenToken; // PlayerFront_MediaOpenedの世代番号（解析待機中の切替を検出する）
 
         // 別スレッドで動画情報を解析する（UI要素には触れない）。失敗時はnull。
@@ -2032,6 +2241,7 @@ namespace VerticalPlayer.Dashcam
             }
         }
         private bool _frameStepBusy;
+        private long _lastStepEndTs; // 直近のコマ送りが終わった時刻(Stopwatch)。連続操作が途切れたかの判定に使う
         private TimeSpan _frameStepPos; // 連続コマ送り時に位置がぶれないよう、送り基準位置を自前で保持する
         private bool _frameStepPosValid;
 
@@ -2109,18 +2319,26 @@ namespace VerticalPlayer.Dashcam
                 var step = TimeSpan.FromTicks(oneFrame.Ticks * _frameStepFrames);
                 var dur = PlayerFront.NaturalDuration.TimeSpan;
 
-                // 基準は「いま画面に出ているフレームの時刻」。再生中に止めた直後などは、時計(Position)が
-                // 表示中のフレームより手前/先へずれていることがあり、それを基準にすると最初の1回が
-                // 表示中の映像より過去へ戻って（逆行して）から進む動きになっていた。
-                var basePos = PlayerFront.Position;
-                if (_lastDisplayedPts >= 0)
+                // コマ送りの基準は、このコマ送り自身が保持している「論理位置」(_frameStepPos)。
+                // 画面に出ているフレームの時刻(表示pts)を毎回の基準にしてはいけない：シーク後に表示される
+                // フレームは直近のキーフレームに丸められ、目標より最大0.4秒ほど先の時刻になる（trace.logで確認）。
+                // それを基準に取り直すと、コマ戻しの途中で位置が前方へ跳ね返り、「戻しても元に戻る」動きになっていた。
+                // 論理位置を取り直すのは、コマ送りの連続操作が途切れたとき（再生・シーク・ファイル切替の後）だけ。
+                bool rebased = false;
+                var prevStepPos = _frameStepPos;
+                if (!_frameStepPosValid)
                 {
-                    var shown = TimeSpan.FromSeconds(_lastDisplayedPts);
-                    if ((shown - basePos).Duration() < TimeSpan.FromSeconds(2)) basePos = shown; // 前のファイルの古い値は使わない
-                }
-                // 再生やシークで位置が大きく動いていたら、基準を取り直す
-                if (!_frameStepPosValid || (basePos - _frameStepPos).Duration() > step + TimeSpan.FromSeconds(0.25))
+                    // 新しいコマ送りの開始。いま画面に出ているフレームの時刻を起点にする
+                    // （再生中に止めた直後は時計(Position)が表示中のフレームとずれることがあるため）
+                    var basePos = PlayerFront.Position;
+                    if (_lastDisplayedPts >= 0)
+                    {
+                        var shown = TimeSpan.FromSeconds(_lastDisplayedPts);
+                        if ((shown - basePos).Duration() < TimeSpan.FromSeconds(2)) basePos = shown; // 前のファイルの古い値は使わない
+                    }
                     _frameStepPos = basePos;
+                    rebased = true;
+                }
 
                 var next = _frameStepPos + TimeSpan.FromTicks(step.Ticks * direction);
                 var last = dur - oneFrame;
@@ -2133,12 +2351,24 @@ namespace VerticalPlayer.Dashcam
 
                 // 半フレーム先へ着地させ、丸め誤差で前のフレームに落ちるのを防ぐ
                 var seekTarget = next + TimeSpan.FromTicks(oneFrame.Ticks / 2);
+                // ここから追加：逆行現象の原因調査用ログ（play_error.txtに[Step]として出力）
+                var swStep = System.Diagnostics.Stopwatch.StartNew();
+                double shownBefore = _lastDisplayedPts;
+                // ここまで
                 await PlayerFront.StepToVideoOnlyAsync(seekTarget, timeoutMs: 1000);
+                // ここから追加
+                DashcamPlayErrorLogger.Log(
+                    $"[Step] dir={direction:+0;-0} {_frameStepFrames}コマ(1コマ={oneFrame.TotalMilliseconds:F1}ms) " +
+                    $"Position={PlayerFront.Position.TotalSeconds:F3} 表示pts: {shownBefore:F3}→{_lastDisplayedPts:F3} " +
+                    $"前回の論理位置={(rebased ? double.NaN : prevStepPos.TotalSeconds):F3} 起点の取り直し={(rebased ? "あり(新規開始)" : "なし(継続)")} " +
+                    $"目標={next.TotalSeconds:F3} 所要{swStep.ElapsedMilliseconds}ms");
+                // ここまで
                 await SeekRearToFrontPositionAsync(next);
                 AccelChart.SetPlayhead(next);
             }
             finally
             {
+                _lastStepEndTs = System.Diagnostics.Stopwatch.GetTimestamp();
                 _frameStepBusy = false;
             }
         }
@@ -2165,28 +2395,30 @@ namespace VerticalPlayer.Dashcam
         }
 
         private ScreenshotFormat _screenshotFormat = ScreenshotFormat.Jpg;
-        private bool _screenshotComposite; // false=フロントのみ / true=全て合成
+        private enum ScreenshotScope { FrontOnly, Composite, RearOnly }
+        private ScreenshotScope _screenshotScope = ScreenshotScope.FrontOnly;
 
-        /// <summary>スクリーンショットの撮影範囲。"FrontOnly"（メイン映像のみ）／"Composite"（映像エリアの全表示を合成）。
-        /// 永続化対象。AppSettings側では文字列で保持する想定。</summary>
+        /// <summary>スクリーンショットの撮影範囲。"FrontOnly"（メイン映像のみ）／"Composite"（映像エリアの全表示を合成）／
+        /// "RearOnly"（リア映像のみ）。永続化対象。AppSettings側では文字列で保持する。</summary>
         public string ScreenshotComposeSetting
         {
-            get => _screenshotComposite ? "Composite" : "FrontOnly";
+            get => _screenshotScope.ToString();
             set
             {
-                _screenshotComposite = string.Equals(value, "Composite", StringComparison.OrdinalIgnoreCase);
-                string tag = _screenshotComposite ? "Composite" : "FrontOnly";
+                if (!Enum.TryParse<ScreenshotScope>(value, true, out var scope)) scope = ScreenshotScope.FrontOnly;
+                _screenshotScope = scope;
                 foreach (ComboBoxItem item in ScreenshotComposeCombo.Items)
                 {
-                    if ((string)item.Tag == tag) { ScreenshotComposeCombo.SelectedItem = item; break; }
+                    if ((string)item.Tag == scope.ToString()) { ScreenshotComposeCombo.SelectedItem = item; break; }
                 }
             }
         }
 
         private void ScreenshotComposeCombo_Changed(object sender, SelectionChangedEventArgs e)
         {
-            if (ScreenshotComposeCombo.SelectedItem is ComboBoxItem item)
-                _screenshotComposite = (string)item.Tag == "Composite";
+            if (ScreenshotComposeCombo.SelectedItem is ComboBoxItem item
+                && Enum.TryParse<ScreenshotScope>((string)item.Tag, out var scope))
+                _screenshotScope = scope;
         }
 
         /// <summary>スクリーンショットの保存形式。永続化対象。AppSettings側では文字列(enum名)で保持する想定。</summary>
@@ -2225,14 +2457,34 @@ namespace VerticalPlayer.Dashcam
             {
                 // 「全て合成」は映像エリア(VideoArea)ごと描画する。フロント映像の上に重なっているリア(PiP)・
                 // 車速OSD・地図情報通知がそのまま入る。「フロントのみ」は従来どおりメイン映像だけ。
-                FrameworkElement target = _screenshotComposite ? VideoArea : PlayerFront;
+                // 「リアのみ」はリア映像だけ（リア表示がONで映っているときのみ。現在の表示サイズで保存）。
+                bool composite = _screenshotScope == ScreenshotScope.Composite;
+                FrameworkElement target;
+                switch (_screenshotScope)
+                {
+                    case ScreenshotScope.Composite:
+                        target = VideoArea;
+                        break;
+                    case ScreenshotScope.RearOnly:
+                        if (RearPipBorder.Visibility != Visibility.Visible)
+                        {
+                            AppMessageBox.Show(Window.GetWindow(this), "リア映像が表示されていません。リア表示をONにして、リアが映っているときに撮影してください。",
+                                "ドラレコモード", MessageBoxButton.OK, MessageBoxImage.Information, isDarkMode: true);
+                            return;
+                        }
+                        target = PlayerRear;
+                        break;
+                    default:
+                        target = PlayerFront;
+                        break;
+                }
                 int w = (int)Math.Max(1, target.ActualWidth);
                 int h = (int)Math.Max(1, target.ActualHeight);
                 var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
 
                 // リアPiP右下のリサイズ用グリップは操作用の部品なので、写り込まないよう一時的に隠す
                 var gripVisibility = RearPipResizeGrip.Visibility;
-                if (_screenshotComposite)
+                if (composite)
                 {
                     RearPipResizeGrip.Visibility = Visibility.Hidden;
                     VideoArea.UpdateLayout();
@@ -2745,6 +2997,7 @@ namespace VerticalPlayer.Dashcam
             {
                 _fsControlsHideDelaySec = controlsHideDelaySec > 0 ? controlsHideDelaySec : 2.5;
 
+                CloseAllPopovers(); // ツールバーごと隠れるので、開いているポップオーバーも閉じる
                 ToolbarBar.Visibility = Visibility.Collapsed;
                 LeftSidebarHost.Visibility = Visibility.Collapsed;
                 LeftSidebarColumn.Width = new GridLength(0);
@@ -3009,6 +3262,14 @@ namespace VerticalPlayer.Dashcam
         {
             _fpsFrameCount++;
             _lastDisplayedPts = ptsSeconds;
+            // コマ送り以外の要因で位置が動いたら、コマ送りの論理位置を無効にして、次回は表示中のフレームから始め直す。
+            // ・再生中のフレームが流れている　・コマ送りが終わって0.7秒以上たってから、位置が1.5秒以上ずれた（シーク/切替）
+            if (_frameStepPosValid && !_frameStepBusy)
+            {
+                bool stepsEnded = GapMs(_lastStepEndTs) > 700;
+                if (_isPlaying || (stepsEnded && Math.Abs(ptsSeconds - _frameStepPos.TotalSeconds) > 1.5))
+                    _frameStepPosValid = false;
+            }
             if (_gapPending)
             {
                 _gapPending = false;
