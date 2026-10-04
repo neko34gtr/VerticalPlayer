@@ -515,6 +515,7 @@ namespace VerticalPlayer
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
             if (_isDashcamFullScreen) ExitDashcamFullScreen(); // 全画面のままのサイズ/位置を設定へ保存しないよう先に戻す
+            if (_isFullScreen) ExitFullScreen();
             VerticalPlayer.Media.CursorAutoHider.Stop();
             VerticalPlayer.Media.PlaybackPowerGuard.Shutdown();
             _mediaInfo?.Dispose();
@@ -920,6 +921,14 @@ namespace VerticalPlayer
                         ? "M4,3 H8 V17 H4 Z M12,3 H16 V17 H12 Z"   // Pause
                         : "M5,3 L19,10 L5,17 Z");                     // Play
             }
+            // ここを追加：全画面OSDの再生/一時停止アイコンも同じ状態に合わせる
+            if (OsdPlayIcon is System.Windows.Shapes.Path op)
+            {
+                op.Data = Geometry.Parse(
+                    _isPlaying
+                        ? "M4,3 H8 V17 H4 Z M12,3 H16 V17 H12 Z"
+                        : "M5,3 L19,10 L5,17 Z");
+            }
         }
 
         private void Stop_Click(object sender, RoutedEventArgs e)
@@ -1241,6 +1250,7 @@ namespace VerticalPlayer
         private void Window_SizeChanged(object sender, SizeChangedEventArgs e)
         {
             if (_resizingProgrammatically) return;
+            if (_isFullScreen || _isDashcamFullScreen) return; // 全画面中は動画に合わせたウィンドウ調整をしない
             if (Player == null || Player.NaturalVideoWidth <= 0) return;
             if (this.WindowState != WindowState.Normal) return;
             if (!(FitWindowToVideoCheck.IsChecked ?? true)) return; // OFF時は自由な比率でリサイズさせる
@@ -1279,6 +1289,7 @@ namespace VerticalPlayer
             // （trace.log: containerのアスペクト比がratioと食い違ったまま固定されるのを確認）。
             // DashcamView_RequestWindowFit()側は同種のガードを既に持っている。
             if (_isDashcamMode) return;
+            if (_isFullScreen) return; // 全画面中（ファイル送りなど）にウィンドウを動画サイズへ戻してしまわない
             if (Player.NaturalVideoWidth == 0 || Player.NaturalVideoHeight == 0) return;
             if (!(FitWindowToVideoCheck.IsChecked ?? true)) return; // OFF時はウィンドウサイズを自動変更しない
 
@@ -1870,6 +1881,7 @@ namespace VerticalPlayer
         private void EnterDashcamMode()
         {
             if (_isDashcamMode) return;
+            if (_isFullScreen) ExitFullScreen(); // 通常モードの全画面のままドラレコモードへ入らない
             _isDashcamMode = true;
 
             // 通常再生を止めてからドラレコモードのオーバーレイを表示する
@@ -2074,7 +2086,7 @@ namespace VerticalPlayer
             switch (e.Key)
             {
                 case Key.Escape:
-                    // 全画面はFullScreenWindowが処理するためここでは不要
+                    if (_isFullScreen) { ExitFullScreen(); e.Handled = true; } // 全画面解除
                     break;
                 case Key.Space:
                     TogglePlayPause(); e.Handled = true; break;
@@ -2097,7 +2109,8 @@ namespace VerticalPlayer
                 case Key.M:
                     Mute_Click(sender, e); e.Handled = true; break;
                 case Key.F:
-                    MaxRestore_Click(sender, e); e.Handled = true; break;
+                    if (!_isFullScreen) MaxRestore_Click(sender, e); // 全画面中は最大化トグルを無効化
+                    e.Handled = true; break;
                 case Key.H:
                     // 動画の左右反転（鏡状態）をトグル切り替え
                     if (PlayerFlipTransform != null)
@@ -2121,67 +2134,108 @@ namespace VerticalPlayer
 
         private void ToggleFullScreen()
         {
-            // ドラレコモードでは別ウィンドウは作らず、ドラレコ画面ごとボーダレス全画面へ切り替える
-            // （プレイヤーインスタンス＝D3D11VAのHWデコード状態をそのまま保持するため）
+            // ドラレコモードでは、ドラレコ画面ごとボーダレス全画面へ切り替える
             if (_isDashcamMode) { ToggleDashcamFullScreen(); return; }
 
-            Trace($"ToggleFullScreen called. Source={Player.Source}");
-            if (Player.Source == null) { Trace("ToggleFullScreen: no source, abort"); return; }
+            if (_isFullScreen) ExitFullScreen();
+            else EnterFullScreen();
+        }
 
+        // ─────────────────────────────────────────────────────────────────
+        // 通常モードのフルスクリーン（ボーダレス。MainWindow自身がモニタ全体を覆う）
+        // ・以前は別ウィンドウ(FullScreenWindow)に別エンジンを作って開き直していたため、切替のたびに
+        //   ファイルを開き直し・HWデコーダー/音声デバイスの初期化・シークが走り、約0.5秒音声と映像が止まっていた。
+        //   プレイヤーインスタンスをそのまま使うので、切替中も再生は止まらない（ドラレコモードと同じ方式）。
+        // ・操作UIは映像エリア内のOSD(OsdPanel)を使う。OSDの表示/非表示は映像のサイズを変えないので再描画は走らない。
+        // ─────────────────────────────────────────────────────────────────
+        private bool _isFullScreen;
+        private Visibility _fsPrevControlPanelVisibility;
+        private bool _fsPrevSidePanelVisible;
+
+        private void EnterFullScreen()
+        {
+            if (_isFullScreen || _isDashcamMode || _isDashcamFullScreen) return;
+            if (Player.Source == null) { Trace("EnterFullScreen: no source, abort"); return; }
+
+            // 復帰用に現在の状態を退避
+            _fsPrevWindowState = this.WindowState;
+            _fsPrevBounds = this.WindowState == WindowState.Normal
+                ? new Rect(this.Left, this.Top, this.Width, this.Height)
+                : this.RestoreBounds;
+            _fsPrevTopmost = this.Topmost;
+            _fsPrevResizeMode = this.ResizeMode;
+            _fsPrevCorner = WindowShell.CornerRadius;
+            _fsPrevBorderThickness = WindowShell.BorderThickness;
+            _fsPrevShellEffect = WindowShell.Effect;
+            _fsPrevControlPanelVisibility = ControlPanel.Visibility;
+            _fsPrevSidePanelVisible = SidePanel.Visibility == Visibility.Visible;
+
+            var rc = GetCurrentMonitorBounds();
+
+            _isFullScreen = true; // ResizeToVideo/Window_SizeChanged が全画面中のサイズ変更に反応しないよう、先に立てる
+            _resizingProgrammatically = true;
             try
             {
-                // MainWindow側を停止・Sourceをnullにしてから別Windowで再生
-                var src = Player.Source;
-                var pos = Player.Position;
-                var vol = Player.Volume;
-                var speed = Player.SpeedRatio;
-                var angle = PlayerRotation?.Angle ?? 0;
-
-                // フルスクリーン側のPlayerはMainWindow側とは別インスタンス（別のAVEngineを
-                // 内部に持つ）のため、明示的にスナップショットを渡さないとHW/Denoise/
-                // DynamicContrast/DNN超解像/色空間補正等が一切引き継がれず、フルスクリーン
-                // だけ画質が落ちてしまう（UseGpuPresenterも同様に未設定のままになる）。
-                var visual = new FullScreenVisualSettings
-                {
-                    HwAccel = Player.HardwareAcceleration,
-                    Denoise = Player.Denoise,
-                    Deinterlace = Player.Deinterlace,
-                    DynamicContrast = Player.DynamicContrast,
-                    ColorMatrixMode = Player.ColorMatrixMode,
-                    Contrast = Player.Contrast,
-                    Saturation = Player.Saturation,
-                    Gamma = Player.Gamma,
-                    SharpAmount = Player.SharpAmount,
-                    DnnEnabled = Player.DnnSuperResolutionEnabled,
-                    DnnModelFileName = Player.DnnModelFileName,
-                    SuperResolutionScale = Player.SuperResolutionScale,
-                };
-
-                Player.Pause();
-                Player.Stop();       // ここを追加：フルスクリーン中にMainWindow側のエンジン/音声が裏で動かないよう完全停止
-                Player.Source = null;
-                _isPlaying = false;
-                _timer.Stop();
-                Trace($"ToggleFullScreen: opening FullScreenWindow src={src} pos={pos}");
-
-                var fs = new FullScreenWindow(
-                    owner: this,
-                    source: src,
-                    position: pos,
-                    volume: vol,
-                    isMuted: _isMuted,
-                    speed: speed,
-                    frameMs: _frameIntervalMs,
-                    rotationAngle: angle,
-                    visual: visual);
-
-                fs.ShowDialog(); // 閉じるまでここでブロック
-                Trace("ToggleFullScreen: FullScreenWindow closed");
+                this.WindowState = WindowState.Normal;
+                this.ResizeMode = ResizeMode.NoResize;
+                this.Topmost = true;
+                this.Left = rc.Left;
+                this.Top = rc.Top;
+                this.Width = rc.Width;
+                this.Height = rc.Height;
             }
-            catch (Exception ex)
+            finally { _resizingProgrammatically = false; }
+
+            // 角丸・枠・ドロップシャドウ・タイトルバー・コントロールパネル・サイドパネルを外し、映像を全行にまたがらせる
+            WindowShell.CornerRadius = new CornerRadius(0);
+            WindowShell.BorderThickness = new Thickness(0);
+            WindowShell.Effect = null;
+            TitleBar.Visibility = Visibility.Collapsed;
+            ControlPanel.Visibility = Visibility.Collapsed;
+            SidePanel.Visibility = Visibility.Collapsed;
+            Grid.SetRow(VideoAreaBorder, 0);
+            Grid.SetRowSpan(VideoAreaBorder, 3);
+
+            // OSDの状態を現在値へ合わせる。表示はマウスを動かしたときだけ（VideoArea_MouseMove）
+            OsdVolumeSlider.Value = VolumeSlider.Value;
+            OsdPanel.Visibility = Visibility.Collapsed;
+            this.Focus();
+            Trace("EnterFullScreen: done (player instance kept)");
+        }
+
+        private void ExitFullScreen()
+        {
+            if (!_isFullScreen) return;
+
+            _osdTimer.Stop();
+            OsdPanel.Visibility = Visibility.Collapsed;
+
+            Grid.SetRow(VideoAreaBorder, 1);
+            Grid.SetRowSpan(VideoAreaBorder, 1);
+            TitleBar.Visibility = Visibility.Visible;
+            ControlPanel.Visibility = _fsPrevControlPanelVisibility;
+            SidePanel.Visibility = _fsPrevSidePanelVisible ? Visibility.Visible : Visibility.Collapsed;
+            WindowShell.CornerRadius = _fsPrevCorner;
+            WindowShell.BorderThickness = _fsPrevBorderThickness;
+            WindowShell.Effect = _fsPrevShellEffect;
+
+            _resizingProgrammatically = true;
+            try
             {
-                Trace($"ToggleFullScreen EXCEPTION: {ex}");
+                this.Topmost = _fsPrevTopmost;
+                this.ResizeMode = _fsPrevResizeMode;
+                this.WindowState = WindowState.Normal;
+                this.Left = _fsPrevBounds.Left;
+                this.Top = _fsPrevBounds.Top;
+                this.Width = _fsPrevBounds.Width;
+                this.Height = _fsPrevBounds.Height;
+                if (_fsPrevWindowState == WindowState.Maximized)
+                    this.WindowState = WindowState.Maximized;
             }
+            finally { _resizingProgrammatically = false; }
+
+            _isFullScreen = false;
+            Trace("ExitFullScreen: done");
         }
 
         // ─────────────────────────────────────────────────────────────────
@@ -2314,41 +2368,16 @@ namespace VerticalPlayer
             finally { _resizingProgrammatically = false; }
         }
 
-        // FullScreenWindowから隣接ファイルパスを取得
-        public string? GetAdjacentFile(int delta)
-        {
-            if (string.IsNullOrEmpty(_lastFilePath)) return null;
-            return FindAdjacentVideo(_lastFilePath, delta);
-        }
-
-        // FullScreenWindow終了時に再生状態を受け取る
-        public void ReturnFromFullScreen(Uri? source, TimeSpan position,
-                                         double volume, double speed, bool isPlaying)
-        {
-            Trace($"ReturnFromFullScreen src={source} pos={position} playing={isPlaying}");
-            if (source != null)
-            {
-                _lastFilePath = source.LocalPath;
-                Player.Source = source;
-                FileNameText.Text = Path.GetFileName(source.LocalPath);
-                _pendingSeek = position.TotalSeconds;
-            }
-            Player.SpeedRatio = 1.0; // 特殊再生（スロー等）状態は持ち越さず、resumeは常にノーマル速度
-            Player.Volume = volume;
-            VolumeSlider.Value = volume;
-            SpeedSlider.Value = 1.0;
-
-            if (isPlaying) { Player.Play(); _isPlaying = true; _timer.Start(); }
-            else { _isPlaying = false; }
-            UpdatePlayIcon();
-        }
-
         // ─────────────────────────────────────────────────────────────────
         // OSD 制御
         // ─────────────────────────────────────────────────────────────────
         private void VideoArea_MouseMove(object sender, MouseEventArgs e)
         {
-            // OSDはFullScreenWindowが管理するためMainWindowでは何もしない
+            // 全画面中だけ、マウスを動かすとOSDを表示し、止めて3秒後に隠す（OSD上にいる間・シークドラッグ中は隠さない）
+            if (!_isFullScreen) return;
+            OsdPanel.Visibility = Visibility.Visible;
+            _osdTimer.Stop();
+            if (!OsdPanel.IsMouseOver && !_isOsdDragging) _osdTimer.Start();
         }
 
         private void OsdTimer_Tick(object? sender, EventArgs e)

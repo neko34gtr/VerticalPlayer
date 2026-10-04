@@ -635,6 +635,18 @@
                                     <!-- 中央：再生ボタン群 -->
                                     <StackPanel Grid.Column="1" Orientation="Horizontal"
                                                 HorizontalAlignment="Center" VerticalAlignment="Center">
+                                        <!-- ここから追加：前のファイル / コマ戻し（押しっぱなしで連続） -->
+                                        <Button Style="{StaticResource OsdIconBtn}" Click="PrevFile_Click" ToolTip="前のファイル">
+                                            <Path Data="M5,3 V17 M19,3 L7,10 L19,17 Z"
+                                                  Stroke="White" StrokeThickness="1.5" Fill="Transparent"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18"/>
+                                        </Button>
+                                        <Button Style="{StaticResource OsdIconBtn}" Tag="-1" PreviewMouseLeftButtonDown="FrameStepButton_Down" PreviewMouseLeftButtonUp="FrameStepButton_Up" LostMouseCapture="FrameStepButton_Up" ToolTip="コマ戻し（押しっぱなしで連続 / Shift+←）">
+                                            <Path Data="M10,4 L4,10 L10,16 M16,4 L10,10 L16,16"
+                                                  Stroke="White" StrokeThickness="1.5" Fill="Transparent"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18"/>
+                                        </Button>
+                                        <!-- ここまで -->
                                         <Button Style="{StaticResource OsdIconBtn}" Click="Rewind_Click" ToolTip="-10秒">
                                             <Path Data="M14,6 L6,12 L14,18 Z M8,6 L8,18"
                                                   Stroke="White" StrokeThickness="1.5" Fill="Transparent"
@@ -668,6 +680,18 @@
                                                   Stroke="White" StrokeThickness="1.5" Fill="Transparent"
                                                   StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18"/>
                                         </Button>
+                                        <!-- ここから追加：コマ送り（押しっぱなしで連続） / 次のファイル -->
+                                        <Button Style="{StaticResource OsdIconBtn}" Tag="1" PreviewMouseLeftButtonDown="FrameStepButton_Down" PreviewMouseLeftButtonUp="FrameStepButton_Up" LostMouseCapture="FrameStepButton_Up" ToolTip="コマ送り（押しっぱなしで連続 / Shift+→）">
+                                            <Path Data="M6,4 L12,10 L6,16 M12,4 L18,10 L12,16"
+                                                  Stroke="White" StrokeThickness="1.5" Fill="Transparent"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18"/>
+                                        </Button>
+                                        <Button Style="{StaticResource OsdIconBtn}" Click="NextFile_Click" ToolTip="次のファイル">
+                                            <Path Data="M19,3 V17 M5,3 L17,10 L5,17 Z"
+                                                  Stroke="White" StrokeThickness="1.5" Fill="Transparent"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18"/>
+                                        </Button>
+                                        <!-- ここまで -->
                                     </StackPanel>
                                     <!-- 右：全画面解除 -->
                                     <StackPanel Grid.Column="2" Orientation="Horizontal"
