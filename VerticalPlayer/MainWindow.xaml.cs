@@ -2061,6 +2061,27 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         // キーボードショートカット
         // ─────────────────────────────────────────────────────────────────
+        // ここから追加
+        // Enter（テンキー含む）で全画面へ切替、全画面中のEnterで通常へ復帰（F11 / Alt+Enter / Esc解除と併用）。
+        // ボタンにフォーカスが残っていてもEnterがクリック扱いにならないよう、Previewで先に処理する。
+        // テキスト入力・コンボボックス・リスト操作中のEnterは本来の動作を優先する。
+        protected override void OnPreviewKeyDown(KeyEventArgs e)
+        {
+            if (e.Key == Key.Return && Keyboard.Modifiers == ModifierKeys.None &&
+                Keyboard.FocusedElement is not (System.Windows.Controls.Primitives.TextBoxBase
+                    or System.Windows.Controls.PasswordBox
+                    or System.Windows.Controls.ComboBox
+                    or System.Windows.Controls.ComboBoxItem
+                    or System.Windows.Controls.ListBoxItem))
+            {
+                if (!e.IsRepeat) ToggleFullScreen(); // 押しっぱなしのリピートでは切り替えない（チラつき防止）
+                e.Handled = true;
+                return;
+            }
+            base.OnPreviewKeyDown(e);
+        }
+        // ここまで
+
         private void MainWindow_KeyDown(object sender, KeyEventArgs e)
         {
             // F11 / Alt+Enter で全画面トグル
@@ -2563,8 +2584,6 @@ namespace VerticalPlayer
                 _frameStepBusy = false;
             }
         }
-        // ここまで
-
 
         private void AutoFrame_Click(object sender, RoutedEventArgs e)
         {

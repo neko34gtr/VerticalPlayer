@@ -380,7 +380,16 @@ namespace VerticalPlayer.Media
 
             // クライアント領域サイズが変わるたびに再フィット計算（黒帯なしレイアウトの追従）
             this.SizeChanged += (s, e) => RecomputeLayout();
-            this.Loaded += (s, e) => RecomputeLayout();
+            this.Loaded += (s, e) =>
+            {
+                // Unloadedで外した描画購読とスリープ抑制を戻す。
+                // 全画面切替などで一時的にビジュアルツリーから外れて戻っても、位置更新が止まらないようにする。
+                CompositionTarget.Rendering -= OnRendering; // 二重購読を避けるため一度外してから付ける
+                CompositionTarget.Rendering += OnRendering;
+                if (_isPlaying) PlaybackPowerGuard.SetPlaying(this, true);
+                RecomputeLayout();
+            };
+
             this.Unloaded += (s, e) =>
             {
                 CompositionTarget.Rendering -= OnRendering;
@@ -446,12 +455,15 @@ namespace VerticalPlayer.Media
             double containerW = ActualWidth, containerH = ActualHeight;
             if (containerW <= 0 || containerH <= 0) return;
 
-            // 90°/270°回転時は、回転後の見た目がコンテナに一致するよう、
-            // 回転前の計算では縦横を入れ替えたコンテナ寸法を基準にする
-            bool swapped = Math.Abs(((_displayRotation % 360) + 360) % 360 - 90) < 0.01
-                        || Math.Abs(((_displayRotation % 360) + 360) % 360 - 270) < 0.01;
-            double effContainerW = swapped ? containerH : containerW;
-            double effContainerH = swapped ? containerW : containerH;
+            // 回転はLayoutTransformで本コントロールに掛かっているため、ActualWidth/ActualHeightは
+            // 「回転前」の寸法、つまり90°/270°時は表示領域の縦横がすでに入れ替わった値になっている。
+            // ここでさらに入れ替えると二重反転になり、横に倒したとき表示領域の横方向を使い切れなかった。
+            //bool swapped = Math.Abs(((_displayRotation % 360) + 360) % 360 - 90) < 0.01
+            //            || Math.Abs(((_displayRotation % 360) + 360) % 360 - 270) < 0.01;
+            //double effContainerW = swapped ? containerH : containerW;
+            //double effContainerH = swapped ? containerW : containerH;
+            double effContainerW = containerW;
+            double effContainerH = containerH;
 
             if (_scaleMode != VideoScaleMode.Auto)
             {
