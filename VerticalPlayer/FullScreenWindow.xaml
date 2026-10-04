@@ -187,7 +187,7 @@
                                 <Path Data="M5,3 V17 M19,3 L7,10 L19,17 Z" Stroke="White" StrokeThickness="1.5"
                                       Fill="Transparent" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="16" Height="16"/>
                             </Button>
-                            <Button Style="{StaticResource OB}" Click="FrameBack_Click" ToolTip="コマ戻し">
+                            <Button Style="{StaticResource OB}" Tag="-1" PreviewMouseLeftButtonDown="FrameStepButton_Down" PreviewMouseLeftButtonUp="FrameStepButton_Up" LostMouseCapture="FrameStepButton_Up" ToolTip="コマ戻し（押しっぱなしで連続 / Shift+←）">
                                 <Path Data="M10,4 L4,10 L10,16 M16,4 L10,10 L16,16" Stroke="White" StrokeThickness="1.5"
                                       Fill="Transparent" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="16" Height="16"/>
                             </Button>
@@ -221,7 +221,7 @@
                                 <Path Data="M10,6 L18,12 L10,18 Z M16,6 L16,18" Stroke="White" StrokeThickness="1.5"
                                       Fill="Transparent" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18"/>
                             </Button>
-                            <Button Style="{StaticResource OB}" Click="FrameStep_Click" ToolTip="コマ送り">
+                            <Button Style="{StaticResource OB}" Tag="1" PreviewMouseLeftButtonDown="FrameStepButton_Down" PreviewMouseLeftButtonUp="FrameStepButton_Up" LostMouseCapture="FrameStepButton_Up" ToolTip="コマ送り（押しっぱなしで連続 / Shift+→）">
                                 <Path Data="M6,4 L12,10 L6,16 M12,4 L18,10 L12,16" Stroke="White" StrokeThickness="1.5"
                                       Fill="Transparent" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="16" Height="16"/>
                             </Button>

@@ -71,6 +71,10 @@ namespace VerticalPlayer
             // これが未設定だとフルスクリーンだけ画質が明らかに落ちる（コントラスト/彩度/
             // ガンマのみCPU版フォールバックがあるため多少は反映されるが、それ以外は完全無効）。
             Player.UseGpuPresenter = true;
+            // ここを追加：パケット先読みはMainWindowと同じく常時ON。未設定（既定OFF）だと音声パケットの取り込みが映像デコードと
+            // 同じスレッドで直列になり、映像が時計待ちでブロックしている間に音声が枯渇して、音声クロックが実時間の約1/5に遅れ、
+            // フレームもガクつく（フルスクリーンだけ症状が出ていた原因）。
+            Player.PacketPrefetch = true;
             Player.HardwareAcceleration = visual.HwAccel;
             Player.Denoise = visual.Denoise;
             Player.Deinterlace = visual.Deinterlace;
@@ -107,7 +111,11 @@ namespace VerticalPlayer
             };
 
             // 実測FPS表示（1秒間隔で実際に表示されたフレーム数を集計。MainWindow側と同じ方式）
-            Player.FrameDisplayed += _ => OnFrameDisplayedForFps();
+            Player.FrameDisplayed += pts =>
+            {
+                OnFrameDisplayedForFps();
+                OnFrameDisplayedForStep(pts); // ここを変更：コマ送りの基準位置管理にも表示ptsを渡す
+            };
 
             // DNN超解像エンジンのビルド状態表示（ビルド中は赤、ビルド済み＆再生中はTensorRT再生中を黄色）
             Player.DnnBuildStateChanged += building =>
@@ -255,6 +263,7 @@ namespace VerticalPlayer
         private void Seek_DragStarted(object sender, DragStartedEventArgs e)
         {
             _isDragging = true;
+            _frameStepPosValid = false; // ここを追加：シークバー操作後はコマ送りの論理位置を取り直す
             _wasPlayingBeforeSeekDrag = _isPlaying;
             if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdateIcon(); _timer.Stop(); }
         }
@@ -329,28 +338,130 @@ namespace VerticalPlayer
         }
 
         private void Rewind_Click(object sender, RoutedEventArgs e)
-            => Player.Position -= TimeSpan.FromSeconds(10);
-        private void FastForward_Click(object sender, RoutedEventArgs e)
-            => Player.Position += TimeSpan.FromSeconds(10);
-
-        // ── コマ送り ──
-        private void FrameStep_Click(object sender, RoutedEventArgs e) => _ = StepFrame(+1);
-        private void FrameBack_Click(object sender, RoutedEventArgs e) => _ = StepFrame(-1);
-
-        private async Task StepFrame(int dir)
         {
-            Trace($"FS StepFrame dir={dir} isPlaying={_isPlaying} pos={Player.Position}");
-            if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdateIcon(); _timer.Stop(); }
-            var t = Player.Position + TimeSpan.FromMilliseconds(_frameMs * dir);
-            if (t < TimeSpan.Zero) t = TimeSpan.Zero;
-            if (Player.NaturalDuration.HasTimeSpan && t > Player.NaturalDuration.TimeSpan)
-                t = Player.NaturalDuration.TimeSpan;
-            Trace($"FS StepFrame target={t.TotalSeconds:F3}s");
+            _frameStepPosValid = false; // ここを変更：±10秒移動後はコマ送りの論理位置を取り直す
+            Player.Position -= TimeSpan.FromSeconds(10);
+        }
+        private void FastForward_Click(object sender, RoutedEventArgs e)
+        {
+            _frameStepPosValid = false;
+            Player.Position += TimeSpan.FromSeconds(10);
+        }
 
-            // コマ送りは音声再生を伴う必要がないため、音声には一切触れない専用APIを使用。
-            bool ok = await Player.StepToVideoOnlyAsync(t);
-            Trace(ok ? "FS StepFrame: FrameDisplayed待ち成功" : "FS StepFrame: 500msタイムアウトで打ち切り");
-            Trace($"FS StepFrame done: target={t} actualPos={Player.Position}");
+        // ── コマ送り / コマ戻し（メインウィンドウ・ドラレコモードと同仕様）──
+        // ・ボタンを押した瞬間に1回送り、押し続けると0.4秒後から約0.09秒ごとに繰り返す（Shift+←/→のキーリピートも同様）
+        // ・1回の量はメインウィンドウの「コマ」設定（_owner.FrameStepFramesSetting）に従う
+        // ・基準位置は送り自身が保持する論理位置（表示中フレームのptsはキーフレーム丸めでぶれるため毎回の基準にしない）
+        private double FrameStepSeconds
+        {
+            get
+            {
+                double fps = _mediaInfo is { Success: true } ? _mediaInfo.VideoFrameRate : 0;
+                return fps is > 1 and < 240 ? 1.0 / fps : 1.0 / 30.0;
+            }
+        }
+        private bool _frameStepBusy;
+        private long _lastStepEndTs;            // 直近のコマ送りが終わった時刻(Stopwatch)
+        private TimeSpan _frameStepPos;         // 連続コマ送り時の論理位置
+        private bool _frameStepPosValid;
+        private DispatcherTimer? _frameStepRepeatTimer;
+        private int _frameStepRepeatDir;
+        private double _lastDisplayedPts = -1;  // 直近に画面へ出たフレームの時刻(秒)
+
+        private void FrameStepButton_Down(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            if (sender is not Button b || !int.TryParse((string)b.Tag, out int dir)) return;
+            _frameStepRepeatDir = dir;
+            _ = StepFrameAsync(dir);
+
+            if (_frameStepRepeatTimer == null)
+            {
+                _frameStepRepeatTimer = new DispatcherTimer(DispatcherPriority.Input);
+                _frameStepRepeatTimer.Tick += FrameStepRepeatTimer_Tick;
+            }
+            _frameStepRepeatTimer.Interval = TimeSpan.FromMilliseconds(400);
+            _frameStepRepeatTimer.Start();
+        }
+
+        private void FrameStepRepeatTimer_Tick(object? sender, EventArgs e)
+        {
+            if (_frameStepRepeatTimer != null) _frameStepRepeatTimer.Interval = TimeSpan.FromMilliseconds(90);
+            _ = StepFrameAsync(_frameStepRepeatDir); // 前の送りが終わっていなければStepFrameAsync側で読み飛ばす
+        }
+
+        private void FrameStepButton_Up(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            _frameStepRepeatTimer?.Stop();
+        }
+
+        // コマ送り以外の要因で位置が動いたら論理位置を無効にし、次回は表示中のフレームから始め直す。
+        private void OnFrameDisplayedForStep(double ptsSeconds)
+        {
+            _lastDisplayedPts = ptsSeconds;
+            if (_frameStepPosValid && !_frameStepBusy)
+            {
+                bool stepsEnded = Stopwatch.GetElapsedTime(_lastStepEndTs).TotalMilliseconds > 700;
+                if (_isPlaying || (stepsEnded && Math.Abs(ptsSeconds - _frameStepPos.TotalSeconds) > 1.5))
+                    _frameStepPosValid = false;
+            }
+        }
+
+        private async Task StepFrameAsync(int dir)
+        {
+            if (_frameStepBusy || _isDragging || _dragCompleting) return;
+            if (Player.Source == null || !Player.NaturalDuration.HasTimeSpan) return;
+
+            _frameStepBusy = true;
+            try
+            {
+                if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdateIcon(); _timer.Stop(); }
+
+                var oneFrame = TimeSpan.FromSeconds(FrameStepSeconds);
+                int frames = _owner.FrameStepFramesSetting;
+                var step = TimeSpan.FromTicks(oneFrame.Ticks * frames);
+                var dur = Player.NaturalDuration.TimeSpan;
+
+                bool rebased = false;
+                var prevStepPos = _frameStepPos;
+                if (!_frameStepPosValid)
+                {
+                    // 新しいコマ送りの開始。いま画面に出ているフレームの時刻を起点にする
+                    var basePos = Player.Position;
+                    if (_lastDisplayedPts >= 0)
+                    {
+                        var shown = TimeSpan.FromSeconds(_lastDisplayedPts);
+                        if ((shown - basePos).Duration() < TimeSpan.FromSeconds(2)) basePos = shown; // 前のファイルの古い値は使わない
+                    }
+                    _frameStepPos = basePos;
+                    rebased = true;
+                }
+
+                var next = _frameStepPos + TimeSpan.FromTicks(step.Ticks * dir);
+                var last = dur - oneFrame;
+                if (last < TimeSpan.Zero) last = TimeSpan.Zero;
+                if (next < TimeSpan.Zero) next = TimeSpan.Zero;
+                if (next > last) next = last;
+
+                _frameStepPos = next;
+                _frameStepPosValid = true;
+
+                // 半フレーム先へ着地させ、丸め誤差で前のフレームに落ちるのを防ぐ
+                var seekTarget = next + TimeSpan.FromTicks(oneFrame.Ticks / 2);
+                var swStep = Stopwatch.StartNew();
+                double shownBefore = _lastDisplayedPts;
+                // コマ送りは音声再生を伴わないため、映像デコードだけをシークして1フレーム表示する専用APIを使う
+                await Player.StepToVideoOnlyAsync(seekTarget, timeoutMs: 1000);
+                Trace($"FS [Step] dir={dir:+0;-0} {frames}コマ(1コマ={oneFrame.TotalMilliseconds:F1}ms) " +
+                      $"Position={Player.Position.TotalSeconds:F3} 表示pts: {shownBefore:F3}→{_lastDisplayedPts:F3} " +
+                      $"起点の取り直し={(rebased ? "あり" : "なし")} 前回の論理位置={(rebased ? double.NaN : prevStepPos.TotalSeconds):F3} " +
+                      $"目標={next.TotalSeconds:F3} 所要{swStep.ElapsedMilliseconds}ms");
+                Timer_Tick(null, EventArgs.Empty); // 一時停止中はタイマーが止まっているため、シークバー/時刻表示を1回更新する
+            }
+            finally
+            {
+                _lastStepEndTs = Stopwatch.GetTimestamp();
+                _frameStepBusy = false;
+            }
         }
 
         // ── 前/次ファイル ──
@@ -394,16 +505,54 @@ namespace VerticalPlayer
         // ── 全画面解除 ──
         private void Exit_Click(object sender, RoutedEventArgs e) => ExitFs();
 
+        // ここから変更：フルスクリーン側のPlayer（別AVEngine）を必ず停止・解放してからMainWindowへ戻す。
+        // 従来はPlayerを止めずにWindowを閉じていたため、閉じたあとも裏でデコード/音声再生が走り続け、
+        // ノーマル<>フルスクリーンを往復するたびにエンジンが増えて、音声の二重再生とパフォーマンス低下を起こしていた。
+        private bool _returnedToOwner;
+
         private void ExitFs()
         {
             Trace("FullScreenWindow: ExitFs");
-            _timer.Stop(); _osdTimer.Stop();
-            _mediaInfo?.Dispose();
-            _owner.ReturnFromFullScreen(
-                Player.Source, Player.Position,
-                Player.Volume, Player.SpeedRatio, _isPlaying);
+            ReturnToOwnerOnce();
             this.Close();
         }
+
+        private void ReturnToOwnerOnce()
+        {
+            if (_returnedToOwner) return;
+            _returnedToOwner = true;
+
+            _timer.Stop(); _osdTimer.Stop(); _frameStepRepeatTimer?.Stop();
+            _mediaInfo?.Dispose();
+            _mediaInfo = null;
+
+            // 停止前に、MainWindowへ引き継ぐ状態を控える
+            var src = Player.Source;
+            var pos = Player.Position;
+            var vol = Player.Volume;
+            var speed = Player.SpeedRatio;
+            bool playing = _isPlaying;
+
+            // MainWindowが再生を再開する前に、こちらのエンジンを完全に止めて音声デバイスを解放する
+            try
+            {
+                Player.Pause();
+                Player.Stop();
+                Player.Source = null;
+            }
+            catch (Exception ex) { Trace($"FS Player shutdown EXCEPTION: {ex.Message}"); }
+            _isPlaying = false;
+
+            _owner.ReturnFromFullScreen(src, pos, vol, speed, playing);
+        }
+
+        // ×ボタン/Alt+F4/タスクバーなど、ExitFsを通らずに閉じられた場合も同じ後始末を行う
+        protected override void OnClosed(EventArgs e)
+        {
+            ReturnToOwnerOnce();
+            base.OnClosed(e);
+        }
+        // ここまで
 
         // ── キーボード ──
         private void Window_KeyDown(object sender, KeyEventArgs e)
@@ -416,12 +565,12 @@ namespace VerticalPlayer
                 case Key.Space:
                     PlayPause_Click(sender, new RoutedEventArgs()); e.Handled = true; break;
                 case Key.Left:
-                    if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) _ = StepFrame(-1);
-                    else Player.Position -= TimeSpan.FromSeconds(10);
+                    if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) _ = StepFrameAsync(-1); // 押しっぱなしのキーリピートで連続
+                    else { _frameStepPosValid = false; Player.Position -= TimeSpan.FromSeconds(10); }
                     e.Handled = true; break;
                 case Key.Right:
-                    if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) _ = StepFrame(+1);
-                    else Player.Position += TimeSpan.FromSeconds(10);
+                    if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) _ = StepFrameAsync(+1);
+                    else { _frameStepPosValid = false; Player.Position += TimeSpan.FromSeconds(10); }
                     e.Handled = true; break;
                 case Key.Up:
                     VolSlider.Value = Math.Min(VolSlider.Value + 0.05, 1.0); e.Handled = true; break;
@@ -436,7 +585,7 @@ namespace VerticalPlayer
             try
             {
                 File.AppendAllText(
-                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "trace.log"),
+                    AppLogPaths.GetPath("trace.log"), // ここを変更：MainWindowと同じ出力先ルール(AppLogPaths)に統一
                     $"{DateTime.Now:HH:mm:ss.fff} | {msg}{Environment.NewLine}",
                     new System.Text.UTF8Encoding(false));
             }

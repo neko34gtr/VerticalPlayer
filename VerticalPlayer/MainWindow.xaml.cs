@@ -2158,6 +2158,7 @@ namespace VerticalPlayer
                 };
 
                 Player.Pause();
+                Player.Stop();       // ここを追加：フルスクリーン中にMainWindow側のエンジン/音声が裏で動かないよう完全停止
                 Player.Source = null;
                 _isPlaying = false;
                 _timer.Stop();
