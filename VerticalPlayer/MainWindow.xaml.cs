@@ -385,6 +385,7 @@ namespace VerticalPlayer
             _currentRotation = s.Rotation;
             PlayerRotation.Angle = _currentRotation;
             Player.DisplayRotation = _currentRotation;
+            ApplyFlipTransform(); // ここを追加
             HwAccelCheck.IsChecked = s.HwAccel;
             AudioBackendCombo.SelectedIndex = Enum.TryParse<VerticalPlayer.AudioBackendKind>(s.AudioBackend, out var restoredBackend)
                 ? (int)restoredBackend : 0;
@@ -457,6 +458,7 @@ namespace VerticalPlayer
             DashcamView.MapInfoScaleSetting = s.MapInfoScale;
             DashcamView.ScreenshotFormatSetting = s.ScreenshotFormat;
             DashcamView.ScreenshotComposeSetting = s.ScreenshotCompose;
+            SyncScreenshotFormatCombo(); // ここを追加：通常モード側の撮影形式コンボへ反映
             DashcamView.FrameStepFramesSetting = s.DashcamFrameStepFrames;
             FrameStepFramesSetting = s.FrameStepFrames; // ここを追加：メインモードのコマ送り量
             DashcamView.TunnelEntryDetectionModeSetting =
@@ -1028,7 +1030,7 @@ namespace VerticalPlayer
             else
             {
                 StatusText.Text = "Normal Playing";
-                StatusText.Foreground = (Brush)FindResource("TextFaint");
+                StatusText.Foreground = (Brush)FindResource("TextAccentCyan");
             }
         }
 
@@ -1195,12 +1197,33 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         // 回転
         // ─────────────────────────────────────────────────────────────────
+        // 左右反転(H)の状態。反転はPlayerのRenderTransform（回転前＝動画自身の座標系）で掛かるため、
+        // 90°/270°回転中にScaleXを反転すると画面上では上下反転になってしまう。
+        // 画面基準の左右反転になるよう、90°/270°のときは動画の縦軸(ScaleY)側で反転する。
+        private bool _flipH;
+
+        private void ApplyFlipTransform()
+        {
+            if (PlayerFlipTransform == null) return;
+            if (_currentRotation == 90 || _currentRotation == 270)
+            {
+                PlayerFlipTransform.ScaleX = 1;
+                PlayerFlipTransform.ScaleY = _flipH ? -1 : 1;
+            }
+            else
+            {
+                PlayerFlipTransform.ScaleX = _flipH ? -1 : 1;
+                PlayerFlipTransform.ScaleY = 1;
+            }
+        }
+
         private void Rotate_Click(object sender, RoutedEventArgs e)
         {
             double before = _currentRotation;
             _currentRotation = (_currentRotation + 90) % 360;
             PlayerRotation.Angle = _currentRotation;
             Player.DisplayRotation = _currentRotation;
+            ApplyFlipTransform(); // ここを追加：回転が変わったら、左右反転を画面基準のまま保つよう適用軸を切り替える
             Trace($"Rotate: {before}° -> {_currentRotation}° (PlayerRotation.Angle actual={PlayerRotation.Angle}°)");
             if (Player.NaturalVideoWidth > 0)
             {
@@ -1239,6 +1262,7 @@ namespace VerticalPlayer
                 _currentRotation = 0;
                 PlayerRotation.Angle = 0;
                 Player.DisplayRotation = 0;
+                ApplyFlipTransform(); // ここを追加
             }
             ResizeToVideo();
         }
@@ -1919,6 +1943,7 @@ namespace VerticalPlayer
             if (!_isDashcamMode) return;
             if (_isDashcamFullScreen) ExitDashcamFullScreen(); // 通常モードのウィンドウ状態へ戻してから抜ける
             _isDashcamMode = false;
+            SyncScreenshotFormatCombo(); // ここを追加：ドラレコ側で変更された撮影形式を通常モード側へ反映
 
             DashcamView.StopPlayback();
             DashcamView.Visibility = Visibility.Collapsed;
@@ -2132,12 +2157,15 @@ namespace VerticalPlayer
                 case Key.F:
                     if (!_isFullScreen) MaxRestore_Click(sender, e); // 全画面中は最大化トグルを無効化
                     e.Handled = true; break;
+                case Key.S:
+                    // ここから追加：スクリーンショット（ドラレコモードでは画面上のボタンを使う）
+                    if (!_isDashcamMode) _ = CaptureScreenshotAsync();
+                    e.Handled = true; break;
+                // ここまで
                 case Key.H:
-                    // 動画の左右反転（鏡状態）をトグル切り替え
-                    if (PlayerFlipTransform != null)
-                    {
-                        PlayerFlipTransform.ScaleX = (PlayerFlipTransform.ScaleX == 1) ? -1 : 1;
-                    }
+                    // 動画の左右反転（鏡状態）をトグル切り替え。回転(R)に関係なく、画面上で常に左右が反転する
+                    _flipH = !_flipH;
+                    ApplyFlipTransform();
                     e.Handled = true;
                     break;
                 case Key.R:
@@ -2152,6 +2180,93 @@ namespace VerticalPlayer
         ///  内部の再生コンポーネントがリセットされて再生位置が先頭（0秒）に戻ってしまう既知の挙動があります。
         /// 切り替え直前に現在の再生位置を退避させ、切り替え後に再適用（および再ロード発火に備えた一時変数への退避）を行うことで、この巻き戻り現象を確実に潰します。
         /// </summary>
+
+        // ここから追加
+        // ─────────────────────────────────────────────────────────────────
+        // 通常モードのスクリーンショット
+        // ・形式/保存先/ファイル名はドラレコモードと同じ（Screenshotsフォルダ、yyyyMMdd_HHmmss_VPSC.<拡張子>、同じ秒は_2,_3）。
+        // ・合成する要素（リアPiP・車速OSD・地図情報）は通常モードに無いので、映像そのものだけを撮る。
+        //   黒帯・ズーム・全画面のOSDは写さず、表示中の回転(R)と左右反転(H)を反映する。
+        // ・撮影形式はドラレコモードの設定と共通（DashcamView.ScreenshotFormatSetting）。
+        // ─────────────────────────────────────────────────────────────────
+        private bool _screenshotBusy;
+        private bool _syncingShotFormat;
+
+        private void ScreenshotMain_Click(object sender, RoutedEventArgs e) => _ = CaptureScreenshotAsync();
+
+        private void SyncScreenshotFormatCombo()
+        {
+            _syncingShotFormat = true;
+            try
+            {
+                string cur = DashcamView.ScreenshotFormatSetting;
+                foreach (ComboBoxItem item in MainScreenshotFormatCombo.Items)
+                {
+                    if ((string)item.Tag == cur) { MainScreenshotFormatCombo.SelectedItem = item; break; }
+                }
+            }
+            finally { _syncingShotFormat = false; }
+        }
+
+        private void MainScreenshotFormat_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (_syncingShotFormat || DashcamView == null) return; // 初期化中はDashcamViewがまだ無い
+            if (MainScreenshotFormatCombo.SelectedItem is ComboBoxItem item)
+                DashcamView.ScreenshotFormatSetting = (string)item.Tag;
+        }
+
+        private async Task CaptureScreenshotAsync()
+        {
+            if (_screenshotBusy || _isDashcamMode) return;
+            if (Player.Source == null || Player.NaturalVideoWidth <= 0)
+            {
+                AppMessageBox.Show(this, "動画を再生してから撮影してください。", "スクリーンショット",
+                    MessageBoxButton.OK, MessageBoxImage.Information, isDarkMode: true);
+                return;
+            }
+
+            _screenshotBusy = true;
+            ScreenshotMainBtn.IsEnabled = false; // AVIFは数秒かかることがあるため、保存中の二重押しを防ぐ
+            OsdScreenshotBtn.IsEnabled = false;
+            try
+            {
+                // 左右反転(H)は画面基準（回転後の絵に対して左右反転）。CaptureDisplayedFrameも回転後に反転を掛ける
+                var rtb = Player.CaptureDisplayedFrame(_flipH, false);
+                if (rtb == null)
+                {
+                    AppMessageBox.Show(this, "映像がまだ表示されていません。再生が始まってから撮影してください。", "スクリーンショット",
+                        MessageBoxButton.OK, MessageBoxImage.Information, isDarkMode: true);
+                    return;
+                }
+
+                string dir = Path.Combine(AppContext.BaseDirectory, "Screenshots");
+                string baseName = $"{DateTime.Now:yyyyMMdd_HHmmss}_VPSC";
+                var format = Enum.TryParse<VerticalPlayer.Media.ScreenshotFormat>(DashcamView.ScreenshotFormatSetting, true, out var f)
+                    ? f : VerticalPlayer.Media.ScreenshotFormat.Jpg;
+
+                string? note = null;
+                await Task.Run(() => VerticalPlayer.Media.ScreenshotEncoder.Save(rtb, dir, baseName, format, out note));
+                Trace($"Screenshot saved: {baseName} format={format} size={rtb.PixelWidth}x{rtb.PixelHeight}");
+
+                if (note != null)
+                {
+                    AppMessageBox.Show(this, note, "スクリーンショット",
+                        MessageBoxButton.OK, MessageBoxImage.Information, isDarkMode: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                AppMessageBox.Show(this, $"スクリーンショットの保存に失敗しました。\n{ex.Message}", "スクリーンショット",
+                    MessageBoxButton.OK, MessageBoxImage.Warning, isDarkMode: true);
+            }
+            finally
+            {
+                _screenshotBusy = false;
+                ScreenshotMainBtn.IsEnabled = true;
+                OsdScreenshotBtn.IsEnabled = true;
+            }
+        }
+        // ここまで
 
         private void ToggleFullScreen()
         {
@@ -2584,6 +2699,8 @@ namespace VerticalPlayer
                 _frameStepBusy = false;
             }
         }
+        // ここまで
+
 
         private void AutoFrame_Click(object sender, RoutedEventArgs e)
         {
@@ -2614,7 +2731,7 @@ namespace VerticalPlayer
             Player.SpeedRatio = restoreSpeed;
             // SliderをSpeed_Changedを経由せず直接更新（_isAutoFraming=falseなので二重適用なし）
             SpeedSlider.Value = restoreSpeed;
-            if (AutoFrameLabel != null) AutoFrameLabel.Foreground = (Brush)FindResource("TextFaint");
+            if (AutoFrameLabel != null) AutoFrameLabel.Foreground = (Brush)FindResource("TextMuted");
             StatusText.Text = "";
             Trace($"StopAutoFrame: restored speed={restoreSpeed}");
         }
@@ -2649,7 +2766,7 @@ namespace VerticalPlayer
             Trace($"NavigateFile delta={delta} next={next}");
             if (next == null) return false;
             LoadVideo(next);
-            StatusText.Text = Path.GetFileName(next);
+            UpdateDnnStatusText();
             return true;
         }
 

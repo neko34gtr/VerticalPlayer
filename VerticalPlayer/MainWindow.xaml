@@ -27,6 +27,8 @@
         <SolidColorBrush x:Key="TextPrimary"  Color="#F1F5F9"/>
         <SolidColorBrush x:Key="TextMuted"    Color="#64748B"/>
         <SolidColorBrush x:Key="TextFaint"    Color="#334155"/>
+        <!-- ラベル/見出し用の強調色（ドラレコモードの TextAccentCyan と同じ。TextMuted/TextFaint は暗い背景で読みにくいため） -->
+        <SolidColorBrush x:Key="TextAccentCyan" Color="#38BDF8"/>
         <SolidColorBrush x:Key="Border"       Color="#1E2D45"/>
 
         <!-- ========== アイコンボタン ========== -->
@@ -285,6 +287,91 @@
         </Style>
 
         <!-- ========== RadioButton ========== -->
+        <!-- ここから追加：コンボボックス（DashcamTheme.xaml と同じ ModernCombo）とツールバーのラベル -->
+        <Style x:Key="ToolbarLabel" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource TextAccentCyan}"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+        </Style>
+        <Style x:Key="ModernComboItem" TargetType="ComboBoxItem">
+            <Setter Property="Background" Value="{StaticResource BgCard}"/>
+            <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource BgHover}"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource AccentBlue}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ModernCombo" TargetType="ComboBox">
+            <Setter Property="Background" Value="{StaticResource BgCard}"/>
+            <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="ItemContainerStyle" Value="{StaticResource ModernComboItem}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton x:Name="ToggleBtn"
+                                          Background="{TemplateBinding Background}"
+                                          BorderBrush="{TemplateBinding BorderBrush}"
+                                          BorderThickness="{TemplateBinding BorderThickness}"
+                                          IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                                          ClickMode="Press" Focusable="False">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border Background="{TemplateBinding Background}"
+                                                BorderBrush="{TemplateBinding BorderBrush}"
+                                                BorderThickness="{TemplateBinding BorderThickness}"
+                                                CornerRadius="6"/>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+                            <Grid Margin="{TemplateBinding Padding}" IsHitTestVisible="False">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <ContentPresenter Grid.Column="0"
+                                                  Content="{TemplateBinding SelectionBoxItem}"
+                                                  ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                                  VerticalAlignment="Center" HorizontalAlignment="Left"
+                                                  TextBlock.Foreground="{TemplateBinding Foreground}"/>
+                                <Path Grid.Column="1" Data="M0,0 L6,6 L12,0 Z" Fill="{StaticResource TextMuted}"
+                                      Width="12" Height="6" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                            </Grid>
+                            <Popup x:Name="Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   AllowsTransparency="True" Focusable="False" PopupAnimation="Slide">
+                                <Border Background="{StaticResource BgCard}" BorderBrush="{StaticResource Border}"
+                                        BorderThickness="1" CornerRadius="4"
+                                        MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
+                                        MaxHeight="240">
+                                    <ScrollViewer Margin="2" SnapsToDevicePixels="True">
+                                        <ItemsPresenter/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <!-- ここまで -->
         <Style x:Key="ModernRadio" TargetType="RadioButton">
             <Setter Property="Foreground"   Value="{StaticResource TextPrimary}"/>
             <Setter Property="FontSize"     Value="12"/>
@@ -570,7 +657,7 @@
                             </Border>
                             <TextBlock Text="動画ファイルをドロップ" Foreground="{StaticResource TextMuted}"
                                        FontSize="13" HorizontalAlignment="Center"/>
-                            <TextBlock Text="mp4 · mov · avi · mkv" Foreground="{StaticResource TextFaint}"
+                            <TextBlock Text="mp4 · mov · avi · mkv" Foreground="{StaticResource TextAccentCyan}"
                                        FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
                         </StackPanel>
                     </Border>
@@ -691,6 +778,13 @@
                                                   Stroke="White" StrokeThickness="1.5" Fill="Transparent"
                                                   StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18"/>
                                         </Button>
+                                        <!-- ここから追加：スクリーンショット -->
+                                        <Button x:Name="OsdScreenshotBtn" Style="{StaticResource OsdIconBtn}" Click="ScreenshotMain_Click" ToolTip="スクリーンショット (S)">
+                                            <Path Data="M2,6 H6 L8,3 H12 L14,6 H18 V17 H2 Z M10,8 A3,3 0 1 1 9.99,8 Z"
+                                                  Stroke="White" StrokeThickness="1.5" Fill="Transparent"
+                                                  StrokeLineJoin="Round" Width="18" Height="18"/>
+                                        </Button>
+                                        <!-- ここまで -->
                                         <!-- ここまで -->
                                     </StackPanel>
                                     <!-- 右：全画面解除 -->
@@ -718,14 +812,13 @@
                                   VerticalAlignment="Stretch"
                                   MediaOpened="Player_MediaOpened"
                                   MediaEnded="Player_MediaEnded"
-                                  MediaFailed="Player_MediaFailed"
-                                  RenderTransformOrigin="0.5,0.5">
-                        <media:FfmpegMediaElement.RenderTransform>
-                            <ScaleTransform x:Name="PlayerFlipTransform" ScaleX="1" ScaleY="1"/>
-                        </media:FfmpegMediaElement.RenderTransform>
+                                  MediaFailed="Player_MediaFailed">
                         <media:FfmpegMediaElement.LayoutTransform>
                             <TransformGroup>
                                 <RotateTransform x:Name="PlayerRotation"/>
+                                <!-- 左右反転(H)は回転の後段（画面基準）のLayoutTransformで行う。
+                                     以前のRenderTransform（回転前の座標系・原点0.5,0.5）だと、90°/270°回転時に反転軸と原点がずれて映像が枠外へ出て黒くなっていた -->
+                                <ScaleTransform  x:Name="PlayerFlipTransform" ScaleX="1" ScaleY="1"/>
                                 <ScaleTransform  x:Name="PlayerScale" ScaleX="1" ScaleY="1"/>
                             </TransformGroup>
                         </media:FfmpegMediaElement.LayoutTransform>
@@ -887,7 +980,7 @@
                                   Style="{StaticResource ModernCheck}" FontSize="10"
                                   Foreground="{StaticResource TextMuted}"/>
                         <TextBlock x:Name="StatusText" Grid.Column="2"
-                                   Foreground="{StaticResource TextFaint}" FontSize="14"
+                                   Foreground="{StaticResource TextAccentCyan}" FontSize="14"
                                    VerticalAlignment="Center"/>
                     </Grid>
 
@@ -913,14 +1006,14 @@
                             <Button x:Name="AutoFrameBtn" Style="{StaticResource IconBtn}"
                                     Click="AutoFrame_Click" ToolTip="自動コマ送り（スロー再生）" Padding="5">
                                 <TextBlock x:Name="AutoFrameLabel" Text="AUTO"
-                                           Foreground="{StaticResource TextFaint}"
+                                           Foreground="{StaticResource TextMuted}"
                                            FontSize="9" FontWeight="Bold"/>
                             </Button>
                             <Button x:Name="HwStatusBtn" Style="{StaticResource IconBtn}"
                                     Click="HwStatus_Click" ToolTip="クリックでハードウェア/ソフトウェアデコードを切替"
                                     Padding="5" Margin="4,0,0,0">
                                 <TextBlock x:Name="HwStatusLabel" Text="H/W"
-                                           Foreground="{StaticResource TextFaint}"
+                                           Foreground="{StaticResource TextMuted}"
                                            FontSize="9" FontWeight="Bold"/>
                             </Button>
                             <!-- PotPlayer風コーデック表示（映像コーデック / 音声コーデック / チャンネル数） -->
@@ -942,35 +1035,51 @@
                                        FontSize="14" FontWeight="Bold"
                                        VerticalAlignment="Center" Margin="5,0,0,0"/>
                         </StackPanel>
-                        <!-- fps選択 -->
+                        <!-- fps / コマ送り量 / スクリーンショット（ドラレコモードのキャプチャ設定と同じ ModernCombo・ラベル配色） -->
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Text="fps:" Foreground="{StaticResource TextFaint}"
-                                       FontSize="9" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <ComboBox x:Name="FrameRateCombo" FontSize="10" Width="52"
-                                      SelectionChanged="FrameRate_Changed">
-                                <ComboBoxItem Content="1"  Tag="1"/>
-                                <ComboBoxItem Content="2"  Tag="2"/>
-                                <ComboBoxItem Content="5"  Tag="5"/>
-                                <ComboBoxItem Content="10" Tag="10" IsSelected="True"/>
-                                <ComboBoxItem Content="15" Tag="15"/>
-                                <ComboBoxItem Content="24" Tag="24"/>
-                                <ComboBoxItem Content="30" Tag="30"/>
+                            <TextBlock Text="fps" Style="{StaticResource ToolbarLabel}"
+                                       ToolTip="自動コマ送り(AUTO)の送り速度"/>
+                            <ComboBox x:Name="FrameRateCombo" Width="76" Style="{StaticResource ModernCombo}"
+                                      SelectionChanged="FrameRate_Changed"
+                                      ToolTip="自動コマ送り(AUTO)の送り速度">
+                                <ComboBoxItem Content="1fps"  Tag="1"/>
+                                <ComboBoxItem Content="2fps"  Tag="2"/>
+                                <ComboBoxItem Content="5fps"  Tag="5"/>
+                                <ComboBoxItem Content="10fps" Tag="10" IsSelected="True"/>
+                                <ComboBoxItem Content="15fps" Tag="15"/>
+                                <ComboBoxItem Content="24fps" Tag="24"/>
+                                <ComboBoxItem Content="30fps" Tag="30"/>
                             </ComboBox>
-                            <!-- ここから追加：コマ送り量（コマ送り/コマ戻しボタン1回あたりのコマ数） -->
-                            <TextBlock Text="コマ:" Foreground="{StaticResource TextFaint}"
-                                       FontSize="9" VerticalAlignment="Center" Margin="8,0,4,0"/>
-                            <ComboBox x:Name="FrameStepAmountCombo" FontSize="10" Width="52"
+                            <TextBlock Text="コマ送り量" Style="{StaticResource ToolbarLabel}" Margin="14,0,6,0"
+                                       ToolTip="コマ送り/コマ戻し1回あたりに進むコマ数（動画の実fps基準）"/>
+                            <ComboBox x:Name="FrameStepAmountCombo" Width="84" Style="{StaticResource ModernCombo}"
                                       SelectionChanged="FrameStepAmount_Changed"
                                       ToolTip="コマ送り/コマ戻し1回あたりに進むコマ数（動画の実fps基準）">
-                                <ComboBoxItem Content="1"  Tag="1"/>
-                                <ComboBoxItem Content="3"  Tag="3" IsSelected="True"/>
-                                <ComboBoxItem Content="5"  Tag="5"/>
-                                <ComboBoxItem Content="8"  Tag="8"/>
-                                <ComboBoxItem Content="10" Tag="10"/>
-                                <ComboBoxItem Content="15" Tag="15"/>
-                                <ComboBoxItem Content="30" Tag="30"/>
+                                <ComboBoxItem Content="1コマ"  Tag="1"/>
+                                <ComboBoxItem Content="3コマ"  Tag="3" IsSelected="True"/>
+                                <ComboBoxItem Content="5コマ"  Tag="5"/>
+                                <ComboBoxItem Content="8コマ"  Tag="8"/>
+                                <ComboBoxItem Content="10コマ" Tag="10"/>
+                                <ComboBoxItem Content="15コマ" Tag="15"/>
+                                <ComboBoxItem Content="30コマ" Tag="30"/>
                             </ComboBox>
-                            <!-- ここまで -->
+                            <!-- スクリーンショット（Sキーでも撮影。形式はドラレコモードと共通） -->
+                            <Button x:Name="ScreenshotMainBtn" Style="{StaticResource IconBtn}"
+                                    Click="ScreenshotMain_Click" ToolTip="スクリーンショット (S)" Padding="5" Margin="14,0,2,0">
+                                <Path Data="M2,6 H6 L8,3 H12 L14,6 H18 V17 H2 Z M10,8 A3,3 0 1 1 9.99,8 Z"
+                                      Stroke="{StaticResource TextAccentCyan}" StrokeThickness="1.5" Fill="Transparent"
+                                      StrokeLineJoin="Round" Width="14" Height="14"/>
+                            </Button>
+                            <TextBlock Text="撮影形式" Style="{StaticResource ToolbarLabel}" Margin="4,0,6,0"
+                                       ToolTip="スクリーンショットの保存形式（ドラレコモードと共通）"/>
+                            <ComboBox x:Name="MainScreenshotFormatCombo" Width="76" Style="{StaticResource ModernCombo}"
+                                      SelectionChanged="MainScreenshotFormat_Changed"
+                                      ToolTip="スクリーンショットの保存形式（ドラレコモードと共通）">
+                                <ComboBoxItem Content="PNG"  Tag="Png"/>
+                                <ComboBoxItem Content="JPG"  Tag="Jpg" IsSelected="True"/>
+                                <ComboBoxItem Content="WebP" Tag="WebP"/>
+                                <ComboBoxItem Content="AVIF" Tag="Avif"/>
+                            </ComboBox>
                         </StackPanel>
                     </Grid>
                 </StackPanel>
@@ -1025,7 +1134,7 @@
                                                Foreground="{StaticResource TextPrimary}"
                                                FontSize="16" FontWeight="Bold" FontFamily="Consolas" Margin="0,0,0,4"/>
 
-                                    <TextBlock Text="音声エンジン" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="音声エンジン" Foreground="{StaticResource TextAccentCyan}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,4,0,4"/>
                                     <ComboBox x:Name="AudioBackendCombo" Margin="0,0,0,6"
                                               SelectionChanged="AudioBackend_Changed" SelectedIndex="0">
@@ -1049,7 +1158,7 @@
 
                                     <!-- ログ出力先（trace.log / play_error.txt。通常/ドラレコ共通）。
                                          空欄＝自動（Xドライブ[RAMディスク]があれば X:\temp\VerticalPlayer、無ければ実行ファイル直下） -->
-                                    <TextBlock Text="ログ出力先（空欄＝自動）" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="ログ出力先（空欄＝自動）" Foreground="{StaticResource TextAccentCyan}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
                                     <TextBox x:Name="LogDirBox" Style="{StaticResource ModernTextBox}"
                                              Margin="0,0,0,4" LostFocus="LogDir_Changed"/>
@@ -1067,7 +1176,7 @@
                                     <!-- TensorRTキャッシュのバックアップ先（RAMディスク運用時の保険）。
                                          既定はビルド構成に依存しない%LOCALAPPDATA%配下の固定パスだが、
                                          任意のフォルダへ変更できるようにしている。 -->
-                                    <TextBlock Text="TensorRTキャッシュのバックアップ先" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="TensorRTキャッシュのバックアップ先" Foreground="{StaticResource TextAccentCyan}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
                                     <TextBox x:Name="TrtCacheBackupDirBox" Style="{StaticResource ModernTextBox}"
                                              Margin="0,0,0,4" LostFocus="TrtCacheBackupDir_Changed"/>
@@ -1085,7 +1194,7 @@
 
                                     <!-- 再生速度 -->
                                     <DockPanel Margin="0,0,0,4">
-                                        <TextBlock Text="再生速度" Foreground="{StaticResource TextMuted}"
+                                        <TextBlock Text="再生速度" Foreground="{StaticResource TextAccentCyan}"
                                                    FontSize="10" FontWeight="SemiBold"/>
                                         <TextBlock x:Name="SpeedLabel" DockPanel.Dock="Right"
                                                    Foreground="{StaticResource AccentBlue}"
@@ -1103,14 +1212,14 @@
                             <ScrollViewer VerticalScrollBarVisibility="Auto">
                                 <StackPanel>
                                     <!-- 表示モード -->
-                                    <TextBlock Text="表示モード" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="表示モード" Foreground="{StaticResource TextAccentCyan}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,0,0,6"
                                               />
                                     <CheckBox x:Name="ForceVerticalMode" Content="強制縦型モード"
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="Mode_Checked" Unchecked="Mode_Checked"/>
 
-                                    <TextBlock Text="表示倍率" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="表示倍率" Foreground="{StaticResource TextAccentCyan}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
                                     <ComboBox x:Name="ScaleModeCombo" Margin="0,0,0,6"
                                               SelectionChanged="ScaleMode_Changed" SelectedIndex="0">
@@ -1122,7 +1231,7 @@
                                         <ComboBoxItem Content="サイズ x4" Tag="Zoom4x"/>
                                     </ComboBox>
 
-                                    <TextBlock Text="アスペクト比（オート時のみ）" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="アスペクト比（オート時のみ）" Foreground="{StaticResource TextAccentCyan}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,4,0,4"/>
                                     <ComboBox x:Name="AspectModeCombo" Margin="0,0,0,6"
                                               SelectionChanged="AspectMode_Changed" SelectedIndex="0">
@@ -1160,7 +1269,7 @@
 
                                     <Border Style="{StaticResource Separator}"/>
 
-                                    <TextBlock Text="超解像（Lanczos＋アンシャープ / DNN・GPU）" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="超解像（Lanczos＋アンシャープ / DNN・GPU）" Foreground="{StaticResource TextAccentCyan}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
                                     <ComboBox x:Name="SuperResolutionCombo" Margin="0,0,0,6"
                                               SelectionChanged="SuperResolution_Changed" SelectedIndex="0">
@@ -1169,12 +1278,12 @@
                                         <ComboBoxItem Content="2.0倍" Tag="2.0"/>
                                         <ComboBoxItem x:Name="DnnComboItem" Content="DNN/TensorRT" Tag="dnn"/>
                                     </ComboBox>
-                                    <TextBlock Text="DNNモデル（差し替え用、modelsフォルダを自動スキャン）" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="DNNモデル（差し替え用、modelsフォルダを自動スキャン）" Foreground="{StaticResource TextAccentCyan}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
                                     <ComboBox x:Name="DnnModelCombo" Margin="0,0,0,6"
                                               SelectionChanged="DnnModel_Changed"/>
 
-                                    <TextBlock Text="比較ビュー（TrueTheater風）" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="比較ビュー（TrueTheater風）" Foreground="{StaticResource TextAccentCyan}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,8,0,4"/>
                                     <ComboBox x:Name="CompareModeCombo" Margin="0,0,0,6"
                                               SelectionChanged="CompareMode_Changed" SelectedIndex="0">
@@ -1196,7 +1305,7 @@
                                     <StackPanel x:Name="EffectSliders">
                                         <!-- コントラスト -->
                                         <DockPanel Margin="0,0,0,4">
-                                            <TextBlock Text="コントラスト" Foreground="{StaticResource TextMuted}"
+                                            <TextBlock Text="コントラスト" Foreground="{StaticResource TextAccentCyan}"
                                                        FontSize="10" FontWeight="SemiBold"/>
                                             <TextBlock x:Name="ContrastLabel" DockPanel.Dock="Right"
                                                        Foreground="{StaticResource AccentCyan}"
@@ -1209,7 +1318,7 @@
 
                                         <!-- 彩度 -->
                                         <DockPanel Margin="0,0,0,4">
-                                            <TextBlock Text="彩度" Foreground="{StaticResource TextMuted}"
+                                            <TextBlock Text="彩度" Foreground="{StaticResource TextAccentCyan}"
                                                        FontSize="10" FontWeight="SemiBold"/>
                                             <TextBlock x:Name="SaturationLabel" DockPanel.Dock="Right"
                                                        Foreground="{StaticResource AccentCyan}"
@@ -1222,7 +1331,7 @@
 
                                         <!-- ガンマ -->
                                         <DockPanel Margin="0,0,0,4">
-                                            <TextBlock Text="ガンマ" Foreground="{StaticResource TextMuted}"
+                                            <TextBlock Text="ガンマ" Foreground="{StaticResource TextAccentCyan}"
                                                        FontSize="10" FontWeight="SemiBold"/>
                                             <TextBlock x:Name="GammaLabel" DockPanel.Dock="Right"
                                                        Foreground="{StaticResource AccentCyan}"
@@ -1235,7 +1344,7 @@
 
                                         <!-- シャープネス（超解像のアンシャープマスク強度、GPU専用） -->
                                         <DockPanel Margin="0,0,0,4">
-                                            <TextBlock Text="シャープネス（超解像用）" Foreground="{StaticResource TextMuted}"
+                                            <TextBlock Text="シャープネス（超解像用）" Foreground="{StaticResource TextAccentCyan}"
                                                        FontSize="10" FontWeight="SemiBold"/>
                                             <TextBlock x:Name="SharpnessLabel" DockPanel.Dock="Right"
                                                        Foreground="{StaticResource AccentCyan}"
@@ -1257,7 +1366,7 @@
                                     <Border Style="{StaticResource Separator}"/>
 
                                     <!-- プリセット管理 -->
-                                    <TextBlock Text="プリセット" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="プリセット" Foreground="{StaticResource TextAccentCyan}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,0,0,8"
                                               />
 
@@ -1306,32 +1415,32 @@
                         <TabItem Header="情報" Style="{StaticResource PanelTabItem}">
                             <ScrollViewer VerticalScrollBarVisibility="Auto">
                                 <StackPanel x:Name="InfoPanel">
-                                    <TextBlock Text="動画情報" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="動画情報" Foreground="{StaticResource TextAccentCyan}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,0,0,10"
                                               />
                                     <StackPanel x:Name="VideoInfoStack"/>
 
                                     <Border Style="{StaticResource Separator}"/>
 
-                                    <TextBlock Text="操作ガイド" Foreground="{StaticResource TextMuted}"
+                                    <TextBlock Text="操作ガイド" Foreground="{StaticResource TextAccentCyan}"
                                                FontSize="10" FontWeight="SemiBold" Margin="0,0,0,8"/>
                                     <StackPanel>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="── 再生 ──" Margin="0,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="Space — 再生 / 一時停止" Margin="8,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="← → — 10秒シーク" Margin="8,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="Shift+← → — コマ戻し / コマ送り" Margin="8,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="Shift+↑ ↓ — 再生速度 ±0.1×" Margin="8,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="── 音量 ──" Margin="0,6,0,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="↑ ↓ — 音量 ±5%" Margin="8,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="M — ミュート切替" Margin="8,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="── 表示 ──" Margin="0,6,0,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="F11 / Alt+Enter — 全画面" Margin="8,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="Esc — 全画面解除" Margin="8,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="🖱 ホイール — ズーム" Margin="8,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="── ファイル ──" Margin="0,6,0,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="🖱 D&amp;D — ファイルを開く" Margin="8,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="⏮ ⏭ ボタン — 前後ファイル" Margin="8,2"/>
-                                        <TextBlock Foreground="{StaticResource TextMuted}" FontSize="10" Text="AUTO — スロー再生モード" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextAccentCyan}" FontSize="10" Text="── 再生 ──" Margin="0,2"/>
+                                        <TextBlock Foreground="{StaticResource TextPrimary}" FontSize="10" Text="Space — 再生 / 一時停止" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextPrimary}" FontSize="10" Text="← → — 10秒シーク" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextPrimary}" FontSize="10" Text="Shift+← → — コマ戻し / コマ送り" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextPrimary}" FontSize="10" Text="Shift+↑ ↓ — 再生速度 ±0.1×" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextAccentCyan}" FontSize="10" Text="── 音量 ──" Margin="0,6,0,2"/>
+                                        <TextBlock Foreground="{StaticResource TextPrimary}" FontSize="10" Text="↑ ↓ — 音量 ±5%" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextPrimary}" FontSize="10" Text="M — ミュート切替" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextAccentCyan}" FontSize="10" Text="── 表示 ──" Margin="0,6,0,2"/>
+                                        <TextBlock Foreground="{StaticResource TextPrimary}" FontSize="10" Text="F11 / Alt+Enter — 全画面" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextPrimary}" FontSize="10" Text="Esc — 全画面解除" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextPrimary}" FontSize="10" Text="🖱 ホイール — ズーム" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextAccentCyan}" FontSize="10" Text="── ファイル ──" Margin="0,6,0,2"/>
+                                        <TextBlock Foreground="{StaticResource TextPrimary}" FontSize="10" Text="🖱 D&amp;D — ファイルを開く" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextPrimary}" FontSize="10" Text="⏮ ⏭ ボタン — 前後ファイル" Margin="8,2"/>
+                                        <TextBlock Foreground="{StaticResource TextPrimary}" FontSize="10" Text="AUTO — スロー再生モード" Margin="8,2"/>
                                     </StackPanel>
                                 </StackPanel>
                             </ScrollViewer>

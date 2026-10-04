@@ -356,6 +356,37 @@ namespace VerticalPlayer.Media
         public int NaturalVideoWidth { get; private set; }
         public int NaturalVideoHeight { get; private set; }
 
+        /// <summary>現在画面に出ている映像（黒帯・ズーム・パンを除いた映像全体）を、表示中の回転と引数の反転を適用した
+        /// RenderTargetBitmapとして返す。解像度は現在の表示サイズ（デバイスピクセル）。映像がまだ無ければnull。
+        /// 呼び出しはUIスレッド。返す画像はFreeze済み（別スレッドでエンコード可能）。</summary>
+        public System.Windows.Media.Imaging.RenderTargetBitmap? CaptureDisplayedFrame(bool flipX, bool flipY)
+        {
+            if (_image.Source == null) return null;
+            double iw = _image.ActualWidth, ih = _image.ActualHeight;
+            if (iw < 1 || ih < 1) return null;
+
+            double scale = VisualTreeHelper.GetDpi(_image).DpiScaleX;
+            int rot = (int)(((Math.Round(_displayRotation / 90.0) * 90) % 360 + 360) % 360);
+            bool quarter = rot == 90 || rot == 270;
+            int outW = Math.Max(1, (int)Math.Round((quarter ? ih : iw) * scale));
+            int outH = Math.Max(1, (int)Math.Round((quarter ? iw : ih) * scale));
+
+            // Element自体ではなくVisualBrush経由で描く（黒帯・親のクリップ・配置オフセットの影響を受けないため）
+            var dv = new DrawingVisual();
+            using (var dc = dv.RenderOpen())
+            {
+                dc.PushTransform(new TranslateTransform(outW / 2.0, outH / 2.0));
+                dc.PushTransform(new ScaleTransform(scale * (flipX ? -1 : 1), scale * (flipY ? -1 : 1)));
+                if (rot != 0) dc.PushTransform(new RotateTransform(rot));
+                dc.DrawRectangle(new VisualBrush(_image) { Stretch = Stretch.Fill }, null,
+                                 new Rect(-iw / 2, -ih / 2, iw, ih));
+            }
+            var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(outW, outH, 96, 96, PixelFormats.Pbgra32);
+            rtb.Render(dv);
+            rtb.Freeze();
+            return rtb;
+        }
+
         public Stretch Stretch
         {
             get => _image.Stretch;
