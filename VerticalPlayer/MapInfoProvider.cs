@@ -91,7 +91,7 @@ namespace VerticalPlayer.Dashcam
         private static readonly object TraceMapLock = new();
         private static bool _traceMapStarted;
 #endif
-
+        [Conditional("DEBUG")]
         private static void TraceMap(string msg)
         {
 #if DEBUG

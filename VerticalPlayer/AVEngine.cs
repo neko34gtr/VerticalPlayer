@@ -56,6 +56,24 @@ namespace VerticalPlayer.Media
 
         private Thread? _decodeThread;
         private volatile bool _paused = true;
+
+        /// <summary>コマ送り/シークプレビュー（映像のみ再生）で、シーク先の目標フレームを表示し終えた後、
+        /// 呼び出し側のPause()が間に合うまでの間に余分なフレームを出し続けないための保持フラグ。
+        /// 以前は目標の後ろへ数フレーム～約0.4秒分が余分に表示され、コマ送りの量が不正確になり、
+        /// コマ戻しでは目標より先のフレームで止まるため「戻っても元に戻る」動きになっていた。
+        /// 次のSeek、または音声ありのPlay()で解除される。</summary>
+        private volatile bool _holdAfterStepFrame;
+
+        // ここから追加：コマ送り前進の「実シークなし」化と、シーク後の着地診断
+        /// <summary>コマ送り前進で、表示中フレームからこの秒数以内の先なら、実シークせず現在位置から先へデコードして目標に合わせる。</summary>
+        private const double StepForwardNoSeekMaxSeconds = 3.0;
+        /// <summary>映像のみ（一時停止中のコマ送り/コマ戻し等）の精密シークで、キーフレームを探す位置を目標より手前にずらす秒数。
+        /// av_seek_frameが目標より後ろのキーフレームに着地することがあり、手前のフレームをデコードできなくなるため、GOP1つ分より長く戻して必ず目標より前から始める。</summary>
+        private const double PreciseSeekMarginSeconds = 0.6;
+        private volatile bool _diagFirstFrameAfterSeek;
+        private double _diagSeekTarget;
+        private int _diagCatchUpDrops;
+        // ここまで
         private volatile bool _audioDesired = true; // false時はPlay()中でも音声を出さない（コマ送り/プレビュー用）
         private double _volume = 1.0;
         private double _speedRatio = 1.0;
@@ -544,6 +562,7 @@ namespace VerticalPlayer.Media
                     }
                 }
             }
+            if (withAudio) _holdAfterStepFrame = false; // 通常再生へ戻るときは保持を解除する
             _paused = false;
         }
 
@@ -955,8 +974,32 @@ namespace VerticalPlayer.Media
                         {
                             double target = _pendingSeekSeconds;
                             _pendingSeekSeconds = -1;
+                            bool wasHoldingStep = _holdAfterStepFrame; // 追加：保持解除前の状態を控える
+                            _holdAfterStepFrame = false; // 新しいシークが来たので、前回のコマ送り保持を解除する
 
-                            if (wantPrefetch && demuxThread != null)
+                            // ここから追加
+                            // コマ送りの前進（映像のみ・保持中・目標が表示中フレームの少し先）は、キーフレームまで戻る実シークをせず、
+                            // デコードを現在位置から続けて、目標より前のフレームだけ捨てて目標フレームで止める。
+                            // （実シークだとキーフレームから毎回デコードし直すため遅く、GOP単位に丸まる原因にもなっていた）
+                            bool stepForwardNoSeek = wasHoldingStep && !_audioDesired && !_fastSeekPreview
+                                && _lastShownPtsSeconds >= 0
+                                && target > _lastShownPtsSeconds + 0.001
+                                && target - _lastShownPtsSeconds <= StepForwardNoSeekMaxSeconds;
+                            _diagFirstFrameAfterSeek = true;
+                            _diagSeekTarget = target;
+                            _diagCatchUpDrops = 0;
+                            // ここまで
+
+
+                            if (stepForwardNoSeek)
+                            {
+                                _catchingUpAfterSeek = true;
+                                _extBaseSeconds = target;
+                                _extClock.Restart();
+                                _extPlaying = false;
+                                Trace($"Seek -> {target:F3}s (実シークなし・前進デコード 表示中={_lastShownPtsSeconds:F3})");
+                            }
+                            else if (wantPrefetch && demuxThread != null)
                             {
                                 // Demuxスレッドがfmtに対してav_read_frameを呼んでいる最中に
                                 // こちらがav_seek_frameを呼ぶとFFmpeg内部状態が競合するため、
@@ -992,7 +1035,8 @@ namespace VerticalPlayer.Media
                                         }
                                     }
 
-                                    long tsP = (long)(target / ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base));
+                                    double seekPosP = (!_audioDesired && !_fastSeekPreview) ? Math.Max(0, target - PreciseSeekMarginSeconds) : target; // 追加：精密シークは手前から
+                                    long tsP = (long)(seekPosP / ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base));
                                     ffmpeg.av_seek_frame(fmt, videoIdx, tsP, ffmpeg.AVSEEK_FLAG_BACKWARD);
                                     ffmpeg.avcodec_flush_buffers(vctx);
                                     PauseAudioDecodeForSeek();
@@ -1035,7 +1079,8 @@ namespace VerticalPlayer.Media
                             }
                             else
                             {
-                                long ts = (long)(target / ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base));
+                                double seekPos = (!_audioDesired && !_fastSeekPreview) ? Math.Max(0, target - PreciseSeekMarginSeconds) : target; // 追加：精密シークは手前から
+                                long ts = (long)(seekPos / ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base));
                                 ffmpeg.av_seek_frame(fmt, videoIdx, ts, ffmpeg.AVSEEK_FLAG_BACKWARD);
                                 ffmpeg.avcodec_flush_buffers(vctx);
                                 PauseAudioDecodeForSeek();
@@ -1079,6 +1124,14 @@ namespace VerticalPlayer.Media
                             SetExternalClock(GetMasterClockSec(), false);
                         }
                         Thread.Sleep(10);
+                        continue;
+                    }
+
+                    // コマ送り/プレビューで目標フレームを表示済みなら、次のSeekか通常再生に戻るまで
+                    // パケットを読み進めず（＝余分なフレームを出さず）待機する。
+                    if (_holdAfterStepFrame && !_catchingUpAfterSeek)
+                    {
+                        Thread.Sleep(5);
                         continue;
                     }
 
@@ -1170,6 +1223,9 @@ namespace VerticalPlayer.Media
                         {
                             while (myGen == _generation && ffmpeg.avcodec_receive_frame(vctx, frame) == 0)
                             {
+                                // 目標フレームを表示済み（コマ送り保持中）なら、同じパケットから続けて出てきたフレームは表示しない
+                                if (_holdAfterStepFrame && !_catchingUpAfterSeek) continue;
+
                                 if (!diagFirstDecodeLogged)
                                 {
                                     Trace($"[DIAG] first frame decoded (gen={myGen})");
@@ -1186,6 +1242,11 @@ namespace VerticalPlayer.Media
                                     ? GetMasterClockSec()
                                     : frame->best_effort_timestamp * ffmpeg.av_q2d(fmt->streams[videoIdx]->time_base);
 
+                                if (_diagFirstFrameAfterSeek)
+                                {
+                                    _diagFirstFrameAfterSeek = false;
+                                    Trace($"[StepDiag] シーク後の最初のデコードpts={ptsSeconds:F3} 目標={_diagSeekTarget:F3} 種別={frame->pict_type}");
+                                }
                                 double master = GetMasterClockSec();
                                 double diff = ptsSeconds - master;
                                 bool drop = false;
@@ -1220,6 +1281,7 @@ namespace VerticalPlayer.Media
 
                                 if (drop)
                                 {
+                                    _diagCatchUpDrops++;
                                     // [原因究明用ログ] シーク/再オープン直後のキャッチアップ中のみ発生（通常再生時は
                                     // 到達しない）。まとまった枚数が短時間に出る前提のログなので、通常再生中に
                                     // 出続けている場合はキャッチアップが終わらない不具合を疑うこと。
@@ -1351,11 +1413,17 @@ namespace VerticalPlayer.Media
                                     // キャッチアップ完了：このフレームの時刻を基準にクロックを解凍する。
                                     // 凍結中に実時間が進んでいないため、ここで desired 再生状態へ
                                     // 復帰しても「逃げ続ける目標」問題は起きない。
-                                    Trace($"CatchUp done pts={ptsSeconds:F3} desiredPlaying={_desiredPlaying}");
+                                    Trace($"CatchUp done pts={ptsSeconds:F3} desiredPlaying={_desiredPlaying} 目標={_diagSeekTarget:F3} 捨てた枚数={_diagCatchUpDrops}");
                                     _catchingUpAfterSeek = false;
                                     _extBaseSeconds = ptsSeconds;
                                     _extClock.Restart();
                                     _extPlaying = _desiredPlaying;
+                                    if (!_audioDesired)
+                                    {
+                                        // 映像のみ再生(コマ送り/プレビュー)では、この1枚が目標のフレーム。以降は止める。
+                                        _holdAfterStepFrame = true;
+                                        Trace($"StepHold: 目標フレーム(pts={ptsSeconds:F3})を表示。以降は次のSeekまで余分なフレームを出さない");
+                                    }
                                 }
 
                                 var localBuf = managedBuf;
@@ -1720,7 +1788,6 @@ namespace VerticalPlayer.Media
             int diagPacketsProcessed = 0;
             long diagSubmitTicksSum = 0;
             bool needOffsetCapture = true; // 今回追加: (再)開始後、最初のフレームの実ptsを捕捉する
-
             try
             {
                 while (myGen == _generation)

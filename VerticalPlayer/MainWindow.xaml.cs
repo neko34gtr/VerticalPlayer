@@ -238,7 +238,11 @@ namespace VerticalPlayer
             };
 
             // 実測FPS表示（1秒間隔で実際に表示されたフレーム数を集計）
-            Player.FrameDisplayed += _ => OnFrameDisplayedForFps();
+            Player.FrameDisplayed += pts =>
+            {
+                OnFrameDisplayedForFps();
+                OnFrameDisplayedForStep(pts); // ここを変更：コマ送りの基準位置管理にも表示ptsを渡す
+            };
 
             // DNNモデル一覧をmodelsフォルダから自動スキャンしてコンボへ反映
             // （軽量モデルへの差し替えを見越して、モデルファイルの追加だけで選べるようにする）
@@ -454,6 +458,7 @@ namespace VerticalPlayer
             DashcamView.ScreenshotFormatSetting = s.ScreenshotFormat;
             DashcamView.ScreenshotComposeSetting = s.ScreenshotCompose;
             DashcamView.FrameStepFramesSetting = s.DashcamFrameStepFrames;
+            FrameStepFramesSetting = s.FrameStepFrames; // ここを追加：メインモードのコマ送り量
             DashcamView.TunnelEntryDetectionModeSetting =
                 Enum.TryParse<VerticalPlayer.Dashcam.MapInfoProvider.TunnelEntryDetectionMode>(s.DashcamTunnelEntryDetectionMode, out var restoredTunnelMode)
                     ? restoredTunnelMode : VerticalPlayer.Dashcam.MapInfoProvider.TunnelEntryDetectionMode.Legacy;
@@ -546,6 +551,7 @@ namespace VerticalPlayer
                 ScreenshotFormat = DashcamView.ScreenshotFormatSetting,
                 ScreenshotCompose = DashcamView.ScreenshotComposeSetting,
                 DashcamFrameStepFrames = DashcamView.FrameStepFramesSetting,
+                FrameStepFrames = FrameStepFramesSetting, // ここを追加：メインモードのコマ送り量
                 DashcamTunnelEntryDetectionMode = DashcamView.TunnelEntryDetectionModeSetting.ToString(),
                 CursorHideDelaySec = _cursorHideDelaySec,
                 EnableSleepPrevention = _enableSleepPrevention,
@@ -1028,6 +1034,7 @@ namespace VerticalPlayer
         private void SeekBar_DragStarted(object sender, DragStartedEventArgs e)
         {
             _isDragging = true;
+            _frameStepPosValid = false; // ここを追加：シークバー操作後はコマ送りの論理位置を取り直す
             // StepToVideoOnlyAsyncは「音声は一時停止済み」前提のため、ドラッグ中に
             // 再生中のままだと音声だけ実時間で進み続け、位置の連打書き換えで
             // 早送りパラパラ再生のようになってしまう。ここで確実に一時停止する。
@@ -2072,9 +2079,15 @@ namespace VerticalPlayer
                 case Key.Space:
                     TogglePlayPause(); e.Handled = true; break;
                 case Key.Left:
-                    Player.Position -= TimeSpan.FromSeconds(10); e.Handled = true; break;
+                    // ここから変更：Shift+←でコマ戻し（押しっぱなしのキーリピートで連続）
+                    if ((Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift) _ = StepFrameAsync(-1);
+                    else Player.Position -= TimeSpan.FromSeconds(10);
+                    e.Handled = true; break;
                 case Key.Right:
-                    Player.Position += TimeSpan.FromSeconds(10); e.Handled = true; break;
+                    if ((Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift) _ = StepFrameAsync(+1);
+                    else Player.Position += TimeSpan.FromSeconds(10);
+                    e.Handled = true; break;
+                // ここまで
                 case Key.Up:
                     VolumeSlider.Value = Math.Min(VolumeSlider.Value + 0.05, 1.0);
                     e.Handled = true; break;
@@ -2383,27 +2396,144 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         // コマ送り / 前後ファイル
         // ─────────────────────────────────────────────────────────────────
-        private void FrameStep_Click(object sender, RoutedEventArgs e) => StepFrame(+1);
-        private void FrameBack_Click(object sender, RoutedEventArgs e) => StepFrame(-1);
-
-        private async void StepFrame(int direction)
+        // ここから変更：コマ送り / コマ戻し（ドラレコモードと同仕様）
+        // ・ボタンを押した瞬間に1回進め、押し続けると0.4秒後から約0.09秒ごとに繰り返す（Shift+←/→のキーリピートも同様）
+        // ・1回の量は「コマ」コンボ（1/3/5/8/10/15/30コマ、動画の実fps基準）
+        // ・基準位置は送り自身が保持する論理位置。表示中フレームのptsを毎回の基準にすると、キーフレーム丸めで位置がぶれる
+        private double FrameStepSeconds
         {
-            Trace($"StepFrame dir={direction} isPlaying={_isPlaying} pos={Player.Position}");
-            if (_isAutoFraming) StopAutoFrame();
-            if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdatePlayIcon(); _timer.Stop(); }
-
-            var target = Player.Position + TimeSpan.FromMilliseconds(_frameIntervalMs * direction);
-            if (target < TimeSpan.Zero) target = TimeSpan.Zero;
-            if (Player.NaturalDuration.HasTimeSpan && target > Player.NaturalDuration.TimeSpan)
-                target = Player.NaturalDuration.TimeSpan;
-            Trace($"StepFrame target={target.TotalSeconds:F3}s");
-
-            // コマ送りは音声再生を伴う必要がないため、音声(Play/Pause)には一切触れず
-            // 映像デコードだけをシークして1フレーム表示する専用APIを使用する。
-            bool ok = await Player.StepToVideoOnlyAsync(target);
-            Trace(ok ? "StepFrame: FrameDisplayed待ち成功" : "StepFrame: 500msタイムアウトで打ち切り");
-            Trace($"StepFrame done: target={target} actualPos={Player.Position}");
+            get
+            {
+                double fps = _mediaInfo is { Success: true } ? _mediaInfo.VideoFrameRate : 0;
+                return fps is > 1 and < 240 ? 1.0 / fps : 1.0 / 30.0;
+            }
         }
+        private bool _frameStepBusy;
+        private long _lastStepEndTs;            // 直近のコマ送りが終わった時刻(Stopwatch)
+        private TimeSpan _frameStepPos;         // 連続コマ送り時の論理位置
+        private bool _frameStepPosValid;
+        private int _frameStepFrames = 3;
+        private DispatcherTimer? _frameStepRepeatTimer;
+        private int _frameStepRepeatDir;
+        private double _lastDisplayedPts = -1;  // 直近に画面へ出たフレームの時刻(秒)
+
+        /// <summary>コマ送り1回あたりのコマ数（1/3/5/8/10/15/30）。永続化対象。</summary>
+        public int FrameStepFramesSetting
+        {
+            get => _frameStepFrames;
+            set
+            {
+                _frameStepFrames = value is 1 or 3 or 5 or 8 or 10 or 15 or 30 ? value : 3;
+                foreach (ComboBoxItem item in FrameStepAmountCombo.Items)
+                {
+                    if ((string)item.Tag == _frameStepFrames.ToString()) { FrameStepAmountCombo.SelectedItem = item; break; }
+                }
+            }
+        }
+
+        private void FrameStepAmount_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (FrameStepAmountCombo.SelectedItem is ComboBoxItem item && int.TryParse((string)item.Tag, out var n))
+                _frameStepFrames = n;
+        }
+
+        private void FrameStepButton_Down(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            if (sender is not Button b || !int.TryParse((string)b.Tag, out int dir)) return;
+            _frameStepRepeatDir = dir;
+            _ = StepFrameAsync(dir);
+
+            if (_frameStepRepeatTimer == null)
+            {
+                _frameStepRepeatTimer = new DispatcherTimer(DispatcherPriority.Input);
+                _frameStepRepeatTimer.Tick += FrameStepRepeatTimer_Tick;
+            }
+            _frameStepRepeatTimer.Interval = TimeSpan.FromMilliseconds(400);
+            _frameStepRepeatTimer.Start();
+        }
+
+        private void FrameStepRepeatTimer_Tick(object? sender, EventArgs e)
+        {
+            if (_frameStepRepeatTimer != null) _frameStepRepeatTimer.Interval = TimeSpan.FromMilliseconds(90);
+            _ = StepFrameAsync(_frameStepRepeatDir); // 前の送りが終わっていなければStepFrameAsync側で読み飛ばす
+        }
+
+        private void FrameStepButton_Up(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            _frameStepRepeatTimer?.Stop();
+        }
+
+        // コマ送り以外の要因で位置が動いたら論理位置を無効にし、次回は表示中のフレームから始め直す。
+        // ・再生中のフレームが流れている　・送りが終わって0.7秒以上たってから位置が1.5秒以上ずれた（シーク/ファイル切替）
+        private void OnFrameDisplayedForStep(double ptsSeconds)
+        {
+            _lastDisplayedPts = ptsSeconds;
+            if (_frameStepPosValid && !_frameStepBusy)
+            {
+                bool stepsEnded = System.Diagnostics.Stopwatch.GetElapsedTime(_lastStepEndTs).TotalMilliseconds > 700;
+                if (_isPlaying || (stepsEnded && Math.Abs(ptsSeconds - _frameStepPos.TotalSeconds) > 1.5))
+                    _frameStepPosValid = false;
+            }
+        }
+
+        private async Task StepFrameAsync(int direction)
+        {
+            if (_frameStepBusy || _isDragging || _dragCompleting) return;
+            if (Player.Source == null || !Player.NaturalDuration.HasTimeSpan) return;
+
+            _frameStepBusy = true;
+            try
+            {
+                if (_isAutoFraming) StopAutoFrame();
+                if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdatePlayIcon(); _timer.Stop(); }
+
+                var oneFrame = TimeSpan.FromSeconds(FrameStepSeconds);
+                var step = TimeSpan.FromTicks(oneFrame.Ticks * _frameStepFrames);
+                var dur = Player.NaturalDuration.TimeSpan;
+
+                bool rebased = false;
+                var prevStepPos = _frameStepPos;
+                if (!_frameStepPosValid)
+                {
+                    // 新しいコマ送りの開始。いま画面に出ているフレームの時刻を起点にする
+                    var basePos = Player.Position;
+                    if (_lastDisplayedPts >= 0)
+                    {
+                        var shown = TimeSpan.FromSeconds(_lastDisplayedPts);
+                        if ((shown - basePos).Duration() < TimeSpan.FromSeconds(2)) basePos = shown; // 前のファイルの古い値は使わない
+                    }
+                    _frameStepPos = basePos;
+                    rebased = true;
+                }
+
+                var next = _frameStepPos + TimeSpan.FromTicks(step.Ticks * direction);
+                var last = dur - oneFrame;
+                if (last < TimeSpan.Zero) last = TimeSpan.Zero;
+                if (next < TimeSpan.Zero) next = TimeSpan.Zero;
+                if (next > last) next = last;
+
+                _frameStepPos = next;
+                _frameStepPosValid = true;
+
+                // 半フレーム先へ着地させ、丸め誤差で前のフレームに落ちるのを防ぐ
+                var seekTarget = next + TimeSpan.FromTicks(oneFrame.Ticks / 2);
+                var swStep = System.Diagnostics.Stopwatch.StartNew();
+                double shownBefore = _lastDisplayedPts;
+                // コマ送りは音声再生を伴わないため、映像デコードだけをシークして1フレーム表示する専用APIを使う
+                await Player.StepToVideoOnlyAsync(seekTarget, timeoutMs: 1000);
+                Trace($"[Step] dir={direction:+0;-0} {_frameStepFrames}コマ(1コマ={oneFrame.TotalMilliseconds:F1}ms) " +
+                      $"Position={Player.Position.TotalSeconds:F3} 表示pts: {shownBefore:F3}→{_lastDisplayedPts:F3} " +
+                      $"起点の取り直し={(rebased ? "あり" : "なし")} 前回の論理位置={(rebased ? double.NaN : prevStepPos.TotalSeconds):F3} " +
+                      $"目標={next.TotalSeconds:F3} 所要{swStep.ElapsedMilliseconds}ms");
+                Timer_Tick(null, EventArgs.Empty); // 一時停止中はタイマーが止まっているため、シークバー/時刻表示を1回更新する
+            }
+            finally
+            {
+                _lastStepEndTs = System.Diagnostics.Stopwatch.GetTimestamp();
+                _frameStepBusy = false;
+            }
+        }
+        // ここまで
 
 
         private void AutoFrame_Click(object sender, RoutedEventArgs e)

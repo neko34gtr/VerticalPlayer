@@ -99,6 +99,7 @@ namespace VerticalPlayer
         /// AVEngine.GetDefaultTrtCacheBackupDir()の既定パス（%LOCALAPPDATA%配下、ビルド構成に
         /// 依存しない固定パス）を使う。</summary>
         public string? TrtCacheBackupDir { get; set; }
+        public int FrameStepFrames { get; set; } = 3;
 
         // ── エフェクト ──
         public double Contrast { get; set; }

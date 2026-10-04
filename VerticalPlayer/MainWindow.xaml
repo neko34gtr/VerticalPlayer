@@ -779,7 +779,7 @@
                                       StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="16" Height="16"/>
                             </Button>
                             <!-- コマ戻し -->
-                            <Button Style="{StaticResource IconBtn}" Click="FrameBack_Click" ToolTip="コマ戻し (Shift+←)" Padding="6">
+                            <Button Style="{StaticResource IconBtn}" Tag="-1" PreviewMouseLeftButtonDown="FrameStepButton_Down" PreviewMouseLeftButtonUp="FrameStepButton_Up" LostMouseCapture="FrameStepButton_Up" ToolTip="コマ戻し (Shift+←。押しっぱなしで連続)" Padding="6">
                                 <Path Data="M10,4 L4,10 L10,16 M16,4 L10,10 L16,16"
                                       Stroke="{StaticResource TextMuted}" StrokeThickness="1.5" Fill="Transparent"
                                       StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="16" Height="16"/>
@@ -821,7 +821,7 @@
                                       StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18"/>
                             </Button>
                             <!-- コマ送り -->
-                            <Button Style="{StaticResource IconBtn}" Click="FrameStep_Click" ToolTip="コマ送り (Shift+→)" Padding="6">
+                            <Button Style="{StaticResource IconBtn}" Tag="1" PreviewMouseLeftButtonDown="FrameStepButton_Down" PreviewMouseLeftButtonUp="FrameStepButton_Up" LostMouseCapture="FrameStepButton_Up" ToolTip="コマ送り (Shift+→。押しっぱなしで連続)" Padding="6">
                                 <Path Data="M6,4 L12,10 L6,16 M12,4 L18,10 L12,16"
                                       Stroke="{StaticResource TextMuted}" StrokeThickness="1.5" Fill="Transparent"
                                       StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="16" Height="16"/>
@@ -874,14 +874,14 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                            <Button Style="{StaticResource IconBtn}" Click="FrameBack_Click"
-                                    ToolTip="コマ戻し" Padding="5">
+                            <Button Style="{StaticResource IconBtn}" Tag="-1" PreviewMouseLeftButtonDown="FrameStepButton_Down" PreviewMouseLeftButtonUp="FrameStepButton_Up" LostMouseCapture="FrameStepButton_Up"
+                                    ToolTip="コマ戻し（押しっぱなしで連続）" Padding="5">
                                 <Path Data="M10,4 L4,10 L10,16 M16,4 L10,10 L16,16"
                                       Stroke="{StaticResource TextMuted}" StrokeThickness="1.5" Fill="Transparent"
                                       StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="14" Height="14"/>
                             </Button>
-                            <Button Style="{StaticResource IconBtn}" Click="FrameStep_Click"
-                                    ToolTip="コマ送り" Padding="5">
+                            <Button Style="{StaticResource IconBtn}" Tag="1" PreviewMouseLeftButtonDown="FrameStepButton_Down" PreviewMouseLeftButtonUp="FrameStepButton_Up" LostMouseCapture="FrameStepButton_Up"
+                                    ToolTip="コマ送り（押しっぱなしで連続）" Padding="5">
                                 <Path Data="M6,4 L12,10 L6,16 M12,4 L18,10 L12,16"
                                       Stroke="{StaticResource TextMuted}" StrokeThickness="1.5" Fill="Transparent"
                                       StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="14" Height="14"/>
@@ -932,6 +932,21 @@
                                 <ComboBoxItem Content="24" Tag="24"/>
                                 <ComboBoxItem Content="30" Tag="30"/>
                             </ComboBox>
+                            <!-- ここから追加：コマ送り量（コマ送り/コマ戻しボタン1回あたりのコマ数） -->
+                            <TextBlock Text="コマ:" Foreground="{StaticResource TextFaint}"
+                                       FontSize="9" VerticalAlignment="Center" Margin="8,0,4,0"/>
+                            <ComboBox x:Name="FrameStepAmountCombo" FontSize="10" Width="52"
+                                      SelectionChanged="FrameStepAmount_Changed"
+                                      ToolTip="コマ送り/コマ戻し1回あたりに進むコマ数（動画の実fps基準）">
+                                <ComboBoxItem Content="1"  Tag="1"/>
+                                <ComboBoxItem Content="3"  Tag="3" IsSelected="True"/>
+                                <ComboBoxItem Content="5"  Tag="5"/>
+                                <ComboBoxItem Content="8"  Tag="8"/>
+                                <ComboBoxItem Content="10" Tag="10"/>
+                                <ComboBoxItem Content="15" Tag="15"/>
+                                <ComboBoxItem Content="30" Tag="30"/>
+                            </ComboBox>
+                            <!-- ここまで -->
                         </StackPanel>
                     </Grid>
                 </StackPanel>

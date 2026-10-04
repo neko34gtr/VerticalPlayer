@@ -702,11 +702,11 @@ namespace VerticalPlayer.Dashcam
             win.Closed += (s, args) =>
             {
                 _pairListWindow = null;
-                DashcamPlayErrorLogger.Log("[PairList] 閉じた");
+                DashcamDebugLog.Log("[PairList] 閉じた");
             };
             _pairListWindow = win;
 
-            DashcamPlayErrorLogger.Log($"[PairList] 開く(別ウィンドウ) 再生中={_isPlaying} 描画Tier={System.Windows.Media.RenderCapability.Tier >> 16} " +
+            DashcamDebugLog.Log($"[PairList] 開く(別ウィンドウ) 再生中={_isPlaying} 描画Tier={System.Windows.Media.RenderCapability.Tier >> 16} " +
                 $"Front(GPU)={PlayerFront.IsGpuPresenterAvailable} Rear(GPU)={PlayerRear.IsGpuPresenterAvailable}");
             win.Show();
         }
@@ -1031,7 +1031,7 @@ namespace VerticalPlayer.Dashcam
                     var ct = _thumbCts.Token;
 
                     // ここから追加：ドライブごとの表示速度差(I:は一瞬、J:は黒いまま遅い)の原因切り分け用ログ
-                    // （play_error.txtに[Thumb]として出力）
+                    // （debug.logに[Thumb]として出力、Debugビルドのみ）
                     var swBatch = System.Diagnostics.Stopwatch.StartNew();
                     string driveLabel = Path.GetPathRoot(batch[0].path) ?? "?";
                     // ここまで
@@ -1055,7 +1055,7 @@ namespace VerticalPlayer.Dashcam
                         if (cachedMap != null && cachedMap.TryGetValue(item.path, out var data)) hits.Add((item.group, data));
                         else missing.Add(item);
                     }
-                    DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} 対象{batch.Count}件 キャッシュ命中{hits.Count} 未命中{missing.Count} DB照会{swBatch.ElapsedMilliseconds}ms");
+                    DashcamDebugLog.Log($"[Thumb] {driveLabel} 対象{batch.Count}件 キャッシュ命中{hits.Count} 未命中{missing.Count} DB照会{swBatch.ElapsedMilliseconds}ms");
 
                     if (hits.Count > 0)
                     {
@@ -1071,7 +1071,7 @@ namespace VerticalPlayer.Dashcam
                     }
 
                     if (hits.Count > 0)
-                        DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} 命中{hits.Count}件の表示指示完了 {swBatch.ElapsedMilliseconds}ms");
+                        DashcamDebugLog.Log($"[Thumb] {driveLabel} 命中{hits.Count}件の表示指示完了 {swBatch.ElapsedMilliseconds}ms");
 
                     // 2) 無かった分だけFFmpegで直接生成する
                     int[] extractOk = { 0 }, extractFail = { 0 }, firstLogged = { 0 };
@@ -1094,7 +1094,7 @@ namespace VerticalPlayer.Dashcam
                                 {
                                     Interlocked.Increment(ref extractOk[0]);
                                     if (Interlocked.Exchange(ref firstLogged[0], 1) == 0)
-                                        DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} 最初の新規サムネイル完成 バッチ開始から{swBatch.ElapsedMilliseconds}ms（1件の抽出{swOne.ElapsedMilliseconds}ms）");
+                                        DashcamDebugLog.Log($"[Thumb] {driveLabel} 最初の新規サムネイル完成 バッチ開始から{swBatch.ElapsedMilliseconds}ms（1件の抽出{swOne.ElapsedMilliseconds}ms）");
                                     var bmp = BitmapSource.Create(ThumbWidth, ThumbHeight, 96, 96,
                                         PixelFormats.Bgr32, null, bgra, ThumbWidth * 4);
                                     bmp.Freeze();
@@ -1116,7 +1116,7 @@ namespace VerticalPlayer.Dashcam
                                 else
                                 {
                                     Interlocked.Increment(ref extractFail[0]);
-                                    DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} 高速抽出に失敗→プレイヤー経由へ: {Path.GetFileName(path)}（{swOne.ElapsedMilliseconds}ms）");
+                                    DashcamDebugLog.Log($"[Thumb] {driveLabel} 高速抽出に失敗→プレイヤー経由へ: {Path.GetFileName(path)}（{swOne.ElapsedMilliseconds}ms）");
                                     fallback.Enqueue(item);
                                 }
                                 return ValueTask.CompletedTask;
@@ -1128,7 +1128,7 @@ namespace VerticalPlayer.Dashcam
                     }
 
                     if (missing.Count > 0)
-                        DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} 新規抽出 成功{extractOk[0]} 失敗{extractFail[0]} 所要{swBatch.ElapsedMilliseconds}ms");
+                        DashcamDebugLog.Log($"[Thumb] {driveLabel} 新規抽出 成功{extractOk[0]} 失敗{extractFail[0]} 所要{swBatch.ElapsedMilliseconds}ms");
 
                     // 新規生成分のDB保存（1本のバックグラウンドタスクで逐次）
                     if (!toSave.IsEmpty)
@@ -1141,7 +1141,7 @@ namespace VerticalPlayer.Dashcam
                             try
                             {
                                 DashcamThumbnailCache.SaveBatch(saves.Select(s => (s.path, s.jpeg)));
-                                DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} DB保存 {saves.Length}件 {swSave.ElapsedMilliseconds}ms");
+                                DashcamDebugLog.Log($"[Thumb] {driveLabel} DB保存 {saves.Length}件 {swSave.ElapsedMilliseconds}ms");
                             }
                             catch (Exception ex)
                             {
@@ -1156,7 +1156,7 @@ namespace VerticalPlayer.Dashcam
                         if (ct.IsCancellationRequested) break;
                         var swFb = System.Diagnostics.Stopwatch.StartNew();
                         byte[]? png = await GenerateThumbnailAsync(path, fast: false);
-                        DashcamPlayErrorLogger.Log($"[Thumb] {driveLabel} プレイヤー経由 {Path.GetFileName(path)} {(png == null ? "失敗" : "成功")} {swFb.ElapsedMilliseconds}ms");
+                        DashcamDebugLog.Log($"[Thumb] {driveLabel} プレイヤー経由 {Path.GetFileName(path)} {(png == null ? "失敗" : "成功")} {swFb.ElapsedMilliseconds}ms");
                         if (png == null) continue; // 壊れたファイル等はスキップ
                         await Task.Run(() =>
                         {
@@ -1365,7 +1365,7 @@ namespace VerticalPlayer.Dashcam
 
         private void LoadRearClip(RearClip clip, DateTime t)
         {
-            DashcamPlayErrorLogger.Log($"[RearClip] T={t:HH:mm:ss.f} → {Path.GetFileName(clip.FilePath)} 位置={(t - clip.Start).TotalSeconds:F1}s " +
+            DashcamDebugLog.Log($"[RearClip] T={t:HH:mm:ss.f} → {Path.GetFileName(clip.FilePath)} 位置={(t - clip.Start).TotalSeconds:F1}s " +
                 $"(直前={Path.GetFileName(_currentRearClipPath) ?? "(なし)"})");
 
             _currentRearClipPath = clip.FilePath;
@@ -1504,7 +1504,7 @@ namespace VerticalPlayer.Dashcam
             var sw = System.Diagnostics.Stopwatch.StartNew();
             action();
             if (sw.ElapsedMilliseconds >= 150)
-                DashcamPlayErrorLogger.Log($"[Slow] {name} {sw.ElapsedMilliseconds}ms");
+                DashcamDebugLog.Log($"[Slow] {name} {sw.ElapsedMilliseconds}ms");
         }
 
         private void PlayFrontGroup(DashcamMediaGroup group)
@@ -1542,7 +1542,7 @@ namespace VerticalPlayer.Dashcam
             }
 
             // リア連動の診断ログ（「次のシーンでフロントだけ切り替わりリアが付いて来ない」調査用）
-            DashcamPlayErrorLogger.Log($"[Scene] Front={group.TimestampKey} 開始={_frontStart:HH:mm:ss} RearLinked={RearLinked} 時刻同期={UseTimeAlignedRear} HasRear={group.HasRear} " +
+            DashcamDebugLog.Log($"[Scene] Front={group.TimestampKey} 開始={_frontStart:HH:mm:ss} RearLinked={RearLinked} 時刻同期={UseTimeAlignedRear} HasRear={group.HasRear} " +
                 $"RearPath={group.RearVideoPath ?? "(なし)"} 直前のリア={_currentRearGroup?.TimestampKey ?? "(null)"}");
 
             if (UseTimeAlignedRear)
@@ -1602,7 +1602,7 @@ namespace VerticalPlayer.Dashcam
             int openToken = ++_frontOpenToken; // 解析の待機中に別ファイルへ切り替わった場合、古い処理を捨てるための番号
             PlayerFront.ResetDnnEngineForNewFile();
             if (_gapPending)
-                DashcamPlayErrorLogger.Log($"[Gap] MediaEnded → 次ファイルのOpen完了まで {GapMs(_gapMediaEndedTs)}ms");
+                DashcamDebugLog.Log($"[Gap] MediaEnded → 次ファイルのOpen完了まで {GapMs(_gapMediaEndedTs)}ms");
 
             // ここから変更：動画情報(MediaInfo)の解析とNMEAの読み込み・解析を、UIスレッドではなく別スレッドで行う。
             // 以前はUIスレッドで同期処理していたため、SDカード(I:)からまだ読まれていないファイルへ飛んだときに
@@ -1651,7 +1651,7 @@ namespace VerticalPlayer.Dashcam
 
             _sensorFrames = sensorFrames;
             if (_gapPending)
-                DashcamPlayErrorLogger.Log($"[Gap] MediaOpened内: 動画情報・センサー(NMEA)の解析完了まで {swOpened.ElapsedMilliseconds}ms（{sensorFrames.Count}件）");
+                DashcamDebugLog.Log($"[Gap] MediaOpened内: 動画情報・センサー(NMEA)の解析完了まで {swOpened.ElapsedMilliseconds}ms（{sensorFrames.Count}件）");
             // ここまで
             // グラフはファイル全体分をここで一度だけ計算して描画する（毎フレーム全点を再計算して
             // いた従来方式はスレッド負荷が無駄に高かったため）。再生中はSetPlayhead()で現在位置を
@@ -1682,12 +1682,12 @@ namespace VerticalPlayer.Dashcam
             if (_wantsPlaying)
             {
                 if (_gapPending)
-                    DashcamPlayErrorLogger.Log($"[Gap] MediaOpened内: グラフ描画まで終え、Play()直前 {swOpened.ElapsedMilliseconds}ms（MediaEndedから{GapMs(_gapMediaEndedTs)}ms）");
+                    DashcamDebugLog.Log($"[Gap] MediaOpened内: グラフ描画まで終え、Play()直前 {swOpened.ElapsedMilliseconds}ms（MediaEndedから{GapMs(_gapMediaEndedTs)}ms）");
                 PlayerFront.Play();
                 _isPlaying = true;
                 SetPlayPauseIcon(true);
                 if (_gapPending)
-                    DashcamPlayErrorLogger.Log($"[Gap] MediaEnded → Play()呼び出し完了まで {GapMs(_gapMediaEndedTs)}ms");
+                    DashcamDebugLog.Log($"[Gap] MediaEnded → Play()呼び出し完了まで {GapMs(_gapMediaEndedTs)}ms");
             }
 
             if (PlayerFront.NaturalVideoWidth > 0 && PlayerFront.NaturalVideoHeight > 0)
@@ -1968,7 +1968,7 @@ namespace VerticalPlayer.Dashcam
 
         private void PlayerRear_MediaOpened(object sender, RoutedEventArgs e)
         {
-            DashcamPlayErrorLogger.Log($"[RearOpened] Rear={_currentRearGroup?.TimestampKey ?? "(null)"} wantsPlaying={_wantsPlaying} " +
+            DashcamDebugLog.Log($"[RearOpened] Rear={_currentRearGroup?.TimestampKey ?? "(null)"} wantsPlaying={_wantsPlaying} " +
                 $"Front位置={PlayerFront.Position.TotalSeconds:F2}s Rear映像={PlayerRear.NaturalVideoWidth}x{PlayerRear.NaturalVideoHeight}");
             PlayerRear.ResetDnnEngineForNewFile();
 
@@ -2048,7 +2048,7 @@ namespace VerticalPlayer.Dashcam
                     long lateMs = (long)((now - _uiStallLastTick) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
                     _uiStallLastTick = now;
                     if (lateMs > 300)
-                        DashcamPlayErrorLogger.Log($"[UIStall] UIスレッドが約{lateMs}ms応答しませんでした");
+                        DashcamDebugLog.Log($"[UIStall] UIスレッドが約{lateMs}ms応答しませんでした");
                     if (now > _uiStallUntilTs) _uiStallTimer!.Stop();
                 };
             }
@@ -2059,7 +2059,7 @@ namespace VerticalPlayer.Dashcam
 
         private void PlayerFront_MediaEnded(object sender, RoutedEventArgs e)
         {
-            DashcamPlayErrorLogger.Log($"[MediaEnded] Front={_currentFrontGroup?.TimestampKey ?? "(null)"}");
+            DashcamDebugLog.Log($"[MediaEnded] Front={_currentFrontGroup?.TimestampKey ?? "(null)"}");
             _gapMediaEndedTs = System.Diagnostics.Stopwatch.GetTimestamp();
             _gapPending = true;
             StartUiStallProbe();
@@ -2100,7 +2100,7 @@ namespace VerticalPlayer.Dashcam
             }
             if (idx <= 0)
             {
-                DashcamPlayErrorLogger.Log($"[Previous] {_currentFrontGroup.TimestampKey}は先頭ファイルのため中止");
+                DashcamDebugLog.Log($"[Previous] {_currentFrontGroup.TimestampKey}は先頭ファイルのため中止");
                 return;
             }
 
@@ -2131,7 +2131,7 @@ namespace VerticalPlayer.Dashcam
             }
             if (idx + 1 >= _frontGroups.Count)
             {
-                DashcamPlayErrorLogger.Log($"[Advance] {_currentFrontGroup.TimestampKey}は最終ファイルのため中止");
+                DashcamDebugLog.Log($"[Advance] {_currentFrontGroup.TimestampKey}は最終ファイルのため中止");
                 return;
             }
 
@@ -2147,7 +2147,7 @@ namespace VerticalPlayer.Dashcam
 
         private void PlayerRear_MediaEnded(object sender, RoutedEventArgs e)
         {
-            DashcamPlayErrorLogger.Log($"[RearEnded] Rear={_currentRearGroup?.TimestampKey ?? "(null)"} RearLinked={RearLinked} Front位置={PlayerFront.Position.TotalSeconds:F2}s");
+            DashcamDebugLog.Log($"[RearEnded] Rear={_currentRearGroup?.TimestampKey ?? "(null)"} RearLinked={RearLinked} Front位置={PlayerFront.Position.TotalSeconds:F2}s");
             if (RearLinked)
             {
                 // 追従中: 次のclipへの切替は時刻ベース(ReconcileRear)が行う。終了したclipは再読込しない
@@ -2351,13 +2351,13 @@ namespace VerticalPlayer.Dashcam
 
                 // 半フレーム先へ着地させ、丸め誤差で前のフレームに落ちるのを防ぐ
                 var seekTarget = next + TimeSpan.FromTicks(oneFrame.Ticks / 2);
-                // ここから追加：逆行現象の原因調査用ログ（play_error.txtに[Step]として出力）
+                // ここから追加：逆行現象の原因調査用ログ（debug.logに[Step]として出力、Debugビルドのみ）
                 var swStep = System.Diagnostics.Stopwatch.StartNew();
                 double shownBefore = _lastDisplayedPts;
                 // ここまで
                 await PlayerFront.StepToVideoOnlyAsync(seekTarget, timeoutMs: 1000);
                 // ここから追加
-                DashcamPlayErrorLogger.Log(
+                DashcamDebugLog.Log(
                     $"[Step] dir={direction:+0;-0} {_frameStepFrames}コマ(1コマ={oneFrame.TotalMilliseconds:F1}ms) " +
                     $"Position={PlayerFront.Position.TotalSeconds:F3} 表示pts: {shownBefore:F3}→{_lastDisplayedPts:F3} " +
                     $"前回の論理位置={(rebased ? double.NaN : prevStepPos.TotalSeconds):F3} 起点の取り直し={(rebased ? "あり(新規開始)" : "なし(継続)")} " +
@@ -3273,7 +3273,7 @@ namespace VerticalPlayer.Dashcam
             if (_gapPending)
             {
                 _gapPending = false;
-                DashcamPlayErrorLogger.Log($"[Gap] MediaEnded → 次ファイルの最初のフレーム表示まで {GapMs(_gapMediaEndedTs)}ms");
+                DashcamDebugLog.Log($"[Gap] MediaEnded → 次ファイルの最初のフレーム表示まで {GapMs(_gapMediaEndedTs)}ms");
             }
 
             var pos = TimeSpan.FromSeconds(ptsSeconds);
@@ -3355,7 +3355,7 @@ namespace VerticalPlayer.Dashcam
                 var target = desiredRearPos + _rearSeekLead;
                 if (PlayerRear.NaturalDuration.HasTimeSpan && target > PlayerRear.NaturalDuration.TimeSpan)
                     target = PlayerRear.NaturalDuration.TimeSpan;
-                DashcamPlayErrorLogger.Log($"[RearResync] diff={diff.TotalSeconds:F2}s → Rear位置={target.TotalSeconds:F2}s");
+                DashcamDebugLog.Log($"[RearResync] diff={diff.TotalSeconds:F2}s → Rear位置={target.TotalSeconds:F2}s");
                 PlayerRear.Position = target;
                 _rearResyncWatch.Restart();
                 _rearSettleSamplePending = true;
