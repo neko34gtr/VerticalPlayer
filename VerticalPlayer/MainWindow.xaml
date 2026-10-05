@@ -462,11 +462,11 @@
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <!-- タブヘッダー -->
-                            <Border Grid.Row="0" Background="#0F1623" CornerRadius="10,10,0,0" Padding="4">
+                            <Border Grid.Row="0" Background="#14FFFFFF" CornerRadius="10" Padding="4" Margin="0,0,0,6">
                                 <TabPanel IsItemsHost="True" HorizontalAlignment="Stretch"/>
                             </Border>
                             <!-- コンテンツ -->
-                            <Border Grid.Row="1" Background="#141C2E" CornerRadius="0,0,10,10" Padding="12">
+                            <Border Grid.Row="1" Background="Transparent" CornerRadius="0,0,10,10" Padding="6,8,6,6">
                                 <ContentPresenter ContentSource="SelectedContent"/>
                             </Border>
                         </Grid>
@@ -488,11 +488,11 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsSelected" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#1A2438"/>
+                                <Setter TargetName="Bd" Property="Background" Value="#383B82F6"/>
                                 <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
                             </Trigger>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#1E2B42"/>
+                                <Setter TargetName="Bd" Property="Background" Value="#1AFFFFFF"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -1091,12 +1091,32 @@
 
             <!-- ========== サイドパネル（スライドイン） ========== -->
             <Border x:Name="SidePanel" Grid.Row="0" Grid.RowSpan="3"
-                    Background="#0D1525" Width="260"
+                    Width="300" Margin="10,54,0,12"
                     HorizontalAlignment="Left" VerticalAlignment="Stretch"
                     Visibility="Collapsed" Panel.ZIndex="20"
-                    BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
+                    CornerRadius="14" BorderThickness="1"
+                    RenderTransformOrigin="0,0">
+                <!-- 半透明ガラス風ポップオーバー（背後の映像がうっすら透ける） -->
+                <Border.Background>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                        <GradientStop Color="#E0172238" Offset="0"/>
+                        <GradientStop Color="#D70B1220" Offset="1"/>
+                    </LinearGradientBrush>
+                </Border.Background>
+                <Border.BorderBrush>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                        <GradientStop Color="#45FFFFFF" Offset="0"/>
+                        <GradientStop Color="#14FFFFFF" Offset="1"/>
+                    </LinearGradientBrush>
+                </Border.BorderBrush>
+                <Border.RenderTransform>
+                    <TransformGroup>
+                        <ScaleTransform x:Name="SidePanelScale" ScaleX="1" ScaleY="1"/>
+                        <TranslateTransform x:Name="SidePanelShift" X="0" Y="0"/>
+                    </TransformGroup>
+                </Border.RenderTransform>
                 <Border.Effect>
-                    <DropShadowEffect Color="#000000" BlurRadius="24" Direction="0" ShadowDepth="8" Opacity="0.5"/>
+                    <DropShadowEffect Color="#000000" BlurRadius="32" Direction="270" ShadowDepth="10" Opacity="0.45"/>
                 </Border.Effect>
                 <Grid>
                     <Grid.RowDefinitions>
@@ -1105,8 +1125,8 @@
                     </Grid.RowDefinitions>
 
                     <!-- パネルヘッダー -->
-                    <Border Grid.Row="0" Background="#080C14"
-                            BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
+                    <Border Grid.Row="0" Background="#12FFFFFF" CornerRadius="13,13,0,0"
+                            BorderBrush="#1FFFFFFF" BorderThickness="0,0,0,1">
                         <DockPanel Margin="14,0">
                             <TextBlock Text="設定" Foreground="{StaticResource TextPrimary}"
                                        FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center"/>
@@ -1377,8 +1397,8 @@
                                     <ItemsControl x:Name="PresetList">
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
-                                                <Border Background="#1A2438" CornerRadius="8"
-                                                        BorderBrush="{StaticResource Border}" BorderThickness="1"
+                                                <Border Background="#14FFFFFF" CornerRadius="8"
+                                                        BorderBrush="#1FFFFFFF" BorderThickness="1"
                                                         Margin="0,3" Padding="8,6">
                                                     <Grid>
                                                         <Grid.ColumnDefinitions>

@@ -13,6 +13,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 
 namespace VerticalPlayer
@@ -1885,11 +1886,58 @@ namespace VerticalPlayer
 
         private void PanelOverlay_Click(object sender, MouseButtonEventArgs e) => TogglePanel();
 
+        // 設定ポップオーバーの開閉アニメーション用（閉じ中に再度開いた場合、古い完了通知を無視するための世代番号）
+        private int _panelAnimGen;
+        private bool _panelClosing;
+
         private void TogglePanel()
         {
-            bool open = SidePanel.Visibility != Visibility.Visible;
-            SidePanel.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
-            PanelOverlay.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+            // 閉じアニメーション中は「閉じている」扱い（再度押すと開き直す）
+            bool open = SidePanel.Visibility != Visibility.Visible || _panelClosing;
+            if (open) ShowPanel();
+            else HidePanel();
+        }
+
+        private void ShowPanel()
+        {
+            _panelAnimGen++;
+            _panelClosing = false;
+            SidePanel.Visibility = Visibility.Visible;
+            PanelOverlay.Visibility = Visibility.Visible;
+
+            var dur = TimeSpan.FromMilliseconds(170);
+            var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+            SidePanel.BeginAnimation(UIElement.OpacityProperty,
+                new DoubleAnimation(0, 1, dur) { EasingFunction = ease });
+            SidePanelScale.BeginAnimation(ScaleTransform.ScaleXProperty,
+                new DoubleAnimation(0.96, 1, dur) { EasingFunction = ease });
+            SidePanelScale.BeginAnimation(ScaleTransform.ScaleYProperty,
+                new DoubleAnimation(0.96, 1, dur) { EasingFunction = ease });
+            SidePanelShift.BeginAnimation(TranslateTransform.YProperty,
+                new DoubleAnimation(-8, 0, dur) { EasingFunction = ease });
+        }
+
+        private void HidePanel()
+        {
+            int gen = ++_panelAnimGen;
+            _panelClosing = true;
+            PanelOverlay.Visibility = Visibility.Collapsed; // 外側クリックは即座に通常操作へ戻す
+
+            var fade = new DoubleAnimation(SidePanel.Opacity, 0, TimeSpan.FromMilliseconds(110))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+            };
+            fade.Completed += (s, e) =>
+            {
+                if (gen != _panelAnimGen) return; // 閉じ中に開き直された
+                _panelClosing = false;
+                SidePanel.BeginAnimation(UIElement.OpacityProperty, null);
+                SidePanel.Opacity = 1;
+                SidePanel.Visibility = Visibility.Collapsed;
+            };
+            SidePanel.BeginAnimation(UIElement.OpacityProperty, fade);
+            SidePanelShift.BeginAnimation(TranslateTransform.YProperty,
+                new DoubleAnimation(0, -6, TimeSpan.FromMilliseconds(110)));
         }
 
         // ─────────────────────────────────────────────────────────────────
