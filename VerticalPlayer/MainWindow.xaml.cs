@@ -2230,8 +2230,8 @@ namespace VerticalPlayer
             OsdScreenshotBtn.IsEnabled = false;
             try
             {
-                // 左右反転(H)は画面基準（回転後の絵に対して左右反転）。CaptureDisplayedFrameも回転後に反転を掛ける
-                var rtb = Player.CaptureDisplayedFrame(_flipH, false);
+                // 左右反転(H)は画面基準（回転後の絵に対して上下反転）。CaptureDisplayedFrameも回転後に反転を掛ける
+                var rtb = Player.CaptureDisplayedFrame(PlayerFlipTransform.ScaleX < 0, PlayerFlipTransform.ScaleY < 0);
                 if (rtb == null)
                 {
                     AppMessageBox.Show(this, "映像がまだ表示されていません。再生が始まってから撮影してください。", "スクリーンショット",
