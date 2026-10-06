@@ -322,6 +322,9 @@ namespace VerticalPlayer
         // ─────────────────────────────────────────────────────────────────
         private void Window_Loaded(object sender, RoutedEventArgs e)
         {
+            // ここから追加したDEBUGトレース
+            StartDiagProcTimer();
+            // ここまで
             if (File.Exists(ConfigPath))
             {
                 try
@@ -1164,6 +1167,7 @@ namespace VerticalPlayer
                 var files = (string[])e.Data.GetData(DataFormats.FileDrop);
                 if (files?.Length > 0) LoadVideo(files[0]);
             }
+            e.Handled = true; // VideoAreaとWindowの両方に配線されているため、バブルして2重にLoadVideoされるのを防ぐ
         }
 
         private void Window_DragOver(object sender, DragEventArgs e)
@@ -1949,12 +1953,27 @@ namespace VerticalPlayer
             else EnterDashcamMode();
         }
 
+        // モード切替レジューム用（切替直前の再生位置を保持し、戻ったときに続きから再生する）
+        private string? _switchResumePath;       // 通常モード: ドラレコへ入る直前の動画
+        private double _switchResumePos;
+        private string? _switchDashDrive;        // ドラレコモード: 通常へ戻る直前のドライブ/シーン/位置
+        private string? _switchDashGroup;
+        private string? _switchDashEvent;
+        private double _switchDashPos;
+
         // 起動時レジューム（RestoreSettings）からも呼べるよう、ボタンクリック本体から切り出したもの。
         private void EnterDashcamMode()
         {
             if (_isDashcamMode) return;
+            // ここから追加 DEBUGトレース
+            Trace("[DIAG-Mode] EnterDashcamMode");
+            // ここまで
             if (_isFullScreen) ExitFullScreen(); // 通常モードの全画面のままドラレコモードへ入らない
             _isDashcamMode = true;
+
+            // ドラレコモードへ入る直前の通常モードの動画パスと再生位置を保持しておく
+            _switchResumePath = Player.Source?.LocalPath;
+            _switchResumePos = Player.Position.TotalSeconds;
 
             // 通常再生を止めてからドラレコモードのオーバーレイを表示する
             if (_isPlaying) { Player.Pause(); _isPlaying = false; UpdatePlayIcon(); _timer.Stop(); }
@@ -1984,16 +2003,65 @@ namespace VerticalPlayer
                 this.Height = _dashcamWindowHeight;
                 EnsureOnScreen();
             }
+            // 前回ドラレコから抜けたときのシーンがあれば続きから再生する（起動時レジュームと同じ処理）
+            if (!string.IsNullOrEmpty(_switchDashGroup))
+                _ = DashcamView.TryResumeAsync(_switchDashDrive, _switchDashGroup, _switchDashPos, _switchDashEvent);
+
         }
+
+        // ここから追加（診断用。原因特定後は削除可）DEBUGトレース
+        private DispatcherTimer? _diagProcTimer;
+        private TimeSpan _diagProcCpuPrev;
+        private long _diagProcTsPrev;
+
+        // 2秒ごとに、プロセス全体のCPU使用率・スレッド数・UIスレッドの遅れをtrace.logへ出す。
+        // ドラレコモード終了後も裏で重い処理(サムネイル生成・地図取得・隠れたプレイヤー)が
+        // 動き続けていないかを見るためのもの。
+        private void StartDiagProcTimer()
+        {
+            using (var p0 = Process.GetCurrentProcess())
+                _diagProcCpuPrev = p0.TotalProcessorTime;
+            _diagProcTsPrev = Stopwatch.GetTimestamp();
+            _diagProcTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _diagProcTimer.Tick += (s, e) =>
+            {
+                try
+                {
+                    using var pr = Process.GetCurrentProcess();
+                    var cpu = pr.TotalProcessorTime;
+                    long ts = Stopwatch.GetTimestamp();
+                    double wallMs = (ts - _diagProcTsPrev) * 1000.0 / Stopwatch.Frequency;
+                    double cpuPct = (cpu - _diagProcCpuPrev).TotalMilliseconds / wallMs * 100.0;
+                    _diagProcCpuPrev = cpu;
+                    _diagProcTsPrev = ts;
+                    Trace($"[DIAG-Proc] mode={(_isDashcamMode ? "dashcam" : "normal")} cpu={cpuPct:F0}% threads={pr.Threads.Count} uiLateMs={wallMs - 2000:F0} managedMB={GC.GetTotalMemory(false) / 1048576}");
+                }
+                catch { }
+            };
+            _diagProcTimer.Start();
+        }
+        // ここまで
 
         private void ExitDashcamMode()
         {
             if (!_isDashcamMode) return;
+            // ここから追加 DEBUGトレース
+            Trace("[DIAG-Mode] ExitDashcamMode start");
+            // ここまで
             if (_isDashcamFullScreen) ExitDashcamFullScreen(); // 通常モードのウィンドウ状態へ戻してから抜ける
             _isDashcamMode = false;
-            SyncScreenshotFormatCombo(); // ここを追加：ドラレコ側で変更された撮影形式を通常モード側へ反映
+            SyncScreenshotFormatCombo(); // ドラレコ側で変更された撮影形式を通常モード側へ反映
+
+            // ドラレコモードから抜ける直前のドライブ/シーン/位置を保持しておく（次回ドラレコモードへ入るときに続きから再生するため）
+            _switchDashDrive = DashcamView.CurrentDrivePath;
+            _switchDashGroup = DashcamView.CurrentGroupKey;
+            _switchDashEvent = DashcamView.CurrentEventFolderName;
+            _switchDashPos = DashcamView.CurrentPositionSeconds;
 
             DashcamView.StopPlayback();
+            // ここから追加　DEBUGトレース
+            Trace("[DIAG-Mode] ExitDashcamMode: StopPlayback done");
+            // ここまで
             DashcamView.Visibility = Visibility.Collapsed;
 
             // ❗【追加】ドラレコ側で変更された音量を通常モードへ引き継ぐ
@@ -2015,6 +2083,14 @@ namespace VerticalPlayer
             this.Height = _preDashcamHeight;
             EnsureOnScreen();
             this.Title = _baseTitle;
+            // 通常モードを抜ける直前の動画を、その位置から再生し直す
+            if (!string.IsNullOrEmpty(_switchResumePath) && File.Exists(_switchResumePath))
+                LoadVideo(_switchResumePath, _switchResumePos);
+            _switchResumePath = null;
+
+            // ここから追加 DEBUGトレース
+            Trace("[DIAG-Mode] ExitDashcamMode end");
+            // ここまで
         }
         private static readonly System.Windows.Media.Brush RearNameBrush =
             new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x86, 0xEF, 0xAC));  // 明るい緑

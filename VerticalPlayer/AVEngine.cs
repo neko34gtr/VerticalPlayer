@@ -43,6 +43,9 @@ namespace VerticalPlayer.Media
         public event Action? EndOfStream;
 
         private readonly Dispatcher _ui;
+        // [診断] UI側Presentの遅延/処理時間の最大(Stopwatch ticks)。DIAG-Maxで1秒ごとに読み出してリセット
+        private long _diagUiLatMaxTicks;
+        private long _diagUiPresentMaxTicks;
         private int _generation;
 
         // ── 音声出力（IAudioOutput経由）。従来は上位のFfmpegMediaElementが同じファイルを
@@ -931,6 +934,15 @@ namespace VerticalPlayer.Media
                 int diagFrameProcCount = 0;
                 double diagLastLoggedFrameStats = 0;
                 int diagWaitMsSum = 0; // 映像ペーシング待機(diff>0時のSleep)の累積ms
+                // ── カクつき(周期的なドロップ)原因切り分け用: 1秒窓ごとの各段階の最大値（今回追加）──
+                long diagMaxDecodeTicks = 0, diagMaxHwTicks = 0, diagMaxDenoiseTicks = 0;
+                long diagMaxScaleTicks = 0, diagMaxCopyTicks = 0, diagMaxGapTicks = 0;
+                long diagLastFrameTs = 0;
+                long diagMaxTopTicks = 0, diagMaxDeqTicks = 0; // ループ先頭(音声クロック処理)・パケット取得の最大
+                double diagMaxSleepOverMs = 0;
+                int diagStarveCount = 0;
+                int diagGc0 = GC.CollectionCount(0), diagGc1 = GC.CollectionCount(1), diagGc2 = GC.CollectionCount(2);
+                TimeSpan diagGcPause0 = GC.GetTotalPauseDuration();
 
                 // ── Stage1: パケット先読みスレッド起動（wantPrefetch時のみ） ──
                 if (wantPrefetch)
@@ -1135,6 +1147,7 @@ namespace VerticalPlayer.Media
                         continue;
                     }
 
+                    long diagTop0 = Stopwatch.GetTimestamp();
                     if (!_audioDesired && audioRunning)
                     {
                         // コマ送り/プレビュー中など、映像デコードは進めるが音声は出さない指定。
@@ -1190,9 +1203,19 @@ namespace VerticalPlayer.Media
                             SetExternalClock(GetMasterClockSec(), true);
                     }
 
+                    long diagDeq0 = Stopwatch.GetTimestamp();
+                    {
+                        long diagTopDt = diagDeq0 - diagTop0;
+                        if (diagTopDt > diagMaxTopTicks) diagMaxTopTicks = diagTopDt;
+                    }
                     if (wantPrefetch && pktChannel != null)
                     {
-                        if (!TryDequeuePrefetchedPacket(pktChannel, myGen, pkt, out bool eof))
+                        bool diagDeqOk = TryDequeuePrefetchedPacket(pktChannel, myGen, pkt, out bool eof);
+                        {
+                            long diagDeqDt = Stopwatch.GetTimestamp() - diagDeq0;
+                            if (diagDeqDt > diagMaxDeqTicks) diagMaxDeqTicks = diagDeqDt;
+                        }
+                        if (!diagDeqOk)
                         {
                             if (eof)
                             {
@@ -1200,6 +1223,10 @@ namespace VerticalPlayer.Media
                                 Trace($"DecodeLoop(gen={myGen}): end of stream (prefetch)");
                                 int eofGen1 = myGen;
                                 _ui.BeginInvoke(new Action(() => { if (eofGen1 == _generation) EndOfStream?.Invoke(); }));
+                            }
+                            else
+                            {
+                                diagStarveCount++; // 先読みキューが空でパケットを取れなかった回数（診断用）
                             }
                             continue;
                         }
@@ -1219,10 +1246,27 @@ namespace VerticalPlayer.Media
 
                     if (pkt->stream_index == videoIdx)
                     {
+                        long diagDec0 = Stopwatch.GetTimestamp();
+                        bool diagDecFirst = true;
                         if (ffmpeg.avcodec_send_packet(vctx, pkt) == 0)
                         {
                             while (myGen == _generation && ffmpeg.avcodec_receive_frame(vctx, frame) == 0)
                             {
+                                {
+                                    long nowTs = Stopwatch.GetTimestamp();
+                                    if (diagDecFirst)
+                                    {
+                                        diagDecFirst = false;
+                                        long dec = nowTs - diagDec0;
+                                        if (dec > diagMaxDecodeTicks) diagMaxDecodeTicks = dec;
+                                    }
+                                    if (diagLastFrameTs != 0)
+                                    {
+                                        long gap = nowTs - diagLastFrameTs;
+                                        if (gap > diagMaxGapTicks) diagMaxGapTicks = gap;
+                                    }
+                                    diagLastFrameTs = nowTs;
+                                }
                                 // 目標フレームを表示済み（コマ送り保持中）なら、同じパケットから続けて出てきたフレームは表示しない
                                 if (_holdAfterStepFrame && !_catchingUpAfterSeek) continue;
 
@@ -1255,7 +1299,10 @@ namespace VerticalPlayer.Media
                                     int waitMs = (int)Math.Min(diff * 1000, 200);
                                     if (waitMs > 0)
                                     {
+                                        long diagSl0 = Stopwatch.GetTimestamp();
                                         Thread.Sleep(waitMs);
+                                        double diagSlMs = (Stopwatch.GetTimestamp() - diagSl0) * 1000.0 / Stopwatch.Frequency;
+                                        if (diagSlMs - waitMs > diagMaxSleepOverMs) diagMaxSleepOverMs = diagSlMs - waitMs;
                                         diagWaitMsSum += waitMs; // 今回追加: 映像ペーシング待機の累積(ms)
                                     }
                                 }
@@ -1332,13 +1379,16 @@ namespace VerticalPlayer.Media
                                         continue;
                                     }
                                     srcFrame = swFrame;
-                                    diagHwTransferTicks += Stopwatch.GetTimestamp() - tHw0;
+                                    long diagHwDt = Stopwatch.GetTimestamp() - tHw0;
+                                    diagHwTransferTicks += diagHwDt;
+                                    if (diagHwDt > diagMaxHwTicks) diagMaxHwTicks = diagHwDt;
                                 }
 
                                 // ── ノイズリダクション（段階3）──
                                 // drop確定フレームには適用しない（無駄な処理を避ける、既存のsws_scale
                                 // 遅延実行と同じ方針）。hqdn3dは1:1で出力するcausalフィルタのため、
                                 // 通常は毎回すぐに結果フレームが得られる。
+                                long diagDn0 = Stopwatch.GetTimestamp();
                                 AVFrame* filteredFrame = null;
                                 if (wantDenoise)
                                 {
@@ -1360,6 +1410,12 @@ namespace VerticalPlayer.Media
                                     }
                                 }
 
+                                if (wantDenoise)
+                                {
+                                    long diagDnDt = Stopwatch.GetTimestamp() - diagDn0;
+                                    if (diagDnDt > diagMaxDenoiseTicks) diagMaxDenoiseTicks = diagDnDt;
+                                }
+
                                 if (sws == null)
                                 {
                                     sws = ffmpeg.sws_getContext(w, h, (AVPixelFormat)srcFrame->format,
@@ -1370,7 +1426,9 @@ namespace VerticalPlayer.Media
                                 long tScale0 = Stopwatch.GetTimestamp();
                                 ffmpeg.sws_scale(sws, srcFrame->data, srcFrame->linesize, 0, h,
                                     rgbFrame->data, rgbFrame->linesize);
-                                diagScaleTicks += Stopwatch.GetTimestamp() - tScale0;
+                                long diagScDt = Stopwatch.GetTimestamp() - tScale0;
+                                diagScaleTicks += diagScDt;
+                                if (diagScDt > diagMaxScaleTicks) diagMaxScaleTicks = diagScDt;
 
                                 if (filteredFrame != null)
                                 {
@@ -1381,7 +1439,9 @@ namespace VerticalPlayer.Media
                                 int stride = rgbFrame->linesize[0];
                                 long tCopy0 = Stopwatch.GetTimestamp();
                                 System.Runtime.InteropServices.Marshal.Copy((IntPtr)rgbFrame->data[0], managedBuf, 0, bufSize);
-                                diagCopyTicks += Stopwatch.GetTimestamp() - tCopy0;
+                                long diagCpDt = Stopwatch.GetTimestamp() - tCopy0;
+                                diagCopyTicks += diagCpDt;
+                                if (diagCpDt > diagMaxCopyTicks) diagMaxCopyTicks = diagCpDt;
                                 diagFrameProcCount++;
 
                                 if (diagWallSw.Elapsed.TotalSeconds - diagLastLoggedFrameStats >= 1.0 && diagFrameProcCount > 0)
@@ -1394,6 +1454,22 @@ namespace VerticalPlayer.Media
                                     diagCopyTicks = 0;
                                     diagFrameProcCount = 0;
                                     diagWaitMsSum = 0;
+
+                                    // [DIAG-Max] 1秒窓内の各段階の「最大」値。平均に出ない単発の遅延を見る。
+                                    //  decode=send→受信までの最大 gap=フレーム処理間隔の最大(通常は1フレーム長)
+                                    //  sleepOver=Sleepが要求より余計に掛かった最大 starve=先読みキュー枯渇回数
+                                    //  uiLat=UIへ投げてから実行されるまで uiPresent=UI側Present処理 gcPause=GC停止合計
+                                    double uiLatMs = Interlocked.Exchange(ref _diagUiLatMaxTicks, 0) * toMs;
+                                    double uiPrMs = Interlocked.Exchange(ref _diagUiPresentMaxTicks, 0) * toMs;
+                                    var gcPause = GC.GetTotalPauseDuration();
+                                    Trace($"[DIAG-Max] decode={diagMaxDecodeTicks * toMs:F1} gap={diagMaxGapTicks * toMs:F1} sleepOver={diagMaxSleepOverMs:F1} hw={diagMaxHwTicks * toMs:F1} denoise={diagMaxDenoiseTicks * toMs:F1} scale={diagMaxScaleTicks * toMs:F1} copy={diagMaxCopyTicks * toMs:F1} starve={diagStarveCount} audioSec={diagMaxTopTicks * toMs:F1} deq={diagMaxDeqTicks * toMs:F1} uiLat={uiLatMs:F1} uiPresent={uiPrMs:F1} gc={GC.CollectionCount(0) - diagGc0}/{GC.CollectionCount(1) - diagGc1}/{GC.CollectionCount(2) - diagGc2} gcPauseMs={(gcPause - diagGcPause0).TotalMilliseconds:F1} (単位ms)");
+                                    diagMaxDecodeTicks = diagMaxGapTicks = diagMaxHwTicks = diagMaxDenoiseTicks = 0;
+                                    diagMaxScaleTicks = diagMaxCopyTicks = 0;
+                                    diagMaxTopTicks = diagMaxDeqTicks = 0;
+                                    diagMaxSleepOverMs = 0;
+                                    diagStarveCount = 0;
+                                    diagGc0 = GC.CollectionCount(0); diagGc1 = GC.CollectionCount(1); diagGc2 = GC.CollectionCount(2);
+                                    diagGcPause0 = gcPause;
                                 }
 
                                 if (_deinterlaceEnabled)
@@ -1609,9 +1685,13 @@ namespace VerticalPlayer.Media
 
                                 if (!dnnSkippedThisFrame)
                                 {
+                                    long diagQueuedTs = Stopwatch.GetTimestamp();
                                     _ui.BeginInvoke(DispatcherPriority.Render, new Action(() =>
                                     {
                                         if (frameGen != _generation) return;
+                                        long diagUiStart = Stopwatch.GetTimestamp();
+                                        long diagLat = diagUiStart - diagQueuedTs;
+                                        if (diagLat > _diagUiLatMaxTicks) _diagUiLatMaxTicks = diagLat;
                                         try
                                         {
                                             // WriteableBitmapフォールバック側は常に等倍（DNNの影響を受けない）
@@ -1619,6 +1699,8 @@ namespace VerticalPlayer.Media
                                             GpuPresenter?.EnsureSize(frameW, frameH);
                                             GpuPresenter?.Present(localBuf, frameW, frameH, frameStride);
                                             FrameDisplayed?.Invoke(shownPts);
+                                            long diagPr = Stopwatch.GetTimestamp() - diagUiStart;
+                                            if (diagPr > _diagUiPresentMaxTicks) _diagUiPresentMaxTicks = diagPr;
                                             if (!diagFirstDisplayLogged)
                                             {
                                                 Trace($"[DIAG] first frame displayed (gen={frameGen}) pts={shownPts:F3}");
@@ -1670,6 +1752,7 @@ namespace VerticalPlayer.Media
             }
             finally
             {
+                Trace($"DecodeThread(gen={myGen}) cleanup: start");
                 // ── Stage1: Demuxスレッドの停止・後始末 ──
                 // fmtを解放する前に、Demuxスレッドが確実にfmtへアクセスしなくなったことを
                 // 保証する必要がある（use-after-free防止）。interrupt_callback経由で
@@ -1754,10 +1837,12 @@ namespace VerticalPlayer.Media
                     Trace($"DecodeThread(gen={myGen}): AudioDecodeThread未終了のため音声リソースの解放を見送り（意図的リーク、クラッシュ回避優先）");
                 }
 
+                Trace($"DecodeThread(gen={myGen}) cleanup: closing decoder");
                 // hw_device_ctx は avcodec_free_context() が内部で解放するため、
                 // ここで自分で av_buffer_unref すると二重解放になり
                 // ExecutionEngineException（ネイティブ側のメモリ破壊）の原因になる
                 if (vctx != null) { var v = vctx; ffmpeg.avcodec_free_context(&v); }
+                Trace($"DecodeThread(gen={myGen}) cleanup: closing format");
                 if (demuxJoinedCleanly)
                 {
                     if (fmt != null) { var f = fmt; ffmpeg.avformat_close_input(&f); }
