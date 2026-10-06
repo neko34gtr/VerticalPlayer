@@ -1,0 +1,144 @@
+﻿<UserControl x:Class="VerticalPlayer.Dashcam.DashcamEventTabView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="DashcamTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+
+            <Style x:Key="EventFilterLabel" TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{StaticResource TextAccentCyan}"/>
+                <Setter Property="FontSize" Value="11"/>
+                <Setter Property="VerticalAlignment" Value="Center"/>
+                <Setter Property="Margin" Value="0,0,6,0"/>
+            </Style>
+
+            <Style x:Key="EventKeywordBox" TargetType="TextBox">
+                <Setter Property="Background" Value="{StaticResource BgDeep}"/>
+                <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+                <Setter Property="CaretBrush" Value="{StaticResource TextPrimary}"/>
+                <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="Padding" Value="6,3"/>
+                <Setter Property="VerticalContentAlignment" Value="Center"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="TextBox">
+                            <Border Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="4">
+                                <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"/>
+                            </Border>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <!-- 情報一覧ウィンドウの「ペア」タブと同じ配色（ThemedColumnHeader / ThemedCell と同一） -->
+            <Style x:Key="EventGridHeader" TargetType="DataGridColumnHeader">
+                <Setter Property="Background" Value="{StaticResource BgPanel}"/>
+                <Setter Property="Foreground" Value="{StaticResource TextAccentCyan}"/>
+                <Setter Property="FontSize" Value="11"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+                <Setter Property="Padding" Value="8,6"/>
+                <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                <Setter Property="BorderThickness" Value="0,0,1,1"/>
+                <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            </Style>
+
+            <Style x:Key="EventGridCell" TargetType="DataGridCell">
+                <Setter Property="Background" Value="Transparent"/>
+                <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+                <Setter Property="Focusable" Value="False"/>
+                <Setter Property="BorderThickness" Value="0"/>
+                <Setter Property="Padding" Value="6,5"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="DataGridCell">
+                            <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                                <ContentPresenter VerticalAlignment="Center"/>
+                            </Border>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+                <Style.Triggers>
+                    <Trigger Property="IsSelected" Value="True">
+                        <Setter Property="Background" Value="#1E3A5F"/>
+                    </Trigger>
+                </Style.Triggers>
+            </Style>
+
+            <!-- 行は背景を指定しない（DataGridのRowBackground/AlternatingRowBackgroundをそのまま使う）。
+                 ダブルクリックでジャンプするため、イベントだけ接続する。 -->
+            <Style x:Key="EventGridRow" TargetType="DataGridRow">
+                <Setter Property="Cursor" Value="Hand"/>
+                <EventSetter Event="MouseDoubleClick" Handler="Row_MouseDoubleClick"/>
+            </Style>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- フィルター・設定バー -->
+        <WrapPanel Grid.Row="0" Margin="0,0,0,8">
+            <StackPanel Orientation="Horizontal" Margin="0,0,16,4">
+                <TextBlock Text="種別" Style="{StaticResource EventFilterLabel}"/>
+                <ComboBox Width="120" Style="{StaticResource ModernCombo}"
+                          ItemsSource="{Binding FilterOptions}"
+                          SelectedItem="{Binding SelectedFilter, Mode=TwoWay}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,16,4">
+                <TextBlock Text="ジャンプ位置" Style="{StaticResource EventFilterLabel}"/>
+                <ComboBox Width="90" Style="{StaticResource ModernCombo}"
+                          ItemsSource="{Binding PrerollOptions}"
+                          SelectedItem="{Binding SelectedPreroll, Mode=TwoWay}"
+                          ToolTip="イベント発生地点の何秒手前から再生を始めるか"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                <TextBlock Text="検索" Style="{StaticResource EventFilterLabel}"/>
+                <TextBox Width="200" Style="{StaticResource EventKeywordBox}"
+                         Text="{Binding Keyword, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="イベント名・ファイル名・日時で絞り込み"/>
+            </StackPanel>
+        </WrapPanel>
+
+        <!-- イベント一覧（ダブルクリック／Enterで該当シーンへジャンプ） -->
+        <DataGrid x:Name="EventGrid" Grid.Row="1"
+                  ItemsSource="{Binding Events}"
+                  SelectedItem="{Binding SelectedEvent, Mode=TwoWay}"
+                  AutoGenerateColumns="False" IsReadOnly="True"
+                  CanUserAddRows="False" CanUserDeleteRows="False" CanUserResizeRows="False"
+                  SelectionMode="Single" SelectionUnit="FullRow"
+                  HeadersVisibility="Column" RowHeaderWidth="0"
+                  EnableRowVirtualization="True"
+                  Background="{StaticResource BgSurface}"
+                  Foreground="{StaticResource TextPrimary}"
+                  RowBackground="{StaticResource BgPanel}" AlternatingRowBackground="{StaticResource BgCard}"
+                  GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="{StaticResource Border}"
+                  BorderBrush="{StaticResource Border}" BorderThickness="1"
+                  ColumnHeaderStyle="{StaticResource EventGridHeader}"
+                  CellStyle="{StaticResource EventGridCell}"
+                  RowStyle="{StaticResource EventGridRow}"
+                  PreviewKeyDown="EventGrid_PreviewKeyDown">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="日時" Binding="{Binding DateTimeText}" Width="150"/>
+                <DataGridTextColumn Header="イベント種別" Binding="{Binding KindText}" Width="110"/>
+                <DataGridTextColumn Header="詳細情報" Binding="{Binding DetailText}" Width="*"/>
+                <DataGridTextColumn Header="ファイル名" Binding="{Binding FileName}" Width="220"/>
+                <DataGridTextColumn Header="相対時間" Binding="{Binding RelativeTimeText}" Width="80"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <TextBlock Grid.Row="2" Margin="2,6,0,0" FontSize="11"
+                   Foreground="{StaticResource TextMuted}"
+                   Text="{Binding StatusText}"
+                   ToolTip="行をダブルクリック（またはEnter）で、該当シーンの少し手前から再生します"/>
+    </Grid>
+</UserControl>

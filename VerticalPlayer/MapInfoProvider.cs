@@ -224,6 +224,17 @@ namespace VerticalPlayer.Dashcam
         private OverpassBundle _bundle = OverpassBundle.Empty;
         private List<ProjectedTunnel> _projectedTunnels = new();
         private List<ProjectedSaPa> _projectedSaPas = new();
+
+        // ここから追加：シークバーのイベントマーカー(トンネル/SA-PA)生成用。ルート・トンネル・SA/PAの
+        // 3点セットを不変オブジェクトとして丸ごと差し替える（バックグラウンドの読み取り側が
+        // 「新しいルートに古い投影結果」のような不整合な組み合わせを掴まないようにするため）。
+        private sealed record ProjectionSnapshot(List<RoutePoint> Route, List<ProjectedTunnel> Tunnels, List<ProjectedSaPa> SaPas);
+        private volatile ProjectionSnapshot? _projectionSnapshot;
+
+        /// <summary>トンネル/SA-PAの投影結果が更新された（LoadRouteAsync完了時・取得再試行成功時）。
+        /// どのスレッドから発火するか分からないため、UI側でDispatcherへ載せ替えること。</summary>
+        public event Action? ProjectionUpdated;
+        // ここまで
         private bool _routeReady; // LoadRouteAsyncが（成功/失敗問わず）一度完了したか
 
         // ── Heading（進行方位）の直前値ロック ──
@@ -523,11 +534,193 @@ namespace VerticalPlayer.Dashcam
                 _ = RetryFetchLaterAsync(newRoute, cacheKey, ct);
         }
 
+        // ここから追加
+        /// <summary>
+        /// 現在開いているファイル（fileFrames＝そのファイル自身のVideoOffsetを持つフレーム列）について、
+        /// 地図データ由来のトンネル区間とSA/PA通過地点を、再生位置(秒)付きのイベントとして一括算出する。
+        /// ファイルを開いた時／地図情報の更新時にバックグラウンドスレッドで呼ぶ想定（再生中は呼ばない）。
+        ///
+        /// ルートは「前後を連結した窓」の累積距離(km)で組まれているため、ファイル自身のGPS点を
+        /// ルートへ投影して「累積距離→ファイル内の時刻」の対応表を作り、トンネル入口/出口・SA/PAの
+        /// 累積距離を時刻へ補間する（測位ロスト中は前後の測位点の間を等速として補間する）。
+        /// ルートが未取得、またはこのファイルのGPS点がルートから大きく外れている（=別の窓のデータ）
+        /// 場合は空を返す。Overpassが取得できていない間は空のまま、取得後にProjectionUpdatedで再算出される。
+        /// </summary>
+        public IReadOnlyList<DashcamEventMarker> BuildMapEventMarkers(IReadOnlyList<DashcamSensorFrame> fileFrames, TimeSpan fileDuration)
+        {
+            var result = new List<DashcamEventMarker>();
+            var snap = _projectionSnapshot;
+            if (snap == null || snap.Route.Count < 2 || fileFrames == null || fileFrames.Count == 0)
+                return result;
+
+            double durSec = fileDuration.TotalSeconds;
+            if (durSec <= 0) durSec = fileFrames.Max(f => f.VideoOffset).TotalSeconds;
+
+            // ファイル内の測位点（0.5秒間隔に間引き）をルートへ投影。進行方向は累積距離が増える向きなので、
+            // 直前の位置より少し手前より後ろだけを探索する（同じ道を2度通るループでの取り違え防止）。
+            var fixes = new List<(double T, double Cum, double Dist)>();
+            double lastT = double.NegativeInfinity;
+            double minCum = double.NegativeInfinity;
+            foreach (var f in fileFrames.OrderBy(f => f.VideoOffset))
+            {
+                if (!f.HasGpsFix || (Math.Abs(f.Latitude) < 0.0001 && Math.Abs(f.Longitude) < 0.0001)) continue;
+                double t = f.VideoOffset.TotalSeconds;
+                if (t - lastT < 0.5) continue;
+                lastT = t;
+                var p = ProjectToRouteLocal(snap.Route, f.Latitude, f.Longitude, minCum);
+                fixes.Add((t, p.CumKm, p.DistKm));
+                minCum = Math.Max(minCum, p.CumKm - 0.2);
+            }
+            if (fixes.Count < 2) return result;
+
+            // ルートが別の窓のもの（このファイルを覆っていない）なら使わない
+            var sortedDist = fixes.Select(x => x.Dist).OrderBy(d => d).ToList();
+            if (sortedDist[sortedDist.Count / 2] > 0.15) return result;
+
+            var cum = new double[fixes.Count];
+            var tt = new double[fixes.Count];
+            double run = double.NegativeInfinity;
+            for (int i = 0; i < fixes.Count; i++)
+            {
+                run = Math.Max(run, fixes[i].Cum); // 投影のブレで逆戻りしないよう単調増加に揃える
+                cum[i] = run;
+                tt[i] = fixes[i].T;
+            }
+
+            double TimeAt(double x)
+            {
+                if (x <= cum[0]) return tt[0];
+                if (x >= cum[^1]) return tt[^1];
+                int lo = 0, hi = cum.Length - 1;
+                while (lo < hi)
+                {
+                    int mid = (lo + hi) / 2;
+                    if (cum[mid] >= x) hi = mid; else lo = mid + 1;
+                }
+                int j = lo;
+                double c0 = cum[j - 1], c1 = cum[j];
+                if (c1 - c0 < 1e-9) return tt[j];
+                return tt[j - 1] + (x - c0) / (c1 - c0) * (tt[j] - tt[j - 1]);
+            }
+
+            DateTime? StampAt(double sec) =>
+                DashcamSensorLookup.FindNearest(fileFrames, TimeSpan.FromSeconds(sec))?.Timestamp;
+
+            // ── トンネル（上り下りで別のwayになっている二重登録を、重なり半分以上でまとめる） ──
+            const double EdgeToleranceKm = 0.25; // ファイル端のすぐ外側（測位が戻る/切れる直前直後）のトンネルも拾う
+            const double MinTunnelSec = 0.8;
+            var tunnels = new List<(double Entry, double Exit, string Name, int Len)>();
+            foreach (var t in snap.Tunnels.OrderBy(t => t.EntryCumKm))
+            {
+                string name = t.Raw.Name ?? string.Empty;
+                if (tunnels.Count > 0)
+                {
+                    var m = tunnels[^1];
+                    double overlap = Math.Min(m.Exit, t.ExitCumKm) - Math.Max(m.Entry, t.EntryCumKm);
+                    double shorter = Math.Min(m.Exit - m.Entry, t.ExitCumKm - t.EntryCumKm);
+                    if (overlap > 0 && (shorter <= 0 || overlap >= shorter * 0.5))
+                    {
+                        tunnels[^1] = (Math.Min(m.Entry, t.EntryCumKm), Math.Max(m.Exit, t.ExitCumKm),
+                                       string.IsNullOrEmpty(m.Name) ? name : m.Name, Math.Max(m.Len, t.Raw.LengthMeters));
+                        continue;
+                    }
+                }
+                tunnels.Add((t.EntryCumKm, t.ExitCumKm, name, t.Raw.LengthMeters));
+            }
+            foreach (var t in tunnels)
+            {
+                if (t.Exit < cum[0] - EdgeToleranceKm || t.Entry > cum[^1] + EdgeToleranceKm) continue;
+                double start = t.Entry < cum[0] ? 0.0 : TimeAt(t.Entry);   // ファイルの途中からトンネル内
+                double end = t.Exit > cum[^1] ? durSec : TimeAt(t.Exit);   // トンネル内でファイルが終わる
+                if (end - start < MinTunnelSec) continue;
+
+                string label = string.IsNullOrWhiteSpace(t.Name) ? "トンネル" : t.Name;
+                if (t.Len > 0) label += $"（{t.Len:N0}m）";
+                result.Add(new DashcamEventMarker
+                {
+                    Timestamp = StampAt(start),
+                    VideoOffsetSeconds = start,
+                    DurationSeconds = end - start,
+                    EventType = DashcamEventType.Tunnel,
+                    SubType = DashcamEventSubType.MapTunnel,
+                    Label = label,
+                    Magnitude = t.Len
+                });
+            }
+
+            // ── SA/PA（同名の上り下り両側が拾われた場合は自車線側を優先して1件にする） ──
+            var saPas = new List<(double Cum, ProjectedSaPa S)>();
+            foreach (var s2 in snap.SaPas.OrderBy(x => x.CumKm))
+            {
+                if (s2.CumKm < cum[0] || s2.CumKm > cum[^1]) continue;
+                var pr = ProjectToRouteLocal(snap.Route, s2.Raw.Lat, s2.Raw.Lng, double.NegativeInfinity);
+                if (pr.DistKm > 0.8) continue; // 本線から遠すぎる無関係な施設
+
+                int dup = saPas.FindIndex(x => x.S.Raw.Name == s2.Raw.Name && Math.Abs(x.Cum - s2.CumKm) <= 1.0);
+                if (dup >= 0)
+                {
+                    if (saPas[dup].S.IsOppositeSide && !s2.IsOppositeSide) saPas[dup] = (s2.CumKm, s2);
+                    continue;
+                }
+                saPas.Add((s2.CumKm, s2));
+            }
+            foreach (var (c, s2) in saPas)
+            {
+                double at = TimeAt(c);
+                string name = s2.Raw.Name ?? string.Empty;
+                string type = s2.Raw.Type ?? string.Empty;
+                string label = string.IsNullOrWhiteSpace(name)
+                    ? type
+                    : (name.Contains(type) || name.Contains("サービスエリア") || name.Contains("パーキングエリア") ? name : $"{name} {type}");
+                if (s2.IsOppositeSide) label += "（対向側）";
+                result.Add(new DashcamEventMarker
+                {
+                    Timestamp = StampAt(at),
+                    VideoOffsetSeconds = at,
+                    DurationSeconds = 0,
+                    EventType = DashcamEventType.SaPa,
+                    SubType = DashcamEventSubType.SaPaPass,
+                    Label = label,
+                    Magnitude = 0
+                });
+            }
+
+            result.Sort((a, b) => a.VideoOffsetSeconds.CompareTo(b.VideoOffsetSeconds));
+            return result;
+        }
+
+        /// <summary>指定ルート上での最近傍点の累積距離とルートまでの距離。minCum以降の点だけを探索する
+        /// （インスタンスの_routeには依存しない。バックグラウンドからのイベント算出専用）。</summary>
+        private static (double CumKm, double DistKm) ProjectToRouteLocal(List<RoutePoint> route, double lat, double lng, double minCum)
+        {
+            int start = 0;
+            if (!double.IsNegativeInfinity(minCum))
+            {
+                int lo = 0, hi = route.Count;
+                while (lo < hi)
+                {
+                    int mid = (lo + hi) / 2;
+                    if (route[mid].CumKm >= minCum) hi = mid; else lo = mid + 1;
+                }
+                start = Math.Min(lo, route.Count - 1);
+            }
+            double bestCum = 0.0, bestDist = double.MaxValue;
+            for (int i = start; i < route.Count; i++)
+            {
+                var p = route[i];
+                double d = HaversineKm(lat, lng, p.Lat, p.Lng);
+                if (d < bestDist) { bestDist = d; bestCum = p.CumKm; }
+            }
+            return (bestCum, bestDist);
+        }
+        // ここまで
+
         /// <summary>_bundle（生の地理座標）から、現在のルート折れ線上の累積距離(km)を都度計算し直す。
         /// キャッシュされたOverpassの生データは使い回せても、ルート折れ線側は連結ファイルの
         /// 組み合わせによって毎回変わり得るため、この投影だけはLoadRouteAsyncのたびに必ず行う。</summary>
         private void ProjectBundleOntoRoute()
         {
+            var routeAtStart = _route; // スナップショット用（投影中にルートが差し替わっても組み合わせを揃えるため）
             var validTunnels = new List<ProjectedTunnel>();
             foreach (var t in _bundle.Tunnels)
             {
@@ -580,6 +773,12 @@ namespace VerticalPlayer.Dashcam
                 validSaPas.Add(new ProjectedSaPa(s, proj.CumKm, roadName, opposite));
             }
             _projectedSaPas = validSaPas;
+
+            // ここから追加
+            _projectionSnapshot = new ProjectionSnapshot(routeAtStart, validTunnels, validSaPas);
+            try { ProjectionUpdated?.Invoke(); }
+            catch { /* 購読側の例外で地図情報の更新を巻き込まない */ }
+            // ここまで
         }
 
         /// <summary>毎フレーム呼ぶ。ネットワーク通信は行わない（地名のNominatimフォールバックのみ、

@@ -41,6 +41,13 @@ namespace VerticalPlayer.Dashcam
         private bool _isSeekDragging;
         private double _lastRatio; // 直近の再生位置比率(0〜1)。SizeChanged時の再描画に使う
 
+        // ── イベントマーカー（トンネル/SA-PA/Gセンサー急変点）。生成はホスト側がバックグラウンドで
+        //    ファイルオープン時に1回だけ行い、ここでは受け取った集合を描画するだけ（再生中は何も計算しない） ──
+        private IReadOnlyList<DashcamEventMarker> _markers = Array.Empty<DashcamEventMarker>();
+        private readonly List<UIElement> _markerShapes = new();
+        private const double MarkerSnapPx = 6.0;            // クリック時にマーカーへ吸着する距離(px)
+        private const double GEventStrongThresholdG = 0.8;  // これ以上の急変は赤、未満はオレンジ
+
         /// <summary>シーク操作の開始（旧SeekSlider.Thumb.DragStartedに相当）。</summary>
         public event Action? SeekDragStarted;
 
@@ -105,9 +112,143 @@ namespace VerticalPlayer.Dashcam
             Canvas.SetTop(SeekThumb, trackY - SeekThumb.Height / 2);
         }
 
+        /// <summary>
+        /// シークバー上に描画するイベントマーカーの集合を差し替える（UIスレッドから呼ぶ）。
+        /// トンネル=シアンの帯、SA/PA=緑の逆三角、Gセンサー=オレンジ(強いものは赤)の縦線。
+        /// 空/nullで全消去。
+        /// </summary>
+        public void SetEventMarkers(IReadOnlyList<DashcamEventMarker>? markers)
+        {
+            _markers = markers ?? Array.Empty<DashcamEventMarker>();
+            RedrawMarkers();
+        }
+
+        /// <summary>
+        /// SeekBarCanvas内のX座標に重なるイベントのラベルを返す（無ければnull）。ホバー時刻ポップアップへ
+        /// 並べて出す用。点イベント(SA/PA・G)は±MarkerSnapPx以内で最寄りの1件、区間イベント(トンネル)は
+        /// 帯の上にあれば1件。両方該当すれば " / " でつなぐ。
+        /// </summary>
+        public string? FindMarkerLabelAt(double x)
+        {
+            double sw = SeekBarCanvas.ActualWidth;
+            if (sw <= 0 || _markers.Count == 0) return null;
+            double total = TotalSeconds();
+
+            var labels = new List<string>(2);
+            DashcamEventMarker? point = null;
+            double best = MarkerSnapPx;
+            foreach (var m in _markers)
+            {
+                if (m.IsRange) continue;
+                double d = Math.Abs(m.VideoOffsetSeconds / total * sw - x);
+                if (d <= best) { best = d; point = m; }
+            }
+            if (point != null) labels.Add(point.Label);
+
+            foreach (var m in _markers)
+            {
+                if (!m.IsRange) continue;
+                double x0 = m.VideoOffsetSeconds / total * sw;
+                double x1 = m.EndOffsetSeconds / total * sw;
+                if (x >= x0 - 2 && x <= Math.Max(x1, x0 + 2) + 2) { labels.Add(m.Label); break; }
+            }
+            return labels.Count == 0 ? null : string.Join(" / ", labels);
+        }
+
+        /// <summary>
+        /// クリック位置の近く(±MarkerSnapPx)にマーカーがあれば、その再生位置へ吸着させる
+        /// （点イベントはその地点、区間イベントは開始端）。無ければ元の位置を返す。
+        /// </summary>
+        private TimeSpan SnapToMarker(double x, TimeSpan pos)
+        {
+            double sw = SeekBarCanvas.ActualWidth;
+            if (sw <= 0 || _markers.Count == 0) return pos;
+            double total = TotalSeconds();
+
+            double best = MarkerSnapPx;
+            double? snapSec = null;
+            foreach (var m in _markers)
+            {
+                double d = Math.Abs(m.VideoOffsetSeconds / total * sw - x);
+                if (d <= best) { best = d; snapSec = m.VideoOffsetSeconds; }
+            }
+            return snapSec.HasValue ? TimeSpan.FromSeconds(snapSec.Value) : pos;
+        }
+
+        private double TotalSeconds() => _totalDuration.TotalSeconds > 0 ? _totalDuration.TotalSeconds : 120.0;
+
+        private void RedrawMarkers()
+        {
+            foreach (var e in _markerShapes)
+                MarkerLayer.Children.Remove(e);
+            _markerShapes.Clear();
+
+            double sw = SeekBarCanvas.ActualWidth, sh = SeekBarCanvas.ActualHeight;
+            if (sw <= 0 || sh <= 0 || _markers.Count == 0) return;
+            double total = TotalSeconds();
+            double trackY = sh / 2;
+
+            // 描画順: トンネル帯(奥) → SA/PA → Gセンサー(手前)
+            foreach (var m in _markers.Where(m => m.EventType == DashcamEventType.Tunnel))
+            {
+                double x0 = Math.Clamp(m.VideoOffsetSeconds / total, 0, 1) * sw;
+                double x1 = Math.Clamp(m.EndOffsetSeconds / total, 0, 1) * sw;
+                var band = new Rectangle
+                {
+                    Width = Math.Max(2.0, x1 - x0),
+                    Height = 10,
+                    RadiusX = 2,
+                    RadiusY = 2,
+                    Fill = new SolidColorBrush(Color.FromArgb(0x70, 0x22, 0xD3, 0xEE)),
+                    IsHitTestVisible = false
+                };
+                Canvas.SetLeft(band, x0);
+                Canvas.SetTop(band, trackY - 5);
+                AddMarkerShape(band);
+            }
+
+            foreach (var m in _markers.Where(m => m.EventType == DashcamEventType.SaPa))
+            {
+                double x = Math.Clamp(m.VideoOffsetSeconds / total, 0, 1) * sw;
+                var tri = new Polygon
+                {
+                    Points = new PointCollection { new Point(x - 4.5, 1), new Point(x + 4.5, 1), new Point(x, 8.5) },
+                    Fill = new SolidColorBrush(Color.FromRgb(0x22, 0xC5, 0x5E)),
+                    Stroke = new SolidColorBrush(Color.FromRgb(0x0B, 0x3D, 0x1E)),
+                    StrokeThickness = 0.8,
+                    IsHitTestVisible = false
+                };
+                AddMarkerShape(tri);
+            }
+
+            foreach (var m in _markers.Where(m => m.EventType == DashcamEventType.GSensor))
+            {
+                double x = Math.Clamp(m.VideoOffsetSeconds / total, 0, 1) * sw;
+                bool strong = m.Magnitude >= GEventStrongThresholdG;
+                var line = new Line
+                {
+                    X1 = x,
+                    X2 = x,
+                    Y1 = 2,
+                    Y2 = Math.Max(4, sh - 2),
+                    Stroke = new SolidColorBrush(strong ? Color.FromRgb(0xEF, 0x44, 0x44) : Color.FromRgb(0xF9, 0x73, 0x16)),
+                    StrokeThickness = 2,
+                    IsHitTestVisible = false
+                };
+                AddMarkerShape(line);
+            }
+        }
+
+        private void AddMarkerShape(UIElement shape)
+        {
+            MarkerLayer.Children.Add(shape);
+            _markerShapes.Add(shape);
+        }
+
         /// <summary>ファイル切り替え時にチャートを空にする。</summary>
         public void Clear()
         {
+            SetEventMarkers(null);
             _frames = Array.Empty<DashcamSensorFrame>();
             LineX.Points.Clear();
             LineY.Points.Clear();
@@ -125,6 +266,7 @@ namespace VerticalPlayer.Dashcam
         private void DashcamAccelChart_SizeChanged(object sender, SizeChangedEventArgs e)
         {
             Redraw();
+            RedrawMarkers();
             SetPlayhead(TimeSpan.FromSeconds(_totalDuration.TotalSeconds * _lastRatio));
         }
 
@@ -143,7 +285,8 @@ namespace VerticalPlayer.Dashcam
             _isSeekDragging = true;
             SeekBarCanvas.CaptureMouse();
 
-            var pos = PositionFromX(e.GetPosition(SeekBarCanvas).X, SeekBarCanvas.ActualWidth);
+            double downX = e.GetPosition(SeekBarCanvas).X;
+            var pos = SnapToMarker(downX, PositionFromX(downX, SeekBarCanvas.ActualWidth)); // マーカー付近のクリックはその位置へジャンプ
             SetPlayhead(pos); // 押した瞬間から見た目のシークバーも動かす（クリック即シークの体感を合わせる）
             SeekDragStarted?.Invoke();
             SeekPreview?.Invoke(pos);

@@ -1273,6 +1273,21 @@
                                               Style="{StaticResource ModernCheck}" Margin="0,4" IsChecked="True"
                                               Checked="DynamicContrast_Changed" Unchecked="DynamicContrast_Changed"/>
 
+                                    <CheckBox x:Name="AdaptiveDarkBoostCheck" Content="適応暗部補正（トンネル・夜間）"
+                                              Style="{StaticResource ModernCheck}" Margin="0,4"
+                                              Checked="AdaptiveDarkBoost_Changed" Unchecked="AdaptiveDarkBoost_Changed"/>
+                                    <DockPanel Margin="0,0,0,4">
+                                        <TextBlock Text="補正の強さ" Foreground="{StaticResource TextAccentCyan}"
+                                                   FontSize="10" FontWeight="SemiBold"/>
+                                        <TextBlock x:Name="AdaptiveDarkBoostLabel" DockPanel.Dock="Right"
+                                                   Foreground="{StaticResource AccentCyan}"
+                                                   FontSize="10" FontFamily="Consolas" Text="0.60"/>
+                                    </DockPanel>
+                                    <Slider x:Name="AdaptiveDarkBoostSlider" Style="{StaticResource ModernSlider}"
+                                            Minimum="0.1" Maximum="1" Value="0.6"
+                                            IsSnapToTickEnabled="True" TickFrequency="0.05"
+                                            ValueChanged="AdaptiveDarkBoostSlider_Changed" Margin="0,0,0,10"/>
+
                                     <CheckBox x:Name="AlwaysOnTopCheck" Content="常に最前面"
                                               Style="{StaticResource ModernCheck}" Margin="0,4"
                                               Checked="AlwaysOnTop_Changed" Unchecked="AlwaysOnTop_Changed"/>

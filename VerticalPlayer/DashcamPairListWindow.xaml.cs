@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -66,6 +66,24 @@ namespace VerticalPlayer.Dashcam
             _all.AddRange(rows);
             NoteText.Text = note;
             ApplyViewMode();
+        }
+
+        private Action? _ensureEventIndex;
+
+        /// <summary>「イベント」タブへViewModelを接続する。ensureIndexは、タブが表示された時に呼ぶ
+        /// イベント索引の開始処理（何度呼んでも、未実行の時だけ動く）。
+        /// DashcamPlayerViewがウィンドウを開く時に1回だけ呼ぶ。</summary>
+        public void AttachEventList(DashcamEventListViewModel viewModel, Action ensureIndex)
+        {
+            EventTab.DataContext = viewModel;
+            _ensureEventIndex = ensureIndex;
+            if (EventTab.IsVisible) ensureIndex();
+        }
+
+        private void EventTab_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
+            // タブが選ばれて中身が表示された時に索引を始める（開くだけで裏でI/Oを走らせないため）
+            if (e.NewValue is true) _ensureEventIndex?.Invoke();
         }
 
         private void ViewMode_Changed(object sender, RoutedEventArgs e) => ApplyViewMode();

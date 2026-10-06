@@ -61,6 +61,9 @@
                     MouseLeave="SeekBarCanvas_MouseLeave">
                 <Line x:Name="SeekTrackBg" Stroke="#334155" StrokeThickness="4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
                 <Line x:Name="SeekTrackFill" Stroke="{StaticResource TextAccentCyan}" StrokeThickness="4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                <!-- イベントマーカー（トンネル帯・SA/PA・Gセンサー急変点）の描画レイヤー。コードビハインドが
+                     動的に図形を出し入れする。ツマミより下・トラックより上に重ね、マウス操作は一切受けない。 -->
+                <Canvas x:Name="MarkerLayer" IsHitTestVisible="False"/>
                 <Ellipse x:Name="SeekThumb" Width="14" Height="14" Fill="White" Stroke="{StaticResource TextAccentCyan}" StrokeThickness="1.5" IsHitTestVisible="False"/>
             </Canvas>
 

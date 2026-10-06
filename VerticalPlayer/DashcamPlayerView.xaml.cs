@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -222,6 +223,29 @@ namespace VerticalPlayer.Dashcam
                 PlayerFront.DynamicContrast = value;
                 PlayerRear.DynamicContrast = value;
                 DcrStatusText.Text = value ? "DCR: ON" : "DCR: OFF";
+            }
+        }
+
+        /// <summary>適応暗部補正のON/OFF。MainWindow本体の設定（AppSettings.AdaptiveDarkBoost）と共有し、
+        /// Front/Rearの両方へ反映する。GPU後段処理のためライブ反映で再オープン不要。</summary>
+        public bool AdaptiveDarkBoost
+        {
+            get => PlayerFront.AdaptiveDarkBoost;
+            set
+            {
+                PlayerFront.AdaptiveDarkBoost = value;
+                PlayerRear.AdaptiveDarkBoost = value;
+            }
+        }
+
+        /// <summary>適応暗部補正の強さ(0〜1)。Front/Rearの両方へ反映する。</summary>
+        public double AdaptiveDarkBoostStrength
+        {
+            get => PlayerFront.AdaptiveDarkBoostStrength;
+            set
+            {
+                PlayerFront.AdaptiveDarkBoostStrength = value;
+                PlayerRear.AdaptiveDarkBoostStrength = value;
             }
         }
 
@@ -598,6 +622,12 @@ namespace VerticalPlayer.Dashcam
             AccelChart.SeekDragCompleted += AccelChart_SeekDragCompleted;
             AccelChart.HoverTimeChanged += AccelChart_HoverTimeChanged;
 
+            // 地図情報(Overpass)の取得完了・再試行成功のたびに、トンネル/SA-PAのマーカーを作り直す
+            _mapInfoProvider.ProjectionUpdated += () => Dispatcher.BeginInvoke(new Action(() => RebuildEventMarkersAsync()));
+
+            // 情報一覧「イベント」タブのジャンプ処理（行の選択 → 該当ファイルの数秒前へシークして再生）
+            EventList.JumpHandler = JumpToEventAsync;
+
             // 地図の表示方向をユーザーが手動変更したら、ルート方位の自動判定結果と合わせて再判定する
             MapView.OrientationModeChanged += () => UpdateEffectiveMapOrientation();
 
@@ -684,7 +714,9 @@ namespace VerticalPlayer.Dashcam
                 return;
             }
 
+            var swPair = System.Diagnostics.Stopwatch.StartNew();
             var rows = BuildPairOverlapRows();
+            long tRows = swPair.ElapsedMilliseconds;
             if (rows.Count == 0)
             {
                 AppMessageBox.Show(Window.GetWindow(this), "Front/Rearのファイルが見つかりません。",
@@ -699,16 +731,19 @@ namespace VerticalPlayer.Dashcam
             {
                 Owner = Window.GetWindow(this)
             };
+            long tCtor = swPair.ElapsedMilliseconds;
             win.Closed += (s, args) =>
             {
                 _pairListWindow = null;
                 DashcamDebugLog.Log("[PairList] 閉じた");
             };
             _pairListWindow = win;
+            win.AttachEventList(EventList, EnsureEventIndex); // 「イベント」タブ（タブが表示された時に索引を始める）
 
             DashcamDebugLog.Log($"[PairList] 開く(別ウィンドウ) 再生中={_isPlaying} 描画Tier={System.Windows.Media.RenderCapability.Tier >> 16} " +
                 $"Front(GPU)={PlayerFront.IsGpuPresenterAvailable} Rear(GPU)={PlayerRear.IsGpuPresenterAvailable}");
             win.Show();
+            DashcamDebugLog.Log($"[PairList] 所要時間: 行の算出 {tRows}ms / ウィンドウ生成(InitializeComponent込み) {tCtor - tRows}ms / 接続とShow {swPair.ElapsedMilliseconds - tCtor}ms / 合計 {swPair.ElapsedMilliseconds}ms 行数={rows.Count}");
         }
 
         private DashcamPairListWindow? _pairListWindow;
@@ -975,6 +1010,18 @@ namespace VerticalPlayer.Dashcam
             _thumbCts = new System.Threading.CancellationTokenSource();
             _finalizedThumbnailPaths.Clear();
             EnqueueThumbnails(_groups);
+
+            // 別のドライブ/フォルダへ切り替わった時だけイベント一覧を作り直す（同じ場所の再スキャンでは、
+            // 再生済みファイルの精密な結果を捨てない）
+            string scanKey = rootPath + "|" + folder;
+            if (scanKey != _eventScanKey)
+            {
+                _eventScanKey = scanKey;
+                CancelEventIndex();
+                EventList.Clear();
+                _eventIndexStarted = false;
+            }
+            if (_eventIndexWanted && !_eventIndexStarted) StartEventIndex();
         }
 
         // ---- サムネイル生成（中サイズ・SQLiteキャッシュ） ----
@@ -1530,6 +1577,7 @@ namespace VerticalPlayer.Dashcam
             CurrentFileChanged?.Invoke(Path.GetFileName(group.FrontVideoPath) ?? group.TimestampKey);
             NotifyPlayingFiles();
             _sensorFrames = new List<DashcamSensorFrame>(); // Frontの動画長が判明してからParseし直す（MediaOpened側）
+            ClearEventMarkers();
             _wantsPlaying = true; // Front/RearどちらのMediaOpenedが先に来ても再生開始させる意図フラグ
 
             if (group.FrontVideoPath != null)
@@ -1622,7 +1670,12 @@ namespace VerticalPlayer.Dashcam
             var sensorFrames = nmeaPath != null
                 ? await Task.Run(() => NmeaSensorParser.Parse(nmeaPath, sensorGroup?.Timestamp, duration))
                 : new List<DashcamSensorFrame>();
-            if (openToken != _frontOpenToken) { DiscardMediaInfo(mediaInfoTask); return; } // 待機中に別ファイルへ切り替わった
+            if (openToken != _frontOpenToken)
+            {
+                DashcamDebugLog.Log($"[MediaInfo] 破棄(NMEA解析待ち中に別ファイルへ切替) token={openToken}/{_frontOpenToken}");
+                DiscardMediaInfo(mediaInfoTask);
+                return; // 待機中に別ファイルへ切り替わった
+            }
 
             // ファイルの先頭/末尾が測位ロスト(トンネル等)なら、前後のファイルの測位速度を取り込んで
             // ロスト区間の推定速度を補間し直す（ファイルをまたぐ長いトンネルにも対応）
@@ -1645,7 +1698,12 @@ namespace VerticalPlayer.Dashcam
             if (mediaInfoTask != null)
             {
                 var mi = await mediaInfoTask;
-                if (openToken != _frontOpenToken) { mi?.Dispose(); return; }
+                if (openToken != _frontOpenToken)
+                {
+                    DashcamDebugLog.Log($"[MediaInfo] 破棄(解析待ち中に別ファイルへ切替) token={openToken}/{_frontOpenToken}");
+                    mi?.Dispose();
+                    return;
+                }
                 ApplyMediaInfo(mi); // コーデック表示の更新はUIスレッドで行う
             }
 
@@ -1658,6 +1716,7 @@ namespace VerticalPlayer.Dashcam
             // 反映するだけにする。チャート自体がシークUIも兼ねるため、Maximum等の設定は不要
             // （AccelChart内部でこのdurationを元に比率計算する）。
             AccelChart.SetFullTrack(_sensorFrames, duration);
+            RebuildEventMarkersAsync(duration); // トンネル/SA-PA/Gセンサー急変点（バックグラウンドで1回だけ算出）
 
             // レジューム再生: 位置決めは必ずPlay()より先に行う。
             // StepToVideoOnlyAsyncはドラッグシーク確定時と同じ「指定フレームへ正確に着地させたら
@@ -1911,17 +1970,24 @@ namespace VerticalPlayer.Dashcam
         // 別スレッドで動画情報を解析する（UI要素には触れない）。失敗時はnull。
         private static MediaInfoNative? ProbeMediaInfo(string path)
         {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 var mi = new MediaInfoNative(path);
-                if (mi.Success) return mi;
+                if (mi.Success)
+                {
+                    DashcamDebugLog.Log($"[MediaInfo] 解析OK {sw.ElapsedMilliseconds}ms video={mi.VideoCodec ?? "(null)"} audio={mi.AudioCodec ?? "(null)"} ch={mi.AudioChannelCount} {path}");
+                    return mi;
+                }
                 DashcamPlayErrorLogger.Log($"[MediaInfo] failed for {path}");
+                DashcamDebugLog.Log($"[MediaInfo] 解析失敗(Success=false) {sw.ElapsedMilliseconds}ms {path}");
                 mi.Dispose();
                 return null;
             }
             catch (Exception ex)
             {
-                DashcamPlayErrorLogger.Log($"[MediaInfo] EXCEPTION: {ex.Message}");
+                DashcamPlayErrorLogger.Log($"[MediaInfo] EXCEPTION: {ex.GetType().Name}: {ex.Message}");
+                DashcamDebugLog.Log($"[MediaInfo] 例外 {sw.ElapsedMilliseconds}ms {ex.GetType().Name}: {ex.Message}");
                 return null;
             }
         }
@@ -1931,7 +1997,49 @@ namespace VerticalPlayer.Dashcam
         {
             _mediaInfo?.Dispose();
             _mediaInfo = mi;
+            DashcamDebugLog.Log($"[MediaInfo] 表示へ反映 mi={(mi == null ? "null" : "あり")}");
             UpdateCodecStatusBar();
+            LogCodecLabelLayout();
+            FrontVideoInfoChanged?.Invoke(); // メインウィンドウの「情報」タブ（動画情報）も更新させる
+        }
+
+        /// <summary>メインウィンドウの「情報」タブ（動画情報）へ渡す、再生中のFront動画の情報。</summary>
+        internal sealed record FrontVideoInfoSnapshot(string? Path, int Width, int Height, TimeSpan? Duration, MediaInfoNative? MediaInfo);
+
+        /// <summary>Front動画の情報が変わった（MediaInfoの解析完了・停止）。メインウィンドウの「情報」タブの更新用。
+        /// UIスレッドで発火する。</summary>
+        public event Action? FrontVideoInfoChanged;
+
+        /// <summary>現在のFront動画の情報を返す。再生中のシーンが無ければPathがnull。</summary>
+        internal FrontVideoInfoSnapshot GetFrontVideoInfo() => new(
+            _currentFrontGroup?.FrontVideoPath,
+            PlayerFront.NaturalVideoWidth,
+            PlayerFront.NaturalVideoHeight,
+            PlayerFront.NaturalDuration.HasTimeSpan ? PlayerFront.NaturalDuration.TimeSpan : null,
+            _mediaInfo);
+
+        /// <summary>コーデック表示が実際に見えているかの診断。レイアウト確定後に、ラベルの表示状態・左端位置・幅を
+        /// 画面幅と並べてdebug.logへ出す（位置+幅が画面幅を超えていれば、バーの右側が見切れている）。</summary>
+        private void LogCodecLabelLayout()
+        {
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() =>
+            {
+                try
+                {
+                    var origin = new System.Windows.Point(0, 0);
+                    var v = VideoCodecLabel.TranslatePoint(origin, this);
+                    var d = DecodeModeText.TranslatePoint(origin, this);
+                    var f = FpsText.TranslatePoint(origin, this);
+                    DashcamDebugLog.Log(
+                        $"[MediaInfo] 表示レイアウト 表示文字=\"{VideoCodecLabel.Text} / {AudioCodecLabel.Text} / {AudioChannelLabel.Text}\" " +
+                        $"映像コーデック: 可視={VideoCodecLabel.IsVisible} 左端x={v.X:F0} 幅={VideoCodecLabel.ActualWidth:F0} / " +
+                        $"デコード表示: x={d.X:F0} 幅={DecodeModeText.ActualWidth:F0} / fps表示: x={f.X:F0} / 画面幅={ActualWidth:F0}");
+                }
+                catch (Exception ex)
+                {
+                    DashcamDebugLog.Log($"[MediaInfo] 表示レイアウトの取得に失敗: {ex.Message}");
+                }
+            }));
         }
 
         // 解析の完了前に別ファイルへ切り替わった場合、その結果を破棄する。
@@ -2538,6 +2646,7 @@ namespace VerticalPlayer.Dashcam
                 _currentRearGroup = null;
             }
             AccelChart.SetPlayhead(TimeSpan.Zero);
+            ClearEventMarkers();
             Hud.UpdateFrame(null);
             _mapInfoProvider.Reset(); // 明確な非連続点なのでトンネル通過中フラグ等もここでクリアする
             MapInfo.Apply(_mapInfoProvider.State, _mapInfoProvider.ShouldShowOverlay);
@@ -2551,6 +2660,7 @@ namespace VerticalPlayer.Dashcam
             UpdateSpeedOsd(null);
             CurrentFileChanged?.Invoke(null);
             NotifyPlayingFiles();
+            FrontVideoInfoChanged?.Invoke(); // 停止: 動画情報を「未読み込み」へ戻す
         }
 
         private void RearVisibleCheck_Changed(object sender, RoutedEventArgs e) => UpdateRearPipVisibility();
@@ -2955,13 +3065,207 @@ namespace VerticalPlayer.Dashcam
                 return;
             }
 
-            SeekPreviewText.Text = time.Value.ToString(@"hh\:mm\:ss");
+            string? markerLabel = AccelChart.FindMarkerLabelAt(x);
+            SeekPreviewText.Text = time.Value.ToString(@"hh\:mm\:ss") + (markerLabel != null ? "  " + markerLabel : "");
             SeekPreviewPopup.IsOpen = true;
             var popupChild = (FrameworkElement)SeekPreviewPopup.Child;
             popupChild.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             double halfW = popupChild.DesiredSize.Width / 2;
             double width = AccelChart.ActualWidth;
             SeekPreviewPopup.HorizontalOffset = Math.Clamp(x - halfW, 0, Math.Max(0, width - halfW * 2));
+        }
+
+        // ---- シークバーのイベントマーカー（トンネル・SA/PA・Gセンサー急変点） ----
+        //  ファイルを開いた時(MediaOpened)と、地図情報の更新時(MapInfoProvider.ProjectionUpdated)に
+        //  バックグラウンドスレッドで一括算出し、再生中のフレームごとの計算は行わない。
+        //  EventMarkersは一覧パネル等へそのままデータバインドできる（UIスレッドでのみ更新される）。
+
+        private int _eventMarkerGen;
+        private double _gSensorEventThresholdG = 0.35;
+
+        /// <summary>現在のファイルのイベント一覧（再生位置順）。UIスレッドでのみ更新される。</summary>
+        public ObservableCollection<DashcamEventMarker> EventMarkers { get; } = new();
+
+        /// <summary>Gセンサー急変点とみなす閾値(G、既定0.35)。永続化対象（AppSettings.DashcamGSensorEventThresholdG）。
+        /// 変更すると開いているファイルのマーカーを作り直す。</summary>
+        public double GSensorEventThresholdG
+        {
+            get => _gSensorEventThresholdG;
+            set
+            {
+                double v = double.IsNaN(value) ? 0.35 : Math.Clamp(value, 0.05, 3.0);
+                if (Math.Abs(v - _gSensorEventThresholdG) < 1e-9) return;
+                _gSensorEventThresholdG = v;
+                SyncGSensorThresholdCombo();
+                EventList.Clear(); // 一覧の中の旧閾値で出した結果を捨て、新しい閾値で作り直す
+                if (_eventIndexWanted) { _eventIndexStarted = false; StartEventIndex(); }
+                if (_sensorFrames.Count > 0) RebuildEventMarkersAsync();
+            }
+        }
+
+        /// <summary>プルダウンの選択を現在の閾値に合わせる（選択肢に無い値[設定ファイルの手書き等]なら未選択にする）。</summary>
+        private void SyncGSensorThresholdCombo()
+        {
+            ComboBoxItem? match = null;
+            foreach (ComboBoxItem item in GSensorThresholdCombo.Items)
+            {
+                if (double.TryParse((string)item.Tag, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var g)
+                    && Math.Abs(g - _gSensorEventThresholdG) < 1e-6) { match = item; break; }
+            }
+            GSensorThresholdCombo.SelectedItem = match;
+        }
+
+        private void GSensorThresholdCombo_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (GSensorThresholdCombo.SelectedItem is not ComboBoxItem item
+                || !double.TryParse((string)item.Tag, System.Globalization.NumberStyles.Float,
+                       System.Globalization.CultureInfo.InvariantCulture, out var g)) return;
+            GSensorEventThresholdG = g;
+        }
+
+        private void ClearEventMarkers()
+        {
+            _eventMarkerGen++; // 算出中の古い結果を捨てる
+            EventMarkers.Clear();
+            AccelChart.SetEventMarkers(null);
+        }
+
+        private async void RebuildEventMarkersAsync(TimeSpan? durationOverride = null)
+        {
+            var frames = _sensorFrames;
+            var group = _currentFrontGroup;
+            TimeSpan duration = durationOverride
+                ?? (PlayerFront.NaturalDuration.HasTimeSpan ? PlayerFront.NaturalDuration.TimeSpan : TimeSpan.Zero);
+            if (frames.Count == 0 || duration <= TimeSpan.Zero) return;
+
+            int gen = ++_eventMarkerGen;
+            double threshold = _gSensorEventThresholdG;
+            try
+            {
+                var list = await Task.Run(() =>
+                {
+                    var all = new List<DashcamEventMarker>();
+                    all.AddRange(DashcamEventAnalyzer.AnalyzeGSensor(frames, threshold));
+                    var map = _mapInfoProvider.BuildMapEventMarkers(frames, duration);
+                    all.AddRange(map);
+                    all.AddRange(DashcamEventAnalyzer.AnalyzeGpsLoss(frames, duration, map));
+                    all.Sort((a, b) => a.VideoOffsetSeconds.CompareTo(b.VideoOffsetSeconds));
+                    return all;
+                });
+                if (gen != _eventMarkerGen) return; // 待機中に別ファイルへ切り替わった／再算出された
+
+                EventMarkers.Clear();
+                foreach (var m in list) EventMarkers.Add(m);
+                AccelChart.SetEventMarkers(list);
+
+                // 情報一覧のイベントタブへも反映する。動画長・地図情報込みの精密な結果なので、
+                // NMEAだけから出した概算（このファイル分）を置き換える。
+                string? path = group?.FrontVideoPath ?? group?.RearVideoPath;
+                if (group != null && path != null)
+                {
+                    EventList.UpdateFile(group.TimestampKey,
+                        DashcamEventIndexer.FromMarkers(group.TimestampKey, path, group.Timestamp, list, duration.TotalSeconds, precise: true),
+                        precise: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                DashcamDebugLog.Log($"[EventMarker] 生成失敗: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        // ---- 情報一覧「イベント」タブ（走行ファイル全体のイベント一覧・ジャンプ） ----
+        //  ViewModel(EventList)をタブのDataContextに渡す。索引は、タブを開いた時にEnsureEventIndex()で
+        //  1回だけ始める（ファイルを開かずNMEAのみ読む軽い処理。再生中のI/Oへ極力影響させない）。
+
+        /// <summary>イベントタブのViewModel（UIスレッド専用）。</summary>
+        public DashcamEventListViewModel EventList { get; } = new();
+
+        private readonly DashcamEventIndexer _eventIndexer = new();
+        private System.Threading.CancellationTokenSource? _eventIndexCts;
+        private bool _eventIndexWanted;   // イベントタブが一度でも開かれた（以後、ドライブ切替時も自動で再索引する）
+        private bool _eventIndexStarted;
+        private string? _eventScanKey;
+
+        /// <summary>イベントタブを開いた時に呼ぶ。現在のドライブ/フォルダ全体の索引を（未実行なら）始める。</summary>
+        public void EnsureEventIndex()
+        {
+            _eventIndexWanted = true;
+            if (!_eventIndexStarted) StartEventIndex();
+        }
+
+        private void CancelEventIndex()
+        {
+            _eventIndexCts?.Cancel();
+            _eventIndexCts = null;
+        }
+
+        private void StartEventIndex()
+        {
+            CancelEventIndex();
+            if (_frontGroups.Count == 0) return; // まだスキャン前。スキャン完了時(ScanDrive)に改めて開始される
+
+            var cts = new System.Threading.CancellationTokenSource();
+            _eventIndexCts = cts;
+            _eventIndexStarted = true;
+
+            var inputs = _frontGroups
+                .Select(g => new DashcamEventIndexer.GroupInput(g.TimestampKey, g.FrontVideoPath, g.RearVideoPath,
+                    g.FrontNmeaPath ?? g.RearNmeaPath, g.Timestamp))
+                .ToList();
+            EventList.SetIndexProgress(0, inputs.Count);
+
+            _ = _eventIndexer.IndexAsync(inputs, _gSensorEventThresholdG,
+                files => Dispatcher.BeginInvoke(new Action(() => { if (!cts.IsCancellationRequested) EventList.UpdateFiles(files); })),
+                (done, total) => Dispatcher.BeginInvoke(new Action(() => { if (!cts.IsCancellationRequested) EventList.SetIndexProgress(done, total); })),
+                cts.Token)
+                .ContinueWith(t =>
+                {
+                    if (t.IsFaulted)
+                        DashcamDebugLog.Log($"[EventIndex] 索引に失敗: {t.Exception?.GetBaseException().Message}");
+                }, TaskScheduler.Default);
+        }
+
+        /// <summary>
+        /// イベント一覧の行から、該当ファイルの「発生位置 − プレロール秒」へシークして再生を始める。
+        /// 再生中のファイルと同じなら、その場でシーク。別ファイルなら、レジューム再生と同じ経路
+        /// （読み込み完了時に目標位置へシークしてから再生）で切り替える。
+        /// 見つからない/読めないファイルはfalse（一覧側が状態表示へ出す）。
+        /// </summary>
+        private async Task<bool> JumpToEventAsync(EventItemViewModel item, double prerollSeconds)
+        {
+            var group = _frontGroups.FirstOrDefault(g => g.TimestampKey == item.GroupKey);
+            if (group == null || group.FrontVideoPath == null || !File.Exists(group.FrontVideoPath))
+            {
+                DashcamPlayErrorLogger.Log($"[EventJump] ファイルが見つからない: {item.GroupKey} {item.FilePath}");
+                return false;
+            }
+
+            double target = Math.Max(0.0, item.OffsetSeconds - Math.Max(0.0, prerollSeconds));
+
+            if (ReferenceEquals(group, _currentFrontGroup) && PlayerFront.NaturalDuration.HasTimeSpan)
+            {
+                // 同じファイル内のシーク。範囲外（ファイル末尾を超える等）は末尾の手前へ丸める。
+                var dur = PlayerFront.NaturalDuration.TimeSpan;
+                var t = TimeSpan.FromSeconds(Math.Min(target, Math.Max(0.0, dur.TotalSeconds - 1.0)));
+                _wantsPlaying = true;
+                AccelChart.SetPlayhead(t);
+                await PlayerFront.StepToVideoOnlyAsync(t, timeoutMs: 3000);
+                await SeekRearToFrontPositionAsync(t);
+                PlayerFront.Play();
+                if (HasActiveRear()) PlayerRear.Play();
+                _isPlaying = true;
+                SetPlayPauseIcon(true);
+                return true;
+            }
+
+            // 別ファイル: MediaOpenedで_pendingResumeSecondsの位置へシークしてから再生が始まる。
+            // SetListSelectionは選択イベントを抑止するので、リスト側が二重に再生を始めることはない。
+            _pendingResumeSeconds = target;
+            SetListSelection(FrontList, group, scrollToTop: true);
+            PlayFrontGroup(group);
+            return true;
         }
 
         // ---- フルスクリーン（MainWindowから切替。プレイヤーは同一インスタンスのまま表示だけ切り替える）----

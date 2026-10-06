@@ -102,6 +102,13 @@ namespace VerticalPlayer
         private bool _dynamicContrastShaderReady;
         private float _dynamicContrastStrength;
 
+        // ── 適応暗部補正（Adaptive Dark Boost）──
+        // 輝度解析（縮小→平均輝度/暗部比率→EMA）は、ダイナミックコントラスト用の解析パスを共用する。
+        // どちらかが有効な間だけ解析パスを走らせる（両方OFFなら従来どおりGPU負荷ゼロ）。
+        private const float DarkBoostEmaAlpha = 0.07f; // 1フレームあたりの追従率（小さいほどゆっくり・チラつきにくい）
+        private float _darkBoostStrength;
+        private volatile bool _darkBoostResetPending;
+
         // ── 段階5：超解像（原寸処理用の中間テクスチャ＋Lanczosアップスケール＋アンシャープ）──
         private bool _srShaderReady;
         private float _srScale = 1f;      // 1=無効
@@ -245,7 +252,8 @@ cbuffer EffectsCB : register(b0)
     float Gamma;
     float DynamicContrastStrength;
     float ColorMatrixMode; // 0=off, 1=BT.601->BT.709 correction
-    float3 _PadE;
+    float DarkBoostStrength; // Adaptive dark boost strength: 0.0 to 1.0 (0 = disabled)
+    float2 _PadE;
 };
 
 Texture2D<float4> InputTex : register(t0);
@@ -261,9 +269,13 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     float4 c = InputTex.Load(int3(id.xy, 0));
 
-    float avgLuma = AvgLuma[0];
-    float autoGammaBoost = lerp(0.35, -0.15, saturate(avgLuma * 1.4));
-    float effectiveGamma = Gamma + autoGammaBoost * DynamicContrastStrength;
+    float effectiveGamma = Gamma;
+    if (DynamicContrastStrength > 0.001)
+    {
+        float avgLuma = AvgLuma[0];
+        float autoGammaBoost = lerp(0.35, -0.15, saturate(avgLuma * 1.4));
+        effectiveGamma += autoGammaBoost * DynamicContrastStrength;
+    }
 
     float gammaExp = exp2(effectiveGamma);
     float factor = 1.0 + Contrast;
@@ -280,6 +292,29 @@ void CSMain(uint3 id : SV_DispatchThreadID)
            -0.0141, -0.0277,  1.0418
         );
         v = saturate(mul(m601to709, v));
+    }
+
+    // --- Adaptive dark boost: Evaluates scene darkness from EMA-smoothed frame luminance (AvgLuma[1])
+    //     and dark ratio (AvgLuma[2]), boosting dark areas via gamma while keeping highlights intact.
+    //     Applies luminance (Y) curve proportionally to RGB to preserve hue.
+    if (DarkBoostStrength > 0.001)
+    {
+        float lumaEma = AvgLuma[1];
+        float darkRatio = AvgLuma[2];
+        float dLuma = 1.0 - smoothstep(0.10, 0.38, lumaEma);   // 1 when average is darker
+        float dRatio = smoothstep(0.45, 0.90, darkRatio);      // 1 when dark ratio is high (prevents tunnel exit issues)
+        float darkness = saturate(max(dLuma, dRatio));
+        float amount = DarkBoostStrength * darkness;
+        if (amount > 0.001)
+        {
+            float y = dot(v, float3(0.299, 0.587, 0.114));
+            float boostGamma = 1.0 + 1.1 * amount;                 // Dark gamma (~2.1 at max strength & pitch black)
+            float lifted = pow(max(y, 1e-4), 1.0 / boostGamma);
+            float keep = 1.0 - smoothstep(0.30, 0.90, y);          // Weaken boost in bright areas to preserve highlights
+            float y2 = lerp(y, lifted, keep);
+            float ratio = min(y2 / max(y, 1e-3), 3.0);              // Limit noise amplification near pitch black
+            v = saturate(v * ratio);
+        }
     }
 
     v = pow(v, 1.0 / gammaExp);
@@ -319,8 +354,10 @@ void CSDownsampleLuma(uint3 id : SV_DispatchThreadID)
         private const string LumaReduceShaderSource = @"
 cbuffer ReduceCB : register(b0)
 {
-    float SmoothAlpha;
-    float3 _PadR;
+    float SmoothAlpha;   // EMA factor for dynamic contrast
+    float DarkAlpha;     // EMA factor for adaptive dark boost (~0.05 to 0.1)
+    float ResetDark;     // If 1, reinitialize smoothed values with current frame (OFF -> ON transition)
+    float _PadR;
 };
 
 Texture2D<float> LumaDownRO : register(t0);
@@ -333,13 +370,35 @@ void CSReduceLuma(uint3 id : SV_DispatchThreadID)
     LumaDownRO.GetDimensions(w, h);
 
     float sum = 0;
+    float dark = 0;
     for (uint y = 0; y < h; y++)
+    {
         for (uint x = 0; x < w; x++)
-            sum += LumaDownRO.Load(int3(x, y, 0));
-    float avg = sum / max(1.0, (float)(w * h));
+        {
+            float l = LumaDownRO.Load(int3(x, y, 0));
+            sum += l;
+            dark += (l < 0.12) ? 1.0 : 0.0;
+        }
+    }
+    float n = max(1.0, (float)(w * h));
+    float avg = sum / n;
+    float darkRatio = dark / n;
 
     float prev = AvgLumaRW[0];
     AvgLumaRW[0] = lerp(prev, avg, SmoothAlpha);
+
+    // [1] = Avg luma EMA for dark boost, [2] = Dark ratio EMA, [3] = Initialized flag
+    if (ResetDark > 0.5 || AvgLumaRW[3] < 0.5)
+    {
+        AvgLumaRW[1] = avg;
+        AvgLumaRW[2] = darkRatio;
+        AvgLumaRW[3] = 1.0;
+    }
+    else
+    {
+        AvgLumaRW[1] = lerp(AvgLumaRW[1], avg, DarkAlpha);
+        AvgLumaRW[2] = lerp(AvgLumaRW[2], darkRatio, DarkAlpha);
+    }
 }
 ";
 
@@ -710,13 +769,14 @@ void CSCompare(uint3 id : SV_DispatchThreadID)
 
             _avgLumaBuffer = _d3d11Device.CreateBuffer(new BufferDescription
             {
-                ByteWidth = 4,
+                ByteWidth = 16,
                 Usage = ResourceUsage.Default,
                 BindFlags = BindFlags.ShaderResource | BindFlags.UnorderedAccess,
                 MiscFlags = ResourceOptionFlags.BufferStructured,
                 StructureByteStride = 4
             });
-            float initialLuma = 0.4f;
+            // [0]=ダイナミックコントラスト用EMA, [1]=暗部補正の平均輝度EMA, [2]=暗部比率EMA, [3]=初期化済みフラグ(0=未)
+            var initialLuma = new System.Numerics.Vector4(0.4f, 0.4f, 0.2f, 0f);
             _d3d11Context?.UpdateSubresource(in initialLuma, _avgLumaBuffer);
             _avgLumaSrv = _d3d11Device.CreateShaderResourceView(_avgLumaBuffer);
             _avgLumaUav = _d3d11Device.CreateUnorderedAccessView(_avgLumaBuffer);
@@ -829,7 +889,7 @@ cbuffer BgraToNchwCB : register(b0)
 };
 
 Texture2D<float4> SrcBgra : register(t0);
-RWBuffer<float> DstNchw : register(u0); // bound as R16_Float UAV view, write as float (HW packs to fp16)
+RWBuffer<uint> DstNchw : register(u0); // bound as R16_Float UAV view, write as float (HW packs to fp16)
 
 [numthreads(8, 8, 1)]
 void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
@@ -844,9 +904,9 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
     uint planeSize = dstW * dstH;
     uint idx = id.y * dstW + id.x;
 
-    DstNchw[idx] = px.r;
-    DstNchw[planeSize + idx] = px.g;
-    DstNchw[2 * planeSize + idx] = px.b;
+    DstNchw[idx] = f32tof16(px.r);
+    DstNchw[planeSize + idx] = f32tof16(px.g);
+    DstNchw[2 * planeSize + idx] = f32tof16(px.b);
 }
 ";
 
@@ -1039,7 +1099,7 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
             // BufferShaderResourceViewと同じ考え方）。
             _uavDnnInputBufCuda = _d3d11Device.CreateUnorderedAccessView(_dnnInputBufCuda, new UnorderedAccessViewDescription
             {
-                Format = Vortice.DXGI.Format.R16_Float,
+                Format = Vortice.DXGI.Format.R16_UInt,
                 ViewDimension = Vortice.Direct3D11.UnorderedAccessViewDimension.Buffer,
                 Buffer = new BufferUnorderedAccessView { FirstElement = 0, NumElements = (uint)neededElems },
             });
@@ -1214,6 +1274,15 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
         public void SetDynamicContrast(float strength)
         {
             _dynamicContrastStrength = Math.Clamp(strength, 0f, 1f);
+        }
+
+        /// <summary>適応暗部補正の強さ（0〜1、0で無効）。OFF→ONの瞬間は古い平滑値を捨てて、
+        /// 最初のフレームの明るさから追従を始める（前回の状態に引きずられないため）。</summary>
+        public void SetAdaptiveDarkBoost(float strength)
+        {
+            float v = Math.Clamp(strength, 0f, 1f);
+            if (_darkBoostStrength <= 0f && v > 0f) _darkBoostResetPending = true;
+            _darkBoostStrength = v;
         }
 
         /// <summary>超解像の拡大倍率。1.0以下で無効。設計提案書2章・案B（古典Lanczos＋アンシャープ）。</summary>
@@ -1488,7 +1557,7 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
 
             if (_effectsShaderReady && _effectsCs != null && _uavShared != null && _cbEffects != null)
             {
-                if (_dynamicContrastShaderReady && _dynamicContrastStrength > 0f &&
+                if (_dynamicContrastShaderReady && (_dynamicContrastStrength > 0f || _darkBoostStrength > 0f) &&
                     _lumaDownCs != null && _lumaReduceCs != null &&
                     _lumaDownUav != null && _lumaDownSrv != null &&
                     _avgLumaUav != null && _cbReduce != null)
@@ -1597,7 +1666,8 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
                 p[2] = _gamma;
                 p[3] = (_dynamicContrastShaderReady && _avgLumaSrv != null) ? _dynamicContrastStrength : 0f;
                 p[4] = _colorMatrixMode;
-                p[5] = p[6] = p[7] = 0f;
+                p[5] = (_dynamicContrastShaderReady && _avgLumaSrv != null) ? _darkBoostStrength : 0f;
+                p[6] = p[7] = 0f;
             }
             _d3d11Context.Unmap(_cbEffects, 0);
         }
@@ -1610,7 +1680,10 @@ void CSBgraToNchw(uint3 id : SV_DispatchThreadID)
             {
                 float* p = (float*)mapped.DataPointer;
                 p[0] = 0.08f;
-                p[1] = p[2] = p[3] = 0f;
+                p[1] = DarkBoostEmaAlpha;
+                p[2] = _darkBoostResetPending ? 1f : 0f;
+                p[3] = 0f;
+                _darkBoostResetPending = false; // この解析パスで再初期化されるので消費する
             }
             _d3d11Context.Unmap(_cbReduce, 0);
         }

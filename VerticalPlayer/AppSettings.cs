@@ -78,6 +78,8 @@ namespace VerticalPlayer
         /// (VerticalPlayer.Dashcam.MapInfoProvider.TunnelEntryDetectionMode)のenum名をそのまま保存。
         /// 既定Legacy（従来方式）。地図情報通知はドラレコモード専用の機能のため、この設定項目もドラレコ専用。</summary>
         public string DashcamTunnelEntryDetectionMode { get; set; } = "Legacy";
+        /// <summary>ドラレコのシークバーに出すGセンサー急変マーカーの閾値(G)。既定0.35。</summary>
+        public double DashcamGSensorEventThresholdG { get; set; } = 0.35;
 
         // ── 再生 ──
         public double Volume { get; set; } = 0.7;
@@ -109,6 +111,9 @@ namespace VerticalPlayer
         public double ZoomScaleY { get; set; } = 1.0;
         public bool Denoise { get; set; } = true;
         public bool DynamicContrast { get; set; } = true;
+        /// <summary>適応暗部補正（トンネル・夜間の暗部を自動で持ち上げる）のON/OFFと強度(0.1〜1.0)。</summary>
+        public bool AdaptiveDarkBoost { get; set; }
+        public double AdaptiveDarkBoostStrength { get; set; } = 0.6;
         public int CompareViewMode { get; set; }
         public float SuperResolutionScale { get; set; } = 1f;
         public bool DnnSuperResolution { get; set; }

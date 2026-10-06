@@ -216,6 +216,27 @@ namespace VerticalPlayer.Media
             }
         }
 
+        private bool _adaptiveDarkBoost;
+        private double _adaptiveDarkBoostStrength = 0.6;
+        /// <summary>適応暗部補正（Adaptive Dark Boost）のON/OFF。フレーム自体の輝度から、トンネル内・夜間などの
+        /// 暗部だけを滑らかに持ち上げる。GPU描画パス(UseGpuPresenter)が有効な時のみ効果があり、
+        /// GPU後段処理のみのためライブ反映（再オープン不要）。位置情報には依存しない。</summary>
+        public bool AdaptiveDarkBoost
+        {
+            get => _adaptiveDarkBoost;
+            set { _adaptiveDarkBoost = value; ApplyAdaptiveDarkBoost(); }
+        }
+
+        /// <summary>適応暗部補正の強さ（0〜1、既定0.6）。AdaptiveDarkBoostがOFFの間は反映されない。</summary>
+        public double AdaptiveDarkBoostStrength
+        {
+            get => _adaptiveDarkBoostStrength;
+            set { _adaptiveDarkBoostStrength = Math.Clamp(value, 0.0, 1.0); ApplyAdaptiveDarkBoost(); }
+        }
+
+        private void ApplyAdaptiveDarkBoost() =>
+            _gpuPresenter.SetAdaptiveDarkBoost(_adaptiveDarkBoost ? (float)_adaptiveDarkBoostStrength : 0f);
+
         private float _superResolutionScale = 1f;
         /// <summary>超解像（段階5、Lanczos-3＋アンシャープ）の拡大倍率。1.0=無効。
         /// GPU描画パス(UseGpuPresenter)が有効な時のみ実際に効果がある。</summary>

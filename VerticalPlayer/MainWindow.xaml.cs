@@ -207,6 +207,7 @@ namespace VerticalPlayer
             _baseTitle = this.Title;
             DashcamView.CurrentFileChanged += DashcamView_CurrentFileChanged;
             DashcamView.PlayingFilesChanged += DashcamView_PlayingFilesChanged;
+            DashcamView.FrontVideoInfoChanged += () => { if (_isDashcamMode) UpdateVideoInfo(); };
 
             // ドラレコモード: 動画オープン/ズーム変更時にウィンドウをフィットさせる
             DashcamView.RequestWindowFit += DashcamView_RequestWindowFit;
@@ -419,6 +420,14 @@ namespace VerticalPlayer
             Player.Denoise = s.Denoise; // 再オープン方式のため、次に開くファイルから適用（起動直後は未オープンなのでこれで十分）
             DynamicContrastCheck.IsChecked = s.DynamicContrast;
             Player.DynamicContrast = s.DynamicContrast;
+
+            AdaptiveDarkBoostSlider.Value = Math.Clamp(s.AdaptiveDarkBoostStrength, 0.1, 1.0);
+            AdaptiveDarkBoostCheck.IsChecked = s.AdaptiveDarkBoost;
+            Player.AdaptiveDarkBoostStrength = AdaptiveDarkBoostSlider.Value;
+            Player.AdaptiveDarkBoost = s.AdaptiveDarkBoost;
+            DashcamView.AdaptiveDarkBoostStrength = AdaptiveDarkBoostSlider.Value;
+            DashcamView.AdaptiveDarkBoost = s.AdaptiveDarkBoost;
+
             CompareModeCombo.SelectedIndex = Math.Clamp(s.CompareViewMode, 0, 2);
             Player.CompareViewMode = s.CompareViewMode;
             SuperResolutionCombo.SelectedIndex = s.DnnSuperResolution
@@ -468,6 +477,10 @@ namespace VerticalPlayer
             DashcamView.TunnelEntryDetectionModeSetting =
                 Enum.TryParse<VerticalPlayer.Dashcam.MapInfoProvider.TunnelEntryDetectionMode>(s.DashcamTunnelEntryDetectionMode, out var restoredTunnelMode)
                     ? restoredTunnelMode : VerticalPlayer.Dashcam.MapInfoProvider.TunnelEntryDetectionMode.Legacy;
+            // 設定ファイルにGSensorEventThresholdGが無い場合は0のまま（既定値）で、0より大きい場合のみ復元する
+            if (s.DashcamGSensorEventThresholdG > 0)
+                DashcamView.GSensorEventThresholdG = s.DashcamGSensorEventThresholdG;
+
             _speedEstimateMaxGapSec = s.SpeedEstimateMaxGapSec;
             LogDirBox.Text = s.LogDirectory ?? "";
             AppLogPaths.ConfiguredDirectory = LogDirBox.Text;
@@ -560,6 +573,7 @@ namespace VerticalPlayer
                 DashcamFrameStepFrames = DashcamView.FrameStepFramesSetting,
                 FrameStepFrames = FrameStepFramesSetting, // ここを追加：メインモードのコマ送り量
                 DashcamTunnelEntryDetectionMode = DashcamView.TunnelEntryDetectionModeSetting.ToString(),
+                DashcamGSensorEventThresholdG = DashcamView.GSensorEventThresholdG,
                 CursorHideDelaySec = _cursorHideDelaySec,
                 EnableSleepPrevention = _enableSleepPrevention,
                 SpeedEstimateMaxGapSec = _speedEstimateMaxGapSec,
@@ -602,6 +616,10 @@ namespace VerticalPlayer
                 ZoomScaleY = PlayerScale.ScaleY,
                 Denoise = DenoiseCheck.IsChecked ?? false,
                 DynamicContrast = DynamicContrastCheck.IsChecked ?? false,
+
+                AdaptiveDarkBoost = AdaptiveDarkBoostCheck.IsChecked ?? false,
+                AdaptiveDarkBoostStrength = AdaptiveDarkBoostSlider.Value,
+
                 CompareViewMode = CompareModeCombo.SelectedIndex,
                 SuperResolutionScale = (SuperResolutionCombo.SelectedItem is ComboBoxItem srItem &&
                     float.TryParse((string)srItem.Tag, System.Globalization.CultureInfo.InvariantCulture, out float srScale))
@@ -1476,6 +1494,19 @@ namespace VerticalPlayer
             Player.DynamicContrast = DynamicContrastCheck.IsChecked ?? false;
             DashcamView.DynamicContrast = DynamicContrastCheck.IsChecked ?? false; // ドラレコモード側のFront/Rearにも同じ設定を反映する
         }
+        private void AdaptiveDarkBoost_Changed(object sender, RoutedEventArgs e)
+        {
+            bool on = AdaptiveDarkBoostCheck.IsChecked ?? false;
+            if (Player != null) Player.AdaptiveDarkBoost = on;
+            if (DashcamView != null) DashcamView.AdaptiveDarkBoost = on; // ドラレコ側のFront/Rearにも反映
+        }
+
+        private void AdaptiveDarkBoostSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (AdaptiveDarkBoostLabel != null) AdaptiveDarkBoostLabel.Text = $"{AdaptiveDarkBoostSlider.Value:0.00}";
+            if (Player != null) Player.AdaptiveDarkBoostStrength = AdaptiveDarkBoostSlider.Value;
+            if (DashcamView != null) DashcamView.AdaptiveDarkBoostStrength = AdaptiveDarkBoostSlider.Value;
+        }
 
         private async void SuperResolution_Changed(object sender, SelectionChangedEventArgs e)
         {
@@ -1800,6 +1831,26 @@ namespace VerticalPlayer
             if (VideoInfoStack == null) return;
             VideoInfoStack.Children.Clear();
 
+            // ここから追加：ドラレコモードでは、メインのPlayerではなくDashcamViewが再生中のFront動画の情報を表示する
+            string? infoPath;
+            int infoW, infoH;
+            TimeSpan? infoDur;
+            MediaInfoNative? info;
+            if (_isDashcamMode)
+            {
+                var d = DashcamView.GetFrontVideoInfo();
+                infoPath = d.Path; infoW = d.Width; infoH = d.Height; infoDur = d.Duration; info = d.MediaInfo;
+            }
+            else
+            {
+                infoPath = Player.Source?.LocalPath;
+                infoW = Player.NaturalVideoWidth;
+                infoH = Player.NaturalVideoHeight;
+                infoDur = Player.NaturalDuration.HasTimeSpan ? Player.NaturalDuration.TimeSpan : null;
+                info = _mediaInfo;
+            }
+            // ここまで
+
             void Row(string label, string val, bool accent = false)
             {
                 var g = new Grid { Margin = new Thickness(0, 3, 0, 3) };
@@ -1826,38 +1877,37 @@ namespace VerticalPlayer
                 Opacity = 0.3
             });
 
-            if (Player.Source == null) { Row("状態", "未読み込み"); return; }
+            if (infoPath == null) { Row("状態", "未読み込み"); return; }
 
             // ── 基本情報 ──
-            Row("ファイル名", Path.GetFileName(Player.Source.LocalPath));
+            Row("ファイル名", Path.GetFileName(infoPath));
             Row("解像度",
-                $"{Player.NaturalVideoWidth} × {Player.NaturalVideoHeight}" +
-                (Player.NaturalVideoWidth > 0 && Player.NaturalVideoHeight > 0
-                    ? $"  ({(Player.NaturalVideoWidth > Player.NaturalVideoHeight ? "横型" : "縦型")})" : ""));
-            if (Player.NaturalDuration.HasTimeSpan)
-                Row("長さ", Fmt(Player.NaturalDuration.TimeSpan));
-            var fi = new FileInfo(Player.Source.LocalPath);
+                $"{infoW} × {infoH}" +
+                (infoW > 0 && infoH > 0 ? $"  ({(infoW > infoH ? "横型" : "縦型")})" : ""));
+            if (infoDur.HasValue)
+                Row("長さ", Fmt(infoDur.Value));
+            var fi = new FileInfo(infoPath);
             if (fi.Exists) Row("ファイルサイズ", FormatBytes(fi.Length));
 
             // ── MediaInfo詳細 ──
-            if (_mediaInfo != null && _mediaInfo.Success)
+            if (info != null && info.Success)
             {
                 Sep();
-                double fps = _mediaInfo.VideoFrameRate;
+                double fps = info.VideoFrameRate;
                 Row("フレームレート", fps > 0 ? $"{fps:F3} fps" : "不明", accent: true);
-                Row("映像コーデック", _mediaInfo.VideoCodec ?? "不明", accent: true);
-                long vBr = _mediaInfo.VideoBitRate;
+                Row("映像コーデック", info.VideoCodec ?? "不明", accent: true);
+                long vBr = info.VideoBitRate;
                 Row("映像ビットレート", vBr > 0 ? $"{vBr / 1000:N0} kbps" : "不明");
                 string colorInfo = string.Join(" / ",
-                    new[] { _mediaInfo.VideoColorSpace ?? "", _mediaInfo.VideoChromaSubsampling ?? "",
-                            _mediaInfo.VideoBitDepth > 0 ? $"{_mediaInfo.VideoBitDepth}bit" : "" }
+                    new[] { info.VideoColorSpace ?? "", info.VideoChromaSubsampling ?? "",
+                            info.VideoBitDepth > 0 ? $"{info.VideoBitDepth}bit" : "" }
                     .Where(s => !string.IsNullOrEmpty(s)));
                 Row("カラー情報", string.IsNullOrEmpty(colorInfo) ? "不明" : colorInfo);
                 Sep();
-                Row("音声コーデック", _mediaInfo.AudioCodec ?? "不明");
-                int sr = _mediaInfo.AudioSampleRate;
+                Row("音声コーデック", info.AudioCodec ?? "不明");
+                int sr = info.AudioSampleRate;
                 Row("サンプルレート", sr > 0 ? $"{sr:N0} Hz" : "不明");
-                int ch = _mediaInfo.AudioChannelCount;
+                int ch = info.AudioChannelCount;
                 Row("音声チャンネル", ch switch
                 {
                     1 => "1ch (Mono)",
@@ -1866,11 +1916,11 @@ namespace VerticalPlayer
                     8 => "7.1ch",
                     _ => ch > 0 ? $"{ch}ch" : "不明"
                 });
-                long aBr = _mediaInfo.AudioBitRate;
+                long aBr = info.AudioBitRate;
                 Row("音声ビットレート", aBr > 0 ? $"{aBr / 1000:N0} kbps" : "不明");
                 Sep();
-                long totalBr = (fi.Exists && Player.NaturalDuration.HasTimeSpan && Player.NaturalDuration.TimeSpan.TotalSeconds > 0)
-                    ? (long)(fi.Length * 8 / Player.NaturalDuration.TimeSpan.TotalSeconds) : 0;
+                long totalBr = (fi.Exists && infoDur.HasValue && infoDur.Value.TotalSeconds > 0)
+                    ? (long)(fi.Length * 8 / infoDur.Value.TotalSeconds) : 0;
                 Row("総ビットレート", totalBr > 0 ? $"{totalBr / 1000:N0} kbps" : "不明");
             }
         }
@@ -2006,6 +2056,7 @@ namespace VerticalPlayer
             // 前回ドラレコから抜けたときのシーンがあれば続きから再生する（起動時レジュームと同じ処理）
             if (!string.IsNullOrEmpty(_switchDashGroup))
                 _ = DashcamView.TryResumeAsync(_switchDashDrive, _switchDashGroup, _switchDashPos, _switchDashEvent);
+            UpdateVideoInfo(); // 「情報」タブの動画情報をFront動画の内容へ切り替える
 
         }
 
@@ -2087,6 +2138,7 @@ namespace VerticalPlayer
             if (!string.IsNullOrEmpty(_switchResumePath) && File.Exists(_switchResumePath))
                 LoadVideo(_switchResumePath, _switchResumePos);
             _switchResumePath = null;
+            UpdateVideoInfo(); // 通常モードの動画情報へ戻す
 
             // ここから追加 DEBUGトレース
             Trace("[DIAG-Mode] ExitDashcamMode end");

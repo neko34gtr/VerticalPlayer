@@ -1,6 +1,7 @@
-<Window x:Class="VerticalPlayer.Dashcam.DashcamPairListWindow"
+﻿<Window x:Class="VerticalPlayer.Dashcam.DashcamPairListWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:VerticalPlayer.Dashcam"
         Title="情報一覧" Height="640" Width="1040"
         WindowStyle="None" AllowsTransparency="True" ResizeMode="CanResizeWithGrip"
         Background="{DynamicResource BgDeep}"
@@ -295,6 +296,11 @@
                             <Button Content="閉じる" Width="90" Style="{StaticResource SecondaryBtn}" Click="CloseButton_Click"/>
                         </StackPanel>
                     </Grid>
+                </TabItem>
+
+                <!-- イベント一覧（トンネル・SA/PA・急加減速・衝撃）。行をダブルクリック/Enterで該当シーンへジャンプ -->
+                <TabItem Header="イベント" Style="{StaticResource PanelTabItem}">
+                    <local:DashcamEventTabView x:Name="EventTab" IsVisibleChanged="EventTab_IsVisibleChanged"/>
                 </TabItem>
             </TabControl>
         </Grid>

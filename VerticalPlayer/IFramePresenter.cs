@@ -65,5 +65,13 @@
         /// WriteableBitmap経路では何もしない。</summary>
         void SetSharpAmount(float amount);
         void SetColorMatrixMode(int mode);
+
+        /// <summary>適応暗部補正（Adaptive Dark Boost）の強さ。0〜1、0で完全無効。
+        /// デコード済みフレーム自体の輝度（GPUで縮小→平均輝度/暗部比率を算出→EMAで平滑化）から、
+        /// トンネル内・夜間などの暗部だけを滑らかに持ち上げる（白飛びエリアは据え置き）。
+        /// 位置情報(NMEA)には依存しない。GPU完結のCompute Shaderでのみ実装されており、
+        /// WriteableBitmap（非GPU）経路では何もしない。
+        /// 既存の実装クラスにビルドエラーを出さないよう、既定実装(何もしない)を持たせている。</summary>
+        void SetAdaptiveDarkBoost(float strength) { }
     }
 }

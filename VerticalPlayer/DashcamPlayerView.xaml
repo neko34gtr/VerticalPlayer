@@ -183,6 +183,22 @@
                                     </ComboBox>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="Gマーカー閾値" Style="{StaticResource PopoverLabel}"/>
+                                    <ComboBox x:Name="GSensorThresholdCombo" Width="110" Style="{StaticResource ModernCombo}"
+                            SelectionChanged="GSensorThresholdCombo_Changed" SelectedIndex="3"
+                            ToolTip="シークバーに出すGセンサー急変マーカーの閾値。小さいほど細かい揺れまで拾い、大きいほど強い衝撃・急ブレーキだけ表示します">
+                                        <ComboBoxItem Content="0.20G" Tag="0.20"/>
+                                        <ComboBoxItem Content="0.25G" Tag="0.25"/>
+                                        <ComboBoxItem Content="0.30G" Tag="0.30"/>
+                                        <ComboBoxItem Content="0.35G" Tag="0.35"/>
+                                        <ComboBoxItem Content="0.40G" Tag="0.40"/>
+                                        <ComboBoxItem Content="0.50G" Tag="0.50"/>
+                                        <ComboBoxItem Content="0.60G" Tag="0.60"/>
+                                        <ComboBoxItem Content="0.80G" Tag="0.80"/>
+                                        <ComboBoxItem Content="1.00G" Tag="1.00"/>
+                                    </ComboBox>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                                     <TextBlock Text="AI（超解像）" Style="{StaticResource PopoverLabel}"/>
                                     <CheckBox x:Name="DnnEnabledCheck" Content="有効" Style="{StaticResource ModernCheck}"
                           Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
